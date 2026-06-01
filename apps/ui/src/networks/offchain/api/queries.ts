@@ -174,6 +174,14 @@ const PROPOSAL_FRAGMENT = gql`
     updated
     votes
     privacy
+    te_config
+    te_mpk
+    te_committee_pks
+    te_threshold_t
+    te_threshold_n
+    te_keyper_urls
+    te_keyper_addresses
+    te_aggregate
     plugins
     flagged
     flagCode
