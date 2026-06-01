@@ -9,9 +9,13 @@ import { createApi } from './api';
 import * as constants from './constants';
 import { EVM_CONNECTORS, STARKNET_CONNECTORS } from '../common/constants';
 
+const LOCAL_HUB_URL = (import.meta as any).env?.VITE_LOCAL_HUB_URL as
+  | string
+  | undefined;
+
 const HUB_URLS: Partial<Record<NetworkID, string | undefined>> = {
   s: 'https://hub.snapshot.org/graphql',
-  's-tn': 'https://testnet.hub.snapshot.org/graphql'
+  's-tn': LOCAL_HUB_URL || 'https://testnet.hub.snapshot.org/graphql'
 };
 export function getOffchainHubUrl(
   networkId: NetworkID

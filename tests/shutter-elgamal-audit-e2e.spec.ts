@@ -6,34 +6,29 @@ import { fileURLToPath } from 'node:url';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 /**
- * Real end-to-end audit: drive the production-shape `verifyTally` helper
- * inside a Chromium page against a locally orchestrated hub + 3 keypers.
+ * Real end-to-end audit test: drives the actual proposal page UI in
+ * Chromium against a locally orchestrated hub + 3 keypers.
  *
  * Pre-conditions (set up by `python scripts/e2e_orchestrator.py`):
- *   - MySQL running on :3306 with the snapshot_hub schema loaded.
- *   - Hub running on :3000 with a `shutter-elgamal` proposal seeded.
- *   - 3 keypers ran DKG, encrypted a deterministic 2-candidate ballot
- *     [Approve=1, Reject=0] under the joint mpk, and published 6 DLEQ
- *     decryption shares to the hub.
+ *   - MySQL on :3306 with the snapshot_hub schema loaded.
+ *   - Hub on :3000 with a closed `shutter-elgamal` proposal seeded
+ *     in space `e2e-private.eth`, scores=[1, 0].
+ *   - 3 keypers ran DKG, encrypted ballot [Approve=1, Reject=0] under
+ *     the joint mpk, and published 6 DLEQ decryption shares.
  *   - The proposal id was written to `.e2e-proposal-id`.
  *
- * The spec navigates to the UI dev server, dynamically imports the
- * shipped `teVerify.ts` module, fetches the audit payload from the
- * local hub, runs `verifyTally`, and asserts the recovered tallies
- * exactly equal [1, 0].
- *
- * If any link in the chain (BLST WASM load, transcript binding, DLEQ
- * verify, BSGS) is broken in the UI bundle, this spec fails loudly.
+ * UI must run with VITE_LOCAL_HUB_URL=http://localhost:3000/graphql.
  */
 
 const PROPOSAL_ID = readFileSync(
   resolve(__dirname, '..', '..', '.e2e-proposal-id'),
   'ascii'
 ).trim();
-const HUB_API = 'http://localhost:3000/api';
+const SPACE = 's-tn:e2e-private.eth';
+const URL_PATH = `/#/${SPACE}/proposal/${PROPOSAL_ID}`;
 
-test.describe('shutter-elgamal audit e2e', () => {
-  test('verifyTally recovers [1, 0] from local hub + keypers', async ({
+test.describe('shutter-elgamal proposal page e2e', () => {
+  test('verify-tally panel recovers [1, 0] from local hub + keypers', async ({
     page
   }) => {
     test.setTimeout(120_000);
@@ -44,53 +39,33 @@ test.describe('shutter-elgamal audit e2e', () => {
       if (msg.type() === 'error') errors.push(`console.error: ${msg.text()}`);
     });
 
-    const resp = await page.goto('/');
-    expect(resp?.status()).toBeLessThan(400);
-    await page.waitForLoadState('networkidle');
+    await page.goto(URL_PATH);
 
-    // Eagerly load teBallot so the BLST WASM curves init runs once.
-    // verifyTally awaits the same `ensureCurvesInit` internally, but
-    // pulling it here surfaces any module-level errors more cleanly.
-    const result = await page.evaluate(
-      async ({ proposalId, hubApi }) => {
-        const teVerify = await import('/src/helpers/teVerify.ts');
-        const payload = await teVerify.fetchAuditPayload(hubApi, proposalId);
-        // [1, 0] is the published tally for the synthetic ballot the
-        // orchestrator encrypts. Passing it bounds BSGS to a tiny
-        // table (sumPublished+1 = 2) AND lets `matchesPublished`
-        // assert end-to-end correctness in one go.
-        const verified = await teVerify.verifyTally(
-          proposalId,
-          payload,
-          [1, 0]
-        );
-        return {
-          tallies: verified.tallies.map(b => b.toString()),
-          shareCount: verified.shareCount,
-          thresholdMet: verified.thresholdMet,
-          matchesPublished: verified.matchesPublished,
-          aggregateNumCandidates: payload.aggregate.num_candidates,
-          shareSampleKeyperIndex: payload.shares[0]?.keyper_index ?? null
-        };
-      },
-      { proposalId: PROPOSAL_ID, hubApi: HUB_API }
-    );
+    await expect(
+      page.getByRole('heading', { name: 'E2E Private Proposal' })
+    ).toBeVisible({ timeout: 30_000 });
 
-    // The orchestrator encrypts vote=[1, 0]; the audit must recover that
-    // exactly. Any crypto regression (transcript drift, DLEQ format,
-    // ciphertext encoding, Lagrange combination) shows up here.
-    expect(result.tallies).toEqual(['1', '0']);
-    expect(result.shareCount).toBe(6);
-    expect(result.thresholdMet).toBe(true);
-    expect(result.matchesPublished).toBe(true);
-    expect(result.aggregateNumCandidates).toBe(2);
-    expect(result.shareSampleKeyperIndex).toBeGreaterThanOrEqual(1);
+    await expect(page.getByText('Permanent private tally')).toBeVisible({
+      timeout: 10_000
+    });
 
-    // No JS errors from the modules we touched in Phases 1–8.
+    const verifyBtn = page.getByRole('button', { name: 'Verify tally' });
+    await expect(verifyBtn).toBeVisible();
+    await verifyBtn.click();
+
+    await expect(
+      page.getByText('Tally matches published scores.')
+    ).toBeVisible({ timeout: 60_000 });
+
     const ignored = (e: string) =>
-      e.includes('GraphQL') ||
       e.includes('Failed to load resource') ||
-      e.includes('./gql');
+      e.includes('favicon') ||
+      e.includes('walletconnect') ||
+      e.includes('coingecko') ||
+      e.includes('snapshot.4everland') ||
+      e.includes('safe.global') ||
+      e.includes('snapshot.box') ||
+      e.includes('apollo');
     expect(errors.filter(e => !ignored(e))).toEqual([]);
   });
 });
