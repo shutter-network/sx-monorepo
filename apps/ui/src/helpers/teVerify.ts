@@ -99,10 +99,10 @@ export async function verifyTally(
     );
   }
 
-  const ctSums: Ciphertext[] = aggregate.ciphertexts.map(({ c1, c2 }) => [
-    arrayify(c1),
-    arrayify(c2)
-  ]);
+  const ctSums: Ciphertext[] = aggregate.ciphertexts.map(({ c1, c2 }) => ({
+    c1: G2Point.fromBytes(arrayify(c1)),
+    c2: G2Point.fromBytes(arrayify(c2))
+  }));
 
   const committeePKs = te_committee_pks.map(hex => G2Point.fromBytes(arrayify(hex)));
 

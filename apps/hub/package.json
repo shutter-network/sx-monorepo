@@ -17,6 +17,8 @@
     "test:e2e": "PORT=3030 start-server-and-test 'bun run start:test' http://localhost:3030 'dotenv -e test/.env.test jest --runInBand --collectCoverage=false test/e2e/'"
   },
   "dependencies": {
+    "@ethersproject/keccak256": "^5.7.0",
+    "@ethersproject/strings": "^5.7.0",
     "@ethersproject/wallet": "^5.7.0",
     "@graphql-tools/schema": "^10.0.0",
     "@snapshot-labs/keycard": "^0.5.1",

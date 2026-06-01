@@ -256,4 +256,129 @@ export async function updateProposalAndVotes(
  *   1. Recomputes the vp-weighted homomorphic aggregate from the verified
  *      ballots in the votes table and persists it as ``proposals.te_aggregate``.
  *      Hub serves this JSON to keypers via ``GET /api/proposal/:id/te_aggregate``.
- *   2. Pings every keyper URL so they re-pull the aggregate and submit\n *      shares (no-op for keypers that already submitted: hub side is\n *      ``INSERT IGNORE`` on PK ``(proposal, keyper, candidate)``).\n *   3. Reads back the share rows; if any candidate still has fewer than\n *      ``t+1`` valid shares, returns ``false`` and leaves ``scores_state``\n *      pending — the next scheduler tick will retry.\n *   4. Otherwise calls ``recoverTally`` (Lagrange + BSGS), writes the\n *      integer per-candidate totals into ``proposals.scores`` and marks\n *      the proposal final.\n *\n * ``scores_by_strategy`` is intentionally empty: per-voter strategy\n * breakdown leaks individual votes through homomorphic isolation, which\n * is the exact privacy property this mode preserves.\n */\nasync function runShutterElgamalTally(proposal: any): Promise<boolean> {\n  if (!proposal.te_config) {\n    log.warn(`[te-tally] ${proposal.id} missing te_config`);\n    return false;\n  }\n  const numCandidates: number = proposal.te_config.numCandidates;\n  const threshold: number = proposal.te_threshold_t;\n  const keyperUrls: string[] = proposal.te_keyper_urls || [];\n  const committeePks: string[] = proposal.te_committee_pks || [];\n  if (!proposal.te_mpk || keyperUrls.length === 0 || committeePks.length === 0) {\n    log.warn(`[te-tally] ${proposal.id} DKG not finalised`);\n    return false;\n  }\n\n  // Pull every persisted ballot. Each row in ``votes.choice`` has been\n  // ``verifyBallot``-validated at write time (see helpers/te.ts), so we\n  // do not re-verify here; the homomorphic sum is over trusted inputs.\n  const rawVotes = await db.queryAsync(\n    'SELECT choice, vp FROM votes WHERE proposal = ? AND cb != ?',\n    [proposal.id, CB.PENDING_DELETE]\n  );\n  if (rawVotes.length === 0) {\n    // No votes: write empty tally and finalise. recoverTally would throw\n    // on zero candidates of zero ballots, so short-circuit.\n    const zeroScores = new Array(numCandidates).fill(0);\n    await updateProposalScores(\n      proposal,\n      {\n        scores_state: 'final',\n        scores: zeroScores,\n        scores_by_strategy: [],\n        scores_total: 0\n      },\n      0\n    );\n    return true;\n  }\n\n  let aggregate;\n  try {\n    aggregate = aggregateBallots(numCandidates, rawVotes);\n  } catch (err: any) {\n    log.warn(`[te-tally] ${proposal.id} aggregate failed: ${err.message}`);\n    return false;\n  }\n  const aggregateJson = aggregateToJson(proposal.id, aggregate);\n  await db.queryAsync(\n    'UPDATE proposals SET te_aggregate = ? WHERE id = ? LIMIT 1',\n    [JSON.stringify(aggregateJson), proposal.id]\n  );\n\n  // Nudge keypers; they may already be done.\n  await triggerKeypers(proposal.id, keyperUrls);\n\n  // Read shares. Each (keyper, candidate) row is one PartialDecryption.\n  const shareRows = await db.queryAsync(\n    'SELECT keyper_index, candidate, sigma, proof_e, proof_z FROM te_decryption_shares WHERE proposal_id = ?',\n    [proposal.id]\n  );\n  const { shares, warnings } = shareRowsToShares(shareRows, numCandidates);\n  for (const w of warnings) log.warn(`[te-tally] ${proposal.id} ${w}`);\n\n  const need = threshold + 1;\n  for (let j = 0; j < numCandidates; j++) {\n    if (shares[j].length < need) {\n      log.info(\n        `[te-tally] ${proposal.id} candidate ${j} has ${shares[j].length}/${need} shares; waiting`\n      );\n      return false;\n    }\n  }\n\n  // Upper bound for BSGS table sizing. Each ballot contributes vp · 1 per\n  // chosen candidate (Variant A exact B=1), so the maximum tally is the\n  // sum of all voting power. Add a safety pad of 1 for empty-vote edge.\n  let totalVp = 0n;\n  for (const v of rawVotes) totalVp += BigInt(Math.round(v.vp));\n  const upperBound = totalVp > 0n ? totalVp : 1n;\n\n  let scores: bigint[];\n  try {\n    const committeePKs = decodeCommitteePks(committeePks);\n    scores = await recoverTeTally(\n      proposal.id,\n      aggregate,\n      shares,\n      threshold,\n      committeePKs,\n      upperBound\n    );\n  } catch (err: any) {\n    log.warn(`[te-tally] ${proposal.id} recover failed: ${err.message}`);\n    return false;\n  }\n\n  const numericScores = scores.map(s => Number(s));\n  const total = numericScores.reduce((a, b) => a + b, 0);\n  await updateProposalScores(\n    proposal,\n    {\n      scores_state: 'final',\n      scores: numericScores,\n      scores_by_strategy: [],\n      scores_total: total\n    },\n    rawVotes.length\n  );\n  log.info(\n    `[te-tally] ${proposal.id} finalised; scores=${JSON.stringify(numericScores)}`\n  );\n  return true;\n}\n
+ *   2. Pings every keyper URL so they re-pull the aggregate and submit
+ *      shares (no-op for keypers that already submitted: hub side is
+ *      ``INSERT IGNORE`` on PK ``(proposal, keyper, candidate)``).
+ *   3. Reads back the share rows; if any candidate still has fewer than
+ *      ``t+1`` valid shares, returns ``false`` and leaves ``scores_state``
+ *      pending — the next scheduler tick will retry.
+ *   4. Otherwise calls ``recoverTally`` (Lagrange + BSGS), writes the
+ *      integer per-candidate totals into ``proposals.scores`` and marks
+ *      the proposal final.
+ *
+ * ``scores_by_strategy`` is intentionally empty: per-voter strategy
+ * breakdown leaks individual votes through homomorphic isolation, which
+ * is the exact privacy property this mode preserves.
+ */
+async function runShutterElgamalTally(proposal: any): Promise<boolean> {
+  if (!proposal.te_config) {
+    log.warn(`[te-tally] ${proposal.id} missing te_config`);
+    return false;
+  }
+  const numCandidates: number = proposal.te_config.numCandidates;
+  const threshold: number = proposal.te_threshold_t;
+  const keyperUrls: string[] = proposal.te_keyper_urls || [];
+  const committeePks: string[] = proposal.te_committee_pks || [];
+  if (!proposal.te_mpk || keyperUrls.length === 0 || committeePks.length === 0) {
+    log.warn(`[te-tally] ${proposal.id} DKG not finalised`);
+    return false;
+  }
+
+  // Pull every persisted ballot. Each row in ``votes.choice`` has been
+  // ``verifyBallot``-validated at write time (see helpers/te.ts), so we
+  // do not re-verify here; the homomorphic sum is over trusted inputs.
+  const rawVotes = await db.queryAsync(
+    'SELECT choice, vp FROM votes WHERE proposal = ? AND cb != ?',
+    [proposal.id, CB.PENDING_DELETE]
+  );
+  if (rawVotes.length === 0) {
+    // No votes: write empty tally and finalise. recoverTally would throw
+    // on zero candidates of zero ballots, so short-circuit.
+    const zeroScores = new Array(numCandidates).fill(0);
+    await updateProposalScores(
+      proposal,
+      {
+        scores_state: 'final',
+        scores: zeroScores,
+        scores_by_strategy: [],
+        scores_total: 0
+      },
+      0
+    );
+    return true;
+  }
+
+  let aggregate;
+  try {
+    aggregate = aggregateBallots(numCandidates, rawVotes);
+  } catch (err: any) {
+    log.warn(`[te-tally] ${proposal.id} aggregate failed: ${err.message}`);
+    return false;
+  }
+  const aggregateJson = aggregateToJson(proposal.id, aggregate);
+  await db.queryAsync(
+    'UPDATE proposals SET te_aggregate = ? WHERE id = ? LIMIT 1',
+    [JSON.stringify(aggregateJson), proposal.id]
+  );
+
+  // Nudge keypers; they may already be done.
+  await triggerKeypers(proposal.id, keyperUrls);
+
+  // Read shares. Each (keyper, candidate) row is one PartialDecryption.
+  const shareRows = await db.queryAsync(
+    'SELECT keyper_index, candidate, sigma, proof_e, proof_z FROM te_decryption_shares WHERE proposal_id = ?',
+    [proposal.id]
+  );
+  const { shares, warnings } = shareRowsToShares(shareRows, numCandidates);
+  for (const w of warnings) log.warn(`[te-tally] ${proposal.id} ${w}`);
+
+  const need = threshold + 1;
+  for (let j = 0; j < numCandidates; j++) {
+    if (shares[j].length < need) {
+      log.info(
+        `[te-tally] ${proposal.id} candidate ${j} has ${shares[j].length}/${need} shares; waiting`
+      );
+      return false;
+    }
+  }
+
+  // Upper bound for BSGS table sizing. Each ballot contributes vp · 1 per
+  // chosen candidate (Variant A exact B=1), so the maximum tally is the
+  // sum of all voting power. Add a safety pad of 1 for empty-vote edge.
+  let totalVp = 0n;
+  for (const v of rawVotes) totalVp += BigInt(Math.round(v.vp));
+  const upperBound = totalVp > 0n ? totalVp : 1n;
+
+  let scores: bigint[];
+  try {
+    const committeePKs = decodeCommitteePks(committeePks);
+    scores = await recoverTeTally(
+      proposal.id,
+      aggregate,
+      shares,
+      threshold,
+      committeePKs,
+      upperBound
+    );
+  } catch (err: any) {
+    log.warn(`[te-tally] ${proposal.id} recover failed: ${err.message}`);
+    return false;
+  }
+
+  const numericScores = scores.map(s => Number(s));
+  const total = numericScores.reduce((a, b) => a + b, 0);
+  await updateProposalScores(
+    proposal,
+    {
+      scores_state: 'final',
+      scores: numericScores,
+      scores_by_strategy: [],
+      scores_total: total
+    },
+    rawVotes.length
+  );
+  log.info(
+    `[te-tally] ${proposal.id} finalised; scores=${JSON.stringify(numericScores)}`
+  );
+  return true;
+}

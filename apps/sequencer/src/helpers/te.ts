@@ -195,7 +195,7 @@ export function aggregateBallots(
     if (w === 0n) continue;
 
     for (let j = 0; j < numCandidates; j++) {
-      const weighted = w === 1n ? cts[j] : scalarMulCt(cts[j], w);
+      const weighted = w === 1n ? cts[j] : scalarMulCt(w, cts[j]);
       acc[j] = acc[j] === null ? weighted : addCt(acc[j]!, weighted);
     }
   }

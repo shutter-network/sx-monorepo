@@ -28,7 +28,7 @@ let curvesReady: Promise<void> | null = null;
 /** Idempotent BLST-WASM init; safe to call from page-load and from submit. */
 export function ensureCurvesInit(): Promise<void> {
   if (!curvesReady) curvesReady = initCurves();
-  return curvesReady;
+  return curvesReady as Promise<void>;
 }
 
 export interface TeBallotEnvelope {
