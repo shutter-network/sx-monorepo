@@ -4,6 +4,8 @@
 node_modules
 .pnp
 .pnp.js
+# this monorepo uses bun (bun.lock); keep stray npm lockfiles out
+package-lock.json
 
 # testing
 coverage

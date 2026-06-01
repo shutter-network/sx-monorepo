@@ -20,6 +20,7 @@
     "lint": "TURBO_TELEMETRY_DISABLED=1 turbo run lint lint:scripts",
     "lint:fix": "TURBO_TELEMETRY_DISABLED=1 turbo run lint:fix && bun run lint:scripts --fix",
     "lint:scripts": "eslint scripts/",
+    "parity": "node scripts/parity-gate.mjs",
     "typecheck": "TURBO_TELEMETRY_DISABLED=1 turbo run typecheck",
     "release": "bun run build && changeset publish"
   },
