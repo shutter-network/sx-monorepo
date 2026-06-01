@@ -185,6 +185,11 @@ export const PRIVACY_TYPES_INFO: Record<
     description:
       'Choices are encrypted and only visible once the voting period is over.'
   },
+  'shutter-elgamal': {
+    label: 'Permanent private voting',
+    description:
+      'Choices are encrypted and never decrypted: only the aggregate tally is ever revealed. Powered by threshold-ElGamal homomorphic tallying.'
+  },
   any: {
     label: 'Any',
     description: 'Author can choose between no privacy and shielded voting.'
