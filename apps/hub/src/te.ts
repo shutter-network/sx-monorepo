@@ -254,6 +254,50 @@ router.get('/proposal/:id/te_aggregate', async (req, res) => {
   }
 });
 
+// Phase 8 — public read endpoint for the verify-tally button. Returns
+// every committed decryption share plus the public DKG outputs the
+// auditor needs to call SDK `recoverTally`. No authentication; the
+// shares and their DLEQ proofs are designed to be public.
+router.get('/proposal/:id/te_decryption_shares', async (req, res) => {
+  const proposalId = req.params.id;
+  try {
+    const proposal = await loadProposal(proposalId);
+    if (!proposal) return sendError(res, 'proposal_not_found', 404);
+    if (proposal.privacy !== 'shutter-elgamal') {
+      return sendError(res, 'proposal_not_private', 400);
+    }
+    if (!proposal.te_mpk) {
+      return sendError(res, 'dkg_not_finalized', 400);
+    }
+    const aggregate = parseJsonField<any>(proposal.te_aggregate, null);
+    const rows = await (db as any).queryAsync(
+      'SELECT keyper_index, candidate, HEX(sigma) AS sigma_hex, HEX(proof_e) AS proof_e_hex, HEX(proof_z) AS proof_z_hex FROM te_decryption_shares WHERE proposal_id = ? ORDER BY candidate, keyper_index',
+      [proposalId]
+    );
+    return res.json({
+      te_mpk: '0x' + Buffer.from(proposal.te_mpk).toString('hex'),
+      te_committee_pks: parseJsonField<any>(proposal.te_committee_pks, []),
+      te_threshold_t: Number(proposal.te_threshold_t),
+      te_threshold_n: Number(proposal.te_threshold_n),
+      te_keyper_addresses: parseJsonField<any>(
+        proposal.te_keyper_addresses,
+        []
+      ),
+      aggregate,
+      shares: (rows as any[]).map(r => ({
+        keyper_index: Number(r.keyper_index),
+        candidate: Number(r.candidate),
+        sigma: '0x' + r.sigma_hex.toLowerCase(),
+        proof_e: '0x' + r.proof_e_hex.toLowerCase(),
+        proof_z: '0x' + r.proof_z_hex.toLowerCase()
+      }))
+    });
+  } catch (err: any) {
+    capture(err);
+    return sendError(res, 'server_error', 500);
+  }
+});
+
 router.post('/proposal/:id/te_decryption_share', async (req, res) => {
   const proposalId = req.params.id;
   try {

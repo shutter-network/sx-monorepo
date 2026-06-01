@@ -9,6 +9,7 @@ import {
 } from '@/helpers/quorum';
 import { _n, _p, _vp } from '@/helpers/utils';
 import { getNetwork, offchainNetworks } from '@/networks';
+import { getOffchainHubApiBase } from '@/networks/offchain';
 import { PROPOSALS_KEYS } from '@/queries/proposals';
 import { Proposal as ProposalType } from '@/types';
 
@@ -293,4 +294,14 @@ onMounted(() => {
     <IC-Shutter class="w-[80px]" />
     <IH-arrow-sm-right class="-rotate-45" />
   </AppLink>
+  <TeVerifyTallyPanel
+    v-if="
+      proposal.privacy === 'shutter-elgamal' &&
+      proposal.completed &&
+      withDetails &&
+      offchainNetworks.includes(proposal.network)
+    "
+    :proposal="proposal"
+    :api-base-url="getOffchainHubApiBase(proposal.network)"
+  />
 </template>
