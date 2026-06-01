@@ -567,6 +567,14 @@ def create_keyper_app(keyper_id, *, hub_config=None, signing_key=None):
         except (KeyError, ValueError, TypeError) as e:
             return jsonify({"error": f"Bad aggregate shape: {e}"}), 502
 
+        # Snapshot proposal ids are 0x-prefixed hex (32 bytes). The SDK's
+        # decrypt transcript binds 32 raw bytes; converting via int(...,16)
+        # yields the same bytes that arrayify(proposalId) gives the JS side.
+        if isinstance(election_id, str) and election_id.startswith("0x"):
+            election_id = int(election_id, 16)
+        elif isinstance(election_id, str):
+            election_id = int(election_id)
+
         if len(ciphertexts) != num_candidates:
             return jsonify({"error": f"Aggregate length {len(ciphertexts)} != numCandidates {num_candidates}"}), 502
 

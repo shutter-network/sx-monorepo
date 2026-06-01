@@ -24,10 +24,17 @@ import { keccak256 } from '@ethersproject/keccak256';
 import { arrayify } from '@ethersproject/bytes';
 import {
   G2Point,
+  Transcript,
+  addCt,
+  decodeDLEQ,
   initCurves,
+  recoverTally,
+  scalarMulCt,
   verifyBallot,
   type BallotInputs,
   type BallotVerifyParams,
+  type Ciphertext,
+  type PartialDecryption,
   type VerifyResult
 } from '@snapshot-labs/private-vote-sdk';
 
@@ -123,7 +130,7 @@ export async function verifyTeBallot(
       wrAttestation: hexToBytes(envelope.wrAttestation || '0x', 'wrAttestation')
     };
     await ensureCurvesInit();
-    mpk = G2Point.fromCompressed(hexToBytes(proposal.te_mpk, 'te_mpk'));
+    mpk = G2Point.fromBytes(hexToBytes(proposal.te_mpk, 'te_mpk'));
   } catch (err: any) {
     return { ok: false, reason: `bad_envelope: ${err?.message || err}` };
   }
@@ -132,4 +139,212 @@ export async function verifyTeBallot(
   // the SDK-level WR verifier is a constant ``() => true``. See module
   // docstring for the full auth-boundary argument.
   return verifyBallot(inputs, proposal.te_config, mpk, () => true);
+}
+
+// ---------- Phase 4: tally aggregation + recovery ----------
+
+const DECRYPT_TRANSCRIPT_LABEL = 'SHUTTER-VOTE-DECRYPT-v1';
+
+function u16BE(n: number): Uint8Array {
+  const out = new Uint8Array(2);
+  out[0] = (n >>> 8) & 0xff;
+  out[1] = n & 0xff;
+  return out;
+}
+
+/**
+ * Decode the per-candidate ciphertexts out of a stored ballot envelope.
+ * The envelope shape is the same one ``verifyTeBallot`` accepts; we trust
+ * it here because tally only runs over already-verified rows.
+ */
+export function envelopeCiphertexts(choiceJsonString: string): Ciphertext[] {
+  const env = JSON.parse(choiceJsonString) as TeBallotEnvelope;
+  return (env.ciphertexts || []).map((c, i) => ({
+    c1: G2Point.fromBytes(hexToBytes(c.c1, `ciphertexts[${i}].c1`)),
+    c2: G2Point.fromBytes(hexToBytes(c.c2, `ciphertexts[${i}].c2`))
+  }));
+}
+
+/**
+ * Voting-power-weighted homomorphic sum across all submitted ballots,
+ * one ciphertext per candidate. ``vp`` is taken as a non-negative
+ * integer; fractional vp would break the integer-tally semantics that
+ * BSGS recovers (Variant A only emits {0,1} per candidate, but vp
+ * scales each ballot before the sum).
+ */
+export function aggregateBallots(
+  numCandidates: number,
+  votes: ReadonlyArray<{ choice: any; vp: number }>
+): Ciphertext[] {
+  if (votes.length === 0) {
+    throw new Error('aggregateBallots: no votes to aggregate');
+  }
+
+  const acc: (Ciphertext | null)[] = new Array(numCandidates).fill(null);
+  for (const vote of votes) {
+    const choiceJson =
+      typeof vote.choice === 'string' ? vote.choice : JSON.stringify(vote.choice);
+    const cts = envelopeCiphertexts(choiceJson);
+    if (cts.length !== numCandidates) {
+      throw new Error(
+        `aggregateBallots: ciphertext count ${cts.length} != ${numCandidates}`
+      );
+    }
+    const w = BigInt(Math.round(vote.vp));
+    if (w < 0n) throw new Error('aggregateBallots: negative vp');
+    if (w === 0n) continue;
+
+    for (let j = 0; j < numCandidates; j++) {
+      const weighted = w === 1n ? cts[j] : scalarMulCt(cts[j], w);
+      acc[j] = acc[j] === null ? weighted : addCt(acc[j]!, weighted);
+    }
+  }
+
+  for (let j = 0; j < numCandidates; j++) {
+    if (acc[j] === null) {
+      throw new Error(`aggregateBallots: no positive-weight votes for candidate ${j}`);
+    }
+  }
+  return acc as Ciphertext[];
+}
+
+/** Aggregate JSON shape persisted in ``proposals.te_aggregate``. */
+export interface TeAggregateJson {
+  election_id: string; // 0x-hex (proposal id)
+  num_candidates: number;
+  ciphertexts: Array<{ c1: string; c2: string }>;
+}
+
+export function aggregateToJson(
+  proposalId: string,
+  ciphertexts: Ciphertext[]
+): TeAggregateJson {
+  return {
+    election_id: proposalId,
+    num_candidates: ciphertexts.length,
+    ciphertexts: ciphertexts.map(ct => ({
+      c1: '0x' + Buffer.from(ct.c1.toBytes()).toString('hex'),
+      c2: '0x' + Buffer.from(ct.c2.toBytes()).toString('hex')
+    }))
+  };
+}
+
+/**
+ * Recover per-candidate integer tallies from verified shares.
+ *
+ * ``shares`` is indexed ``[candidateIndex][shareIndex]``. Each share
+ * carries its own keyperIndex; ``recoverTally`` Lagrange-interpolates
+ * any t+1 of them. The transcript factory mirrors the Python keyper's
+ * ``make_onchain_decrypt_transcript`` exactly: label
+ * ``SHUTTER-VOTE-DECRYPT-v1``, then ``electionId`` (32 bytes from the
+ * proposal id), then ``candidate`` (u16 BE).
+ */
+export async function recoverTeTally(
+  proposalId: string,
+  ctSums: Ciphertext[],
+  shares: PartialDecryption[][],
+  threshold: number,
+  committeePKs: G2Point[],
+  upperBound: bigint
+): Promise<bigint[]> {
+  await ensureCurvesInit();
+  const electionIdBytes = arrayify(proposalId);
+  return recoverTally({
+    ctSums,
+    sharesPerCandidate: shares,
+    threshold,
+    committeePKs,
+    upperBound,
+    transcriptFor: (j: number) => {
+      const t = new Transcript(DECRYPT_TRANSCRIPT_LABEL);
+      t.append('electionId', electionIdBytes);
+      t.append('candidate', u16BE(j));
+      return t;
+    }
+  });
+}
+
+/**
+ * Build a ``PartialDecryption[][]`` (per-candidate) from raw DB rows of
+ * ``te_decryption_shares``. Each row supplies its sigma + (proof_e, proof_z)
+ * as raw bytes; we wrap them into the SDK's in-memory ``DLEQProof`` shape
+ * via ``decodeDLEQ`` of the concatenated 64 bytes.
+ *
+ * ``ctSums.length`` defines the candidate axis; rows whose ``candidate``
+ * is out of range are dropped (with a returned warning) rather than
+ * letting the tally fail mid-recover.
+ */
+export function shareRowsToShares(
+  rows: ReadonlyArray<{
+    keyper_index: number;
+    candidate: number;
+    sigma: Buffer | Uint8Array;
+    proof_e: Buffer | Uint8Array;
+    proof_z: Buffer | Uint8Array;
+  }>,
+  numCandidates: number
+): { shares: PartialDecryption[][]; warnings: string[] } {
+  const warnings: string[] = [];
+  const shares: PartialDecryption[][] = Array.from(
+    { length: numCandidates },
+    () => []
+  );
+  for (const r of rows) {
+    if (r.candidate < 0 || r.candidate >= numCandidates) {
+      warnings.push(
+        `share keyper=${r.keyper_index} candidate=${r.candidate} out of range`
+      );
+      continue;
+    }
+    const sigma = G2Point.fromBytes(new Uint8Array(r.sigma));
+    const proofBytes = new Uint8Array(64);
+    proofBytes.set(new Uint8Array(r.proof_e), 0);
+    proofBytes.set(new Uint8Array(r.proof_z), 32);
+    const proof = decodeDLEQ(proofBytes);
+    shares[r.candidate].push({
+      keyperIndex: r.keyper_index,
+      sigma,
+      proof
+    });
+  }
+  return { shares, warnings };
+}
+
+/**
+ * Fire-and-forget keyper trigger. POSTs the proposal id to each keyper's
+ * ``/decrypt/publish_on_chain`` endpoint; the keyper pulls the aggregate
+ * from the hub and POSTs back its share. We do not await the responses
+ * because the hub-side share row is the success signal we actually care
+ * about; this just nudges the keypers to run.
+ */
+export async function triggerKeypers(
+  proposalId: string,
+  keyperUrls: string[]
+): Promise<void> {
+  await Promise.all(
+    keyperUrls.map(async url => {
+      const target = url.replace(/\/$/, '') + '/decrypt/publish_on_chain';
+      try {
+        await fetch(target, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ proposal_id: proposalId })
+        });
+      } catch {
+        // Swallow: the next tally tick re-triggers, and missing shares
+        // remain visible via the share-row count gate.
+      }
+    })
+  );
+}
+
+/**
+ * Decode the 0x-hex committee pks list (Phase 1 ``te_committee_pks``
+ * column) into G2Point[] in the keyper-index order. ``committee_pks[k-1]``
+ * is keyper k's public key.
+ */
+export function decodeCommitteePks(committeePks: string[]): G2Point[] {
+  return committeePks.map((hex, i) =>
+    G2Point.fromBytes(hexToBytes(hex, `committee_pks[${i}]`))
+  );
 }

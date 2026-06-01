@@ -44,3 +44,7 @@ dist.cjs
 .browser
 
 /legacy-docs
+
+# Python bytecode (keyper service)
+services/keypers/**/__pycache__/
+services/keypers/**/*.pyc
