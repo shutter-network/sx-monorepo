@@ -492,6 +492,7 @@ export function formatProposal(proposal) {
   proposal.te_config = jsonParse(proposal.te_config, null);
   proposal.te_committee_pks = jsonParse(proposal.te_committee_pks, null);
   proposal.te_keyper_urls = jsonParse(proposal.te_keyper_urls, null);
+  proposal.te_keyper_addresses = jsonParse(proposal.te_keyper_addresses, null);
   proposal.te_aggregate = jsonParse(proposal.te_aggregate, null);
   proposal.te_mpk = bytesToHex(proposal.te_mpk);
   const rawFlagged = proposal.flagged;

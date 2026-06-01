@@ -75,6 +75,7 @@ CREATE TABLE proposals (
   te_threshold_t INT DEFAULT NULL,
   te_threshold_n INT DEFAULT NULL,
   te_keyper_urls JSON DEFAULT NULL,
+  te_keyper_addresses JSON DEFAULT NULL,
   te_aggregate JSON DEFAULT NULL,
   PRIMARY KEY (id),
   INDEX ipfs (ipfs),
@@ -137,6 +138,22 @@ CREATE TABLE te_decryption_shares (
   PRIMARY KEY (proposal_id, keyper_index, candidate),
   INDEX idx_te_shares_proposal (proposal_id),
   INDEX idx_te_shares_posted (posted_at)
+);
+
+-- Pre-finalisation DKG submissions: one row per (proposal, keyper). The hub
+-- finalises te_mpk + te_committee_pks on the proposal row once at least
+-- t+1 keypers post identical (mpk, committee_pks_hex) tuples here. Keyper
+-- changes its mind = 409 conflict (handled in apps/hub/src/te.ts).
+CREATE TABLE te_dkg_submissions (
+  proposal_id VARCHAR(66) NOT NULL,
+  keyper_index INT NOT NULL,
+  keyper_address VARCHAR(42) NOT NULL,
+  mpk_hex VARCHAR(200) NOT NULL,
+  committee_pks_hex MEDIUMTEXT NOT NULL,
+  signature VARCHAR(200) NOT NULL,
+  posted_at BIGINT NOT NULL,
+  PRIMARY KEY (proposal_id, keyper_index),
+  INDEX idx_te_dkg_match (proposal_id, mpk_hex(64))
 );
 
 CREATE TABLE follows (

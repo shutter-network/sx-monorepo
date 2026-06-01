@@ -1,0 +1,347 @@
+import express from 'express';
+import { verifyMessage } from '@ethersproject/wallet';
+import { capture } from '@snapshot-labs/snapshot-sentry';
+import { keccak256 } from '@ethersproject/keccak256';
+import db from './helpers/mysql';
+import log from './helpers/log';
+import { sendError } from './helpers/utils';
+
+const router = express.Router();
+
+// Domain separation tags must match services/keypers/src/hub_client.py.
+const DST_TE_DKG = Buffer.from('SX-TE-DKG-v1', 'utf8');
+const DST_TE_DECRYPT = Buffer.from('SX-TE-DECRYPT-v1', 'utf8');
+
+function uint32BE(n: number): Buffer {
+  const b = Buffer.alloc(4);
+  b.writeUInt32BE(n >>> 0, 0);
+  return b;
+}
+
+function decodeHex(s: unknown, label: string): Buffer {
+  if (typeof s !== 'string') throw new Error(`${label}: not a string`);
+  const stripped = s.startsWith('0x') ? s.slice(2) : s;
+  if (!/^[0-9a-fA-F]*$/.test(stripped) || stripped.length % 2 !== 0) {
+    throw new Error(`${label}: not hex`);
+  }
+  return Buffer.from(stripped, 'hex');
+}
+
+function committeePksHash(committeePksHex: string[]): Buffer {
+  const parts: Buffer[] = [uint32BE(committeePksHex.length)];
+  for (const pk of committeePksHex) {
+    const b = decodeHex(pk, 'committee_pks element');
+    parts.push(uint32BE(b.length));
+    parts.push(b);
+  }
+  // SHA-256 to mirror hub_client.py's _committee_pks_hash.
+  const crypto = require('crypto');
+  return crypto.createHash('sha256').update(Buffer.concat(parts)).digest();
+}
+
+function teDkgPayloadHash(
+  proposalId: string,
+  mpkHex: string,
+  committeePksHex: string[]
+): Buffer {
+  const idBytes = Buffer.from(proposalId, 'utf8');
+  const mpkBytes = decodeHex(mpkHex, 'mpk');
+  const buf = Buffer.concat([
+    DST_TE_DKG,
+    uint32BE(idBytes.length),
+    idBytes,
+    mpkBytes,
+    committeePksHash(committeePksHex)
+  ]);
+  // keccak256 returns 0x-prefixed; convert to Buffer.
+  return Buffer.from(keccak256(buf).slice(2), 'hex');
+}
+
+function teSharePayloadHash(
+  proposalId: string,
+  candidate: number,
+  sigmaHex: string,
+  proofE: string,
+  proofZ: string
+): Buffer {
+  const idBytes = Buffer.from(proposalId, 'utf8');
+  const sigma = decodeHex(sigmaHex, 'sigma');
+  const eBig = BigInt(proofE);
+  const zBig = BigInt(proofZ);
+  if (eBig < 0n || zBig < 0n) throw new Error('negative scalar');
+  const eBuf = Buffer.alloc(32);
+  const zBuf = Buffer.alloc(32);
+  // Big-endian 32-byte uints, matching the python eth_utils.keccak source.
+  let eHex = eBig.toString(16).padStart(64, '0');
+  let zHex = zBig.toString(16).padStart(64, '0');
+  if (eHex.length > 64 || zHex.length > 64) throw new Error('scalar > 32 bytes');
+  Buffer.from(eHex, 'hex').copy(eBuf);
+  Buffer.from(zHex, 'hex').copy(zBuf);
+  const buf = Buffer.concat([
+    DST_TE_DECRYPT,
+    uint32BE(idBytes.length),
+    idBytes,
+    uint32BE(candidate),
+    sigma,
+    eBuf,
+    zBuf
+  ]);
+  return Buffer.from(keccak256(buf).slice(2), 'hex');
+}
+
+async function loadProposal(proposalId: string): Promise<any | null> {
+  const rows = await (db as any).queryAsync(
+    'SELECT id, privacy, te_mpk, te_committee_pks, te_keyper_addresses, te_threshold_t, te_threshold_n, te_aggregate FROM proposals WHERE id = ? LIMIT 1',
+    [proposalId]
+  );
+  return rows[0] || null;
+}
+
+function parseJsonField<T>(value: unknown, fallback: T): T {
+  if (value === null || value === undefined) return fallback;
+  if (typeof value === 'object') return value as T;
+  if (typeof value === 'string') {
+    try {
+      return JSON.parse(value) as T;
+    } catch {
+      return fallback;
+    }
+  }
+  return fallback;
+}
+
+router.post('/proposal/:id/te_dkg', async (req, res) => {
+  const proposalId = req.params.id;
+  try {
+    const proposal = await loadProposal(proposalId);
+    if (!proposal) return sendError(res, 'proposal_not_found', 404);
+    if (proposal.privacy !== 'shutter-elgamal') {
+      return sendError(res, 'proposal_not_private', 400);
+    }
+    if (proposal.te_mpk) {
+      // Already finalised. Idempotent ack.
+      return res.json({ status: 'already_finalized' });
+    }
+
+    const {
+      keyper_index: keyperIndex,
+      keyper_address: keyperAddress,
+      mpk,
+      committee_pks: committeePks,
+      signature
+    } = req.body || {};
+
+    if (
+      typeof keyperIndex !== 'number' ||
+      typeof keyperAddress !== 'string' ||
+      typeof mpk !== 'string' ||
+      !Array.isArray(committeePks) ||
+      typeof signature !== 'string'
+    ) {
+      return sendError(res, 'bad_request', 400);
+    }
+
+    const keyperAddresses = parseJsonField<string[] | null>(
+      proposal.te_keyper_addresses,
+      null
+    );
+    if (!keyperAddresses || keyperAddresses.length === 0) {
+      // Until the admin-space-settings flow (Phase 7) populates this, we
+      // cannot authenticate keypers. Reject loudly rather than write
+      // unverified state.
+      return sendError(res, 'keyper_set_not_configured', 503);
+    }
+
+    if (
+      keyperIndex < 1 ||
+      keyperIndex > keyperAddresses.length ||
+      keyperAddresses[keyperIndex - 1].toLowerCase() !== keyperAddress.toLowerCase()
+    ) {
+      return sendError(res, 'unknown_keyper', 401);
+    }
+
+    const payloadHash = teDkgPayloadHash(proposalId, mpk, committeePks);
+    let recovered: string;
+    try {
+      recovered = verifyMessage(payloadHash, signature);
+    } catch (err: any) {
+      return sendError(res, 'bad_signature', 401);
+    }
+    if (recovered.toLowerCase() !== keyperAddress.toLowerCase()) {
+      return sendError(res, 'bad_signature', 401);
+    }
+
+    const committeePksJson = JSON.stringify(committeePks);
+    const ts = Math.floor(Date.now() / 1000);
+
+    // Append-only per (proposal, keyper). Replays from the same keyper
+    // on the same (mpk, committee_pks) are idempotent; conflicting
+    // submissions are rejected.
+    const existing = await (db as any).queryAsync(
+      'SELECT mpk_hex, committee_pks_hex FROM te_dkg_submissions WHERE proposal_id = ? AND keyper_index = ? LIMIT 1',
+      [proposalId, keyperIndex]
+    );
+    if (existing[0]) {
+      if (
+        existing[0].mpk_hex !== mpk ||
+        existing[0].committee_pks_hex !== committeePksJson
+      ) {
+        return sendError(res, 'keyper_changed_submission', 409);
+      }
+    } else {
+      await (db as any).queryAsync(
+        'INSERT INTO te_dkg_submissions (proposal_id, keyper_index, keyper_address, mpk_hex, committee_pks_hex, signature, posted_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+        [
+          proposalId,
+          keyperIndex,
+          keyperAddress.toLowerCase(),
+          mpk,
+          committeePksJson,
+          signature,
+          ts
+        ]
+      );
+    }
+
+    // Threshold check: count distinct keypers who agree on this exact tuple.
+    const tally = await (db as any).queryAsync(
+      'SELECT COUNT(*) AS c FROM te_dkg_submissions WHERE proposal_id = ? AND mpk_hex = ? AND committee_pks_hex = ?',
+      [proposalId, mpk, committeePksJson]
+    );
+    const matching: number = Number(tally[0]?.c || 0);
+    const requiredAgreement = Number(proposal.te_threshold_t || 0) + 1;
+
+    if (matching >= requiredAgreement) {
+      // Finalise. Re-check te_mpk under the same query to keep the write
+      // a no-op if a concurrent request already committed.
+      await (db as any).queryAsync(
+        'UPDATE proposals SET te_mpk = UNHEX(?), te_committee_pks = ? WHERE id = ? AND te_mpk IS NULL',
+        [mpk.replace(/^0x/, ''), committeePksJson, proposalId]
+      );
+      return res.json({
+        status: 'finalized',
+        matching_submissions: matching,
+        required: requiredAgreement
+      });
+    }
+
+    return res.json({
+      status: 'accepted',
+      matching_submissions: matching,
+      required: requiredAgreement
+    });
+  } catch (err: any) {
+    log.error(`[te_dkg] ${proposalId}: ${err?.message || err}`);
+    capture(err);
+    return sendError(res, 'server_error', 500);
+  }
+});
+
+router.get('/proposal/:id/te_aggregate', async (req, res) => {
+  const proposalId = req.params.id;
+  try {
+    const proposal = await loadProposal(proposalId);
+    if (!proposal) return sendError(res, 'proposal_not_found', 404);
+    if (proposal.privacy !== 'shutter-elgamal') {
+      return sendError(res, 'proposal_not_private', 400);
+    }
+    const aggregate = parseJsonField<any>(proposal.te_aggregate, null);
+    if (!aggregate) return sendError(res, 'aggregate_not_ready', 404);
+    return res.json(aggregate);
+  } catch (err: any) {
+    capture(err);
+    return sendError(res, 'server_error', 500);
+  }
+});
+
+router.post('/proposal/:id/te_decryption_share', async (req, res) => {
+  const proposalId = req.params.id;
+  try {
+    const proposal = await loadProposal(proposalId);
+    if (!proposal) return sendError(res, 'proposal_not_found', 404);
+    if (proposal.privacy !== 'shutter-elgamal') {
+      return sendError(res, 'proposal_not_private', 400);
+    }
+    if (!proposal.te_aggregate) {
+      return sendError(res, 'aggregate_not_ready', 400);
+    }
+    if (!proposal.te_mpk) {
+      return sendError(res, 'dkg_not_finalized', 400);
+    }
+
+    const {
+      keyper_index: keyperIndex,
+      keyper_address: keyperAddress,
+      candidate,
+      sigma,
+      proof_e: proofE,
+      proof_z: proofZ,
+      signature
+    } = req.body || {};
+
+    if (
+      typeof keyperIndex !== 'number' ||
+      typeof keyperAddress !== 'string' ||
+      typeof candidate !== 'number' ||
+      typeof sigma !== 'string' ||
+      typeof proofE !== 'string' ||
+      typeof proofZ !== 'string' ||
+      typeof signature !== 'string'
+    ) {
+      return sendError(res, 'bad_request', 400);
+    }
+
+    const keyperAddresses = parseJsonField<string[] | null>(
+      proposal.te_keyper_addresses,
+      null
+    );
+    if (
+      !keyperAddresses ||
+      keyperIndex < 1 ||
+      keyperIndex > keyperAddresses.length ||
+      keyperAddresses[keyperIndex - 1].toLowerCase() !== keyperAddress.toLowerCase()
+    ) {
+      return sendError(res, 'unknown_keyper', 401);
+    }
+
+    let payloadHash: Buffer;
+    try {
+      payloadHash = teSharePayloadHash(proposalId, candidate, sigma, proofE, proofZ);
+    } catch (err: any) {
+      return sendError(res, 'bad_request', 400);
+    }
+    let recovered: string;
+    try {
+      recovered = verifyMessage(payloadHash, signature);
+    } catch {
+      return sendError(res, 'bad_signature', 401);
+    }
+    if (recovered.toLowerCase() !== keyperAddress.toLowerCase()) {
+      return sendError(res, 'bad_signature', 401);
+    }
+
+    const ts = Math.floor(Date.now() / 1000);
+    // INSERT IGNORE makes (proposal, keyper, candidate) idempotent — a
+    // retry from a flaky keyper does not error out.
+    await (db as any).queryAsync(
+      'INSERT IGNORE INTO te_decryption_shares (proposal_id, keyper_index, candidate, sigma, proof_e, proof_z, posted_at) VALUES (?, ?, ?, UNHEX(?), UNHEX(?), UNHEX(?), ?)',
+      [
+        proposalId,
+        keyperIndex,
+        candidate,
+        sigma.replace(/^0x/, ''),
+        BigInt(proofE).toString(16).padStart(64, '0'),
+        BigInt(proofZ).toString(16).padStart(64, '0'),
+        ts
+      ]
+    );
+
+    return res.json({ status: 'accepted' });
+  } catch (err: any) {
+    log.error(`[te_decryption_share] ${proposalId}: ${err?.message || err}`);
+    capture(err);
+    return sendError(res, 'server_error', 500);
+  }
+});
+
+export default router;
