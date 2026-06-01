@@ -104,6 +104,18 @@ const privacy = computed({
     }
   }
 });
+
+// Phase 9 — ranked-choice ballots cannot be privately tallied: any
+// homomorphic / threshold-decryption scheme that hides individual
+// ballots also hides the rank ordering needed for IRV/Borda. We block
+// the combination at the editor level. The hub also rejects it on
+// proposal create as a defence-in-depth.
+const rankedChoicePrivacyConflict = computed(
+  () =>
+    proposal.value?.type === 'ranked-choice' &&
+    proposal.value?.privacy !== 'none' &&
+    proposal.value?.privacy !== undefined
+);
 const draftId = computed(() => route.params.key as string);
 const network = computed(() => getNetwork(props.space.network));
 const spaceKey = computed(() => `${props.space.network}:${props.space.id}`);
@@ -269,7 +281,8 @@ const canSubmit = computed(() => {
     disabledStrategiesList.value.length ||
     unsupportedPremiumStrategiesList.value.length ||
     isSafeInvalidNetwork.value ||
-    isUsingOnlyInoperativeSigAuthenticators.value
+    isUsingOnlyInoperativeSigAuthenticators.value ||
+    rankedChoicePrivacyConflict.value
   ) {
     return false;
   }
@@ -866,11 +879,20 @@ watchEffect(() => {
             </UiInputArray>
           </div>
           <UiSwitch
-            v-if="isOffchainSpace && space.privacy === 'any'"
+            v-if="isOffchainSpace && space.privacy === 'any' && proposal.type !== 'ranked-choice'"
             v-model="privacy"
             title="Shielded voting"
             tooltip="Choices will be encrypted and only visible once the voting period is over."
           />
+          <UiAlert
+            v-if="rankedChoicePrivacyConflict"
+            type="error"
+            class="!my-0"
+          >
+            Ranked-choice voting requires access to individual ballots and is
+            not compatible with permanent private voting. Switch the voting
+            type or disable shielded voting before submitting.
+          </UiAlert>
           <EditorLabels
             v-if="space.labels?.length"
             v-model="proposal.labels"
