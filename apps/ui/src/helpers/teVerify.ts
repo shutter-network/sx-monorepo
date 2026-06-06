@@ -17,11 +17,16 @@ import {
   G2Point,
   PartialDecryption,
   Transcript,
+  addCt,
   decodeDLEQ,
   recoverTally,
+  scalarMulCt,
+  verifyBallot,
+  type BallotInputs,
+  type BallotVerifyParams,
   type Ciphertext
 } from '@snapshot-labs/private-vote-sdk';
-import { ensureCurvesInit } from './teBallot';
+import { ensureCurvesInit, pseudonymFor } from './teBallot';
 
 const DECRYPT_TRANSCRIPT_LABEL = 'SHUTTER-VOTE-DECRYPT-v1';
 
@@ -34,6 +39,7 @@ function u16BE(n: number): Uint8Array {
 
 export interface AuditPayload {
   te_mpk: string;
+  te_config: BallotVerifyParams | null;
   te_committee_pks: string[];
   te_threshold_t: number;
   te_threshold_n: number;
@@ -50,6 +56,38 @@ export interface AuditPayload {
     proof_e: string;
     proof_z: string;
   }>;
+}
+
+/** One encrypted ballot as served by ``GET /proposal/:id/te_ballots``. */
+export interface AuditBallot {
+  voter: string;
+  vp: number;
+  choice: {
+    electionId: string;
+    pseudonym: string;
+    vk: string;
+    ciphertexts: Array<{ c1: string; c2: string }>;
+    zkProof: string;
+    voterSignature: string;
+    wrAttestation?: string;
+  } | null;
+}
+
+export interface BallotsPayload {
+  te_mpk: string;
+  te_config: BallotVerifyParams | null;
+  ballots: AuditBallot[];
+}
+
+export interface BallotAuditResult {
+  /** Number of ballots whose zk-proof + pseudonym verified. */
+  verifiedCount: number;
+  /** Total ballots returned by the hub. */
+  total: number;
+  /** Recomputed vp-weighted aggregate equals the published aggregate. */
+  aggregateMatches: boolean;
+  /** Per-ballot failures (index + reason), empty when all pass. */
+  failures: Array<{ index: number; voter: string; reason: string }>;
 }
 
 export interface VerifyResult {
@@ -77,7 +115,170 @@ export async function fetchAuditPayload(
 }
 
 /**
- * Run ``recoverTally`` against a hub-supplied audit payload.
+ * Pull every individual encrypted ballot (+ the voting power it was
+ * counted with) from the hub. Same ``/api`` base-URL convention as
+ * ``fetchAuditPayload``.
+ */
+export async function fetchBallotsPayload(
+  apiBaseUrl: string,
+  proposalId: string
+): Promise<BallotsPayload> {
+  const url = `${apiBaseUrl.replace(/\/$/, '')}/proposal/${encodeURIComponent(
+    proposalId
+  )}/te_ballots`;
+  const r = await fetch(url, { credentials: 'omit' });
+  if (!r.ok) throw new Error(`hub ${r.status}: ${await r.text()}`);
+  return (await r.json()) as BallotsPayload;
+}
+
+function ctToHex(ct: Ciphertext): { c1: string; c2: string } {
+  const toHex = (b: Uint8Array) =>
+    '0x' +
+    Array.from(b)
+      .map(x => x.toString(16).padStart(2, '0'))
+      .join('');
+  return { c1: toHex(ct.c1.toBytes()), c2: toHex(ct.c2.toBytes()) };
+}
+
+/**
+ * Trustless-audit step 1: independently verify the encrypted ballots.
+ *
+ * For every ballot returned by the hub this:
+ *   1. re-derives the pseudonym ``keccak256(voter || proposalId)`` and
+ *      checks it matches the envelope (a ballot cannot be re-attributed),
+ *   2. runs the SDK ``verifyBallot`` zero-knowledge check against the
+ *      proposal's ``te_config`` + master public key (the ballot is a
+ *      well-formed unit vote — no out-of-range or multi-vote stuffing),
+ *   3. homomorphically re-accumulates the ballot into a local aggregate,
+ *      scaling by the ballot's voting power (the exact weighting the
+ *      sequencer applied in ``aggregateBallots``).
+ *
+ * Finally it compares the recomputed vp-weighted aggregate to the
+ * ``expectedAggregate`` the keypers actually decrypted. A match proves
+ * the published tally is over the real, valid ballots — not a number the
+ * sequencer invented. Verification of ill-formed ballots is reported per
+ * index rather than thrown so the UI can show which voter failed.
+ */
+export async function verifyBallots(
+  proposalId: string,
+  payload: BallotsPayload,
+  expectedAggregate: AuditPayload['aggregate']
+): Promise<BallotAuditResult> {
+  await ensureCurvesInit();
+
+  const config = payload.te_config;
+  if (!config) throw new Error('proposal te_config missing — cannot verify ballots');
+  if (!expectedAggregate) {
+    throw new Error('no published aggregate to compare the ballots against');
+  }
+  const numCandidates = expectedAggregate.num_candidates;
+  const mpk = G2Point.fromBytes(arrayify(payload.te_mpk));
+
+  const failures: BallotAuditResult['failures'] = [];
+  let verifiedCount = 0;
+  const acc: (Ciphertext | null)[] = new Array(numCandidates).fill(null);
+
+  for (let i = 0; i < payload.ballots.length; i++) {
+    const b = payload.ballots[i];
+    const env = b.choice;
+    if (!env) {
+      failures.push({ index: i, voter: b.voter, reason: 'empty ballot' });
+      continue;
+    }
+
+    // (1) pseudonym binding.
+    const expectedPseudonym =
+      '0x' +
+      Array.from(pseudonymFor(b.voter, proposalId))
+        .map(x => x.toString(16).padStart(2, '0'))
+        .join('');
+    if (
+      typeof env.pseudonym !== 'string' ||
+      env.pseudonym.toLowerCase() !== expectedPseudonym.toLowerCase()
+    ) {
+      failures.push({ index: i, voter: b.voter, reason: 'pseudonym mismatch' });
+      continue;
+    }
+
+    // (2) zero-knowledge validity proof.
+    let ok = false;
+    let reason = '';
+    try {
+      const inputs: BallotInputs = {
+        electionId: arrayify(env.electionId),
+        pseudonym: arrayify(env.pseudonym),
+        vk: arrayify(env.vk),
+        ciphertexts: env.ciphertexts.map(
+          c =>
+            [arrayify(c.c1), arrayify(c.c2)] as [Uint8Array, Uint8Array]
+        ),
+        zkProof: arrayify(env.zkProof),
+        voterSignature: arrayify(env.voterSignature),
+        wrAttestation: arrayify(env.wrAttestation || '0x')
+      };
+      const result = verifyBallot(inputs, config, mpk, () => true);
+      ok = result.ok;
+      reason = result.reason || 'invalid zk proof';
+    } catch (err: any) {
+      ok = false;
+      reason = `bad envelope: ${err?.message || err}`;
+    }
+    if (!ok) {
+      failures.push({ index: i, voter: b.voter, reason });
+      continue;
+    }
+
+    // (3) vp-weighted homomorphic accumulation. Mirror aggregateBallots:
+    // round vp to an integer, skip zero, reject negative.
+    const w = BigInt(Math.round(b.vp));
+    if (w < 0n) {
+      failures.push({ index: i, voter: b.voter, reason: 'negative vp' });
+      continue;
+    }
+    verifiedCount++;
+    if (w === 0n) continue;
+
+    const cts: Ciphertext[] = env.ciphertexts.map(c => ({
+      c1: G2Point.fromBytes(arrayify(c.c1)),
+      c2: G2Point.fromBytes(arrayify(c.c2))
+    }));
+    for (let j = 0; j < numCandidates; j++) {
+      const weighted = w === 1n ? cts[j] : scalarMulCt(w, cts[j]);
+      acc[j] = acc[j] === null ? weighted : addCt(acc[j]!, weighted);
+    }
+  }
+
+  // Compare the recomputed aggregate to the published one byte-for-byte.
+  let aggregateMatches = failures.length === 0;
+  if (aggregateMatches) {
+    for (let j = 0; j < numCandidates; j++) {
+      if (acc[j] === null) {
+        aggregateMatches = false;
+        break;
+      }
+      const got = ctToHex(acc[j]!);
+      const want = expectedAggregate.ciphertexts[j];
+      if (
+        got.c1.toLowerCase() !== want.c1.toLowerCase() ||
+        got.c2.toLowerCase() !== want.c2.toLowerCase()
+      ) {
+        aggregateMatches = false;
+        break;
+      }
+    }
+  }
+
+  return {
+    verifiedCount,
+    total: payload.ballots.length,
+    aggregateMatches,
+    failures
+  };
+}
+
+/**
+ * Trustless-audit step 2: recover the tally from the public decryption
+ * shares and (optionally) compare it to the published scores.
  *
  * Throws synchronously on shape mismatches (missing aggregate, fewer
  * than ``t+1`` shares for some candidate, malformed hex). Otherwise
@@ -92,6 +293,11 @@ export async function verifyTally(
   await ensureCurvesInit();
 
   const { aggregate, te_committee_pks, te_threshold_t, shares } = payload;
+  if (!aggregate) {
+    throw new Error(
+      'No encrypted ballots were cast, so there is no tally to decrypt or verify.'
+    );
+  }
   const numCandidates = aggregate.num_candidates;
   if (numCandidates !== aggregate.ciphertexts.length) {
     throw new Error(

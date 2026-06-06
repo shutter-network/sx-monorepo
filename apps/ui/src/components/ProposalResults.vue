@@ -154,8 +154,9 @@ onMounted(() => {
     class="space-y-1"
   >
     <div>
-      All votes are encrypted and will be decrypted only after the voting period
-      is over, making the results visible.
+      While voting is open, every ballot stays encrypted under the keypers'
+      threshold key. When the voting period ends, only the combined totals are
+      decrypted and published — individual voters' choices are never revealed.
     </div>
     <div v-if="proposal.quorum" class="flex items-center justify-between">
       <span class="text-skin-link">

@@ -91,7 +91,7 @@ function teSharePayloadHash(
 
 async function loadProposal(proposalId: string): Promise<any | null> {
   const rows = await (db as any).queryAsync(
-    'SELECT id, privacy, te_mpk, te_committee_pks, te_keyper_addresses, te_threshold_t, te_threshold_n, te_aggregate FROM proposals WHERE id = ? LIMIT 1',
+    'SELECT id, privacy, te_mpk, te_config, te_committee_pks, te_keyper_addresses, te_threshold_t, te_threshold_n, te_aggregate FROM proposals WHERE id = ? LIMIT 1',
     [proposalId]
   );
   return rows[0] || null;
@@ -276,6 +276,7 @@ router.get('/proposal/:id/te_decryption_shares', async (req, res) => {
     );
     return res.json({
       te_mpk: '0x' + Buffer.from(proposal.te_mpk).toString('hex'),
+      te_config: parseJsonField<any>(proposal.te_config, null),
       te_committee_pks: parseJsonField<any>(proposal.te_committee_pks, []),
       te_threshold_t: Number(proposal.te_threshold_t),
       te_threshold_n: Number(proposal.te_threshold_n),
@@ -290,6 +291,47 @@ router.get('/proposal/:id/te_decryption_shares', async (req, res) => {
         sigma: '0x' + r.sigma_hex.toLowerCase(),
         proof_e: '0x' + r.proof_e_hex.toLowerCase(),
         proof_z: '0x' + r.proof_z_hex.toLowerCase()
+      }))
+    });
+  } catch (err: any) {
+    capture(err);
+    return sendError(res, 'server_error', 500);
+  }
+});
+
+// Phase 8 (trustless audit) — public read endpoint returning every
+// individual encrypted ballot together with the voting power it was
+// counted with. The choice envelope is permanently encrypted (it never
+// reveals how the voter voted), so exposing it leaks nothing the tally
+// does not already imply; the voting power is public information (it is
+// shown for every normal Snapshot vote and is independently recomputable
+// from the proposal's strategies). An auditor uses this to (a) verify
+// each ballot's zero-knowledge validity proof and (b) recompute the
+// voting-power-weighted homomorphic aggregate and confirm it equals the
+// published `te_aggregate` — closing the "did the sequencer sum the real
+// ballots?" gap.
+router.get('/proposal/:id/te_ballots', async (req, res) => {
+  const proposalId = req.params.id;
+  try {
+    const proposal = await loadProposal(proposalId);
+    if (!proposal) return sendError(res, 'proposal_not_found', 404);
+    if (proposal.privacy !== 'shutter-elgamal') {
+      return sendError(res, 'proposal_not_private', 400);
+    }
+    if (!proposal.te_mpk) {
+      return sendError(res, 'dkg_not_finalized', 400);
+    }
+    const rows = await (db as any).queryAsync(
+      'SELECT voter, vp, choice FROM votes WHERE proposal = ? AND cb != -3 ORDER BY created ASC',
+      [proposalId]
+    );
+    return res.json({
+      te_mpk: '0x' + Buffer.from(proposal.te_mpk).toString('hex'),
+      te_config: parseJsonField<any>(proposal.te_config, null),
+      ballots: (rows as any[]).map(r => ({
+        voter: r.voter,
+        vp: Number(r.vp),
+        choice: parseJsonField<any>(r.choice, null)
       }))
     });
   } catch (err: any) {

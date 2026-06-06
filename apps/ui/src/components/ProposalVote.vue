@@ -1,7 +1,11 @@
 <script setup lang="ts">
 import networks from '@snapshot-labs/snapshot.js/src/networks.json';
 import { SUPPORTED_VOTING_TYPES } from '@/helpers/constants';
-import { _t, getChoiceText } from '@/helpers/utils';
+import {
+  _t,
+  getChoiceText,
+  getEncryptedChoicePreview
+} from '@/helpers/utils';
 import { getNetwork, offchainNetworks } from '@/networks';
 import { Proposal as ProposalType } from '@/types';
 
@@ -91,7 +95,16 @@ const isEditable = computed(() => {
       @click="$emit('enterEditMode')"
     >
       <div
-        v-if="
+        v-if="proposal.privacy === 'shutter-elgamal'"
+        class="flex space-x-2 items-center grow truncate text-skin-link"
+      >
+        <IH-lock-closed class="size-[16px] shrink-0" />
+        <span class="font-mono truncate">
+          {{ getEncryptedChoicePreview(currentVote.choice) }}
+        </span>
+      </div>
+      <div
+        v-else-if="
           proposal.privacy !== 'none' &&
           ['pending', 'active'].includes(proposal.state)
         "

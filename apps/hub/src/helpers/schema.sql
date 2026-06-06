@@ -108,6 +108,7 @@ CREATE TABLE votes (
   vp DECIMAL(64,30) NOT NULL,
   vp_by_strategy JSON NOT NULL,
   vp_state VARCHAR(24) NOT NULL,
+  vp_value DOUBLE NOT NULL DEFAULT '0',
   cb INT(11) NOT NULL,
   PRIMARY KEY (voter, space, proposal),
   UNIQUE KEY id (id),
@@ -119,6 +120,7 @@ CREATE TABLE votes (
   INDEX app (app),
   INDEX vp (vp),
   INDEX vp_state (vp_state),
+  INDEX vp_value (vp_value),
   INDEX cb (cb)
 );
 
@@ -230,11 +232,13 @@ CREATE TABLE leaderboard (
   vote_count SMALLINT UNSIGNED NOT NULL DEFAULT '0',
   proposal_count SMALLINT UNSIGNED NOT NULL DEFAULT '0',
   last_vote BIGINT,
+  vp_value DOUBLE NOT NULL DEFAULT '0',
   PRIMARY KEY user_space (user,space),
   INDEX space (space),
   INDEX vote_count (vote_count),
   INDEX proposal_count (proposal_count),
-  INDEX last_vote (last_vote)
+  INDEX last_vote (last_vote),
+  INDEX vp_value (vp_value)
 );
 
 CREATE TABLE options (

@@ -7,6 +7,7 @@ import {
   aggregateBallots,
   aggregateToJson,
   decodeCommitteePks,
+  ensureCurvesInit,
   recoverTeTally,
   shareRowsToShares,
   triggerKeypers
@@ -149,7 +150,22 @@ export async function updateProposalAndVotes(
   }
 
   if (proposal.privacy === 'shutter-elgamal') {
-    if (proposal.state !== 'closed') return false;
+    if (proposal.state !== 'closed') {
+      // Voting is still open: the tally stays encrypted until close, but the
+      // *number* of ballots cast is public (same as Snapshot's classic
+      // shielded `shutter` mode, which shows a live vote count while hiding
+      // the choices). Keep proposals.votes in sync so the UI doesn't show
+      // "0 votes" while ballots are arriving.
+      const [{ n }] = await db.queryAsync(
+        'SELECT COUNT(*) AS n FROM votes WHERE proposal = ?',
+        [proposal.id]
+      );
+      await db.queryAsync('UPDATE proposals SET votes = ? WHERE id = ? LIMIT 1', [
+        n,
+        proposal.id
+      ]);
+      return true;
+    }
     const finalised = await runShutterElgamalTally(proposal);
     return finalised;
   }
@@ -310,6 +326,10 @@ async function runShutterElgamalTally(proposal: any): Promise<boolean> {
 
   let aggregate;
   try {
+    // aggregateBallots uses the BLST curve layer; the ingest path inits it
+    // lazily, but the scheduler may aggregate in a process that has not yet
+    // verified a ballot, so make sure the curves are ready here too.
+    await ensureCurvesInit();
     aggregate = aggregateBallots(numCandidates, rawVotes);
   } catch (err: any) {
     log.warn(`[te-tally] ${proposal.id} aggregate failed: ${err.message}`);

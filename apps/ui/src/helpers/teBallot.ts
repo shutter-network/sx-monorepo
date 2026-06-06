@@ -14,7 +14,7 @@
  * is loaded, every subsequent call returns the cached promise.
  */
 import { keccak256 } from '@ethersproject/keccak256';
-import { arrayify } from '@ethersproject/bytes';
+import { arrayify, hexlify } from '@ethersproject/bytes';
 import {
   G1Point,
   buildBallot,
@@ -42,7 +42,7 @@ export interface TeBallotEnvelope {
 }
 
 function toHex(bytes: Uint8Array): string {
-  return '0x' + Buffer.from(bytes).toString('hex');
+  return hexlify(bytes);
 }
 
 /**

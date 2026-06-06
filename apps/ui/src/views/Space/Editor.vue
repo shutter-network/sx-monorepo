@@ -96,11 +96,11 @@ const unsupportedPremiumStrategiesList = computed(() => {
 
 const privacy = computed({
   get() {
-    return proposal.value?.privacy === 'shutter';
+    return proposal.value?.privacy === 'shutter-elgamal';
   },
   set(value) {
     if (proposal.value) {
-      proposal.value.privacy = value ? 'shutter' : 'none';
+      proposal.value.privacy = value ? 'shutter-elgamal' : 'none';
     }
   }
 });
@@ -881,8 +881,8 @@ watchEffect(() => {
           <UiSwitch
             v-if="isOffchainSpace && space.privacy === 'any' && proposal.type !== 'ranked-choice'"
             v-model="privacy"
-            title="Shielded voting"
-            tooltip="Choices will be encrypted and only visible once the voting period is over."
+            title="Private voting"
+            tooltip="Permanent private voting. Each ballot is encrypted in your browser with threshold ElGamal and tallied homomorphically, so individual votes stay private forever — a committee of keypers publishes proven decryption shares to reveal only the final result."
           />
           <UiAlert
             v-if="rankedChoicePrivacyConflict"
@@ -891,7 +891,7 @@ watchEffect(() => {
           >
             Ranked-choice voting requires access to individual ballots and is
             not compatible with permanent private voting. Switch the voting
-            type or disable shielded voting before submitting.
+            type or disable private voting before submitting.
           </UiAlert>
           <EditorLabels
             v-if="space.labels?.length"

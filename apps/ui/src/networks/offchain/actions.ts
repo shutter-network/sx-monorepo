@@ -78,8 +78,12 @@ export function createActions(
 ): ReadOnlyNetworkActions {
   const networkConfig = CONFIGS[chainId];
 
+  const sequencerUrl = (import.meta as any).env?.VITE_LOCAL_SEQUENCER_URL as
+    | string
+    | undefined;
   const client = new clients.OffchainEthereumSig({
-    networkConfig
+    networkConfig,
+    ...(sequencerUrl ? { sequencerUrl } : {})
   });
   const starknetSigClient = new clients.OffchainStarknetSig({
     networkConfig: STARKNET_CONFIGS[chainId]
@@ -172,7 +176,7 @@ export function createActions(
         type,
         discussion,
         choices,
-        privacy: privacy === 'shutter' ? 'shutter' : '',
+        privacy: privacy === 'none' ? '' : privacy,
         labels,
         start,
         end: min_end,
@@ -215,7 +219,7 @@ export function createActions(
         type,
         discussion,
         choices,
-        privacy: privacy === 'shutter' ? 'shutter' : '',
+        privacy: privacy === 'none' ? '' : privacy,
         labels,
         plugins: JSON.stringify(plugins),
         from: account
