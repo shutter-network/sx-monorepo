@@ -96,4 +96,45 @@ test.describe('shutter-elgamal weighted audit (real browser)', () => {
       e.includes('apollo');
     expect(errors.filter(e => !ignored(e))).toEqual([]);
   });
+
+  test('Engine-room detail surfaces the three cryptographic stages + setup card + bundle export', async ({
+    page
+  }) => {
+    test.setTimeout(120_000);
+
+    await page.goto(URL_PATH);
+
+    // The lifecycle-wide "Cryptographic setup" card (#3) is collapsed by
+    // default; clicking its header reveals the DKG / threshold facts.
+    const setupHeader = page.getByRole('button', {
+      name: /Cryptographic setup/
+    });
+    await expect(setupHeader).toBeVisible({ timeout: 30_000 });
+    await setupHeader.click();
+    await expect(page.getByText('Decryption threshold')).toBeVisible();
+    await expect(page.getByText('Master public key')).toBeVisible();
+
+    // Run the verification so the engine-room block (#1) appears.
+    await expect(page.getByText('Permanent private tally')).toBeVisible();
+    await page.getByRole('button', { name: 'Verify tally' }).click();
+    await expect(
+      page.getByText('Tally matches published scores.')
+    ).toBeVisible({ timeout: 60_000 });
+
+    // (#1) Progressive-disclosure toggle reveals the three stages.
+    const toggle = page.getByText('Show cryptographic detail');
+    await expect(toggle).toBeVisible();
+    await toggle.click();
+
+    await expect(
+      page.getByText('Per-ballot zero-knowledge proofs')
+    ).toBeVisible();
+    await expect(page.getByText('Homomorphic aggregate')).toBeVisible();
+    await expect(page.getByText('Threshold decryption')).toBeVisible();
+
+    // (#5) The offline-verifiable bundle export button is present.
+    await expect(
+      page.getByRole('button', { name: 'Download verification bundle' })
+    ).toBeVisible();
+  });
 });

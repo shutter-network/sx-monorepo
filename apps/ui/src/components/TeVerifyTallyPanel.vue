@@ -1,11 +1,17 @@
 <script setup lang="ts">
-import { ref } from 'vue';
+import { computed, ref } from 'vue';
 import {
+  buildVerificationBundle,
   fetchAuditPayload,
   fetchBallotsPayload,
+  fingerprintHex,
+  shortHex,
   verifyBallots,
   verifyTally,
-  type BallotAuditResult
+  type AuditPayload,
+  type BallotAuditResult,
+  type BallotsPayload,
+  type VerifyResult
 } from '@/helpers/teVerify';
 import type { Proposal } from '@/types';
 
@@ -24,10 +30,15 @@ type Status =
       tallies: bigint[];
       matches: boolean | null;
       ballots: BallotAuditResult;
+      audit: AuditPayload;
+      ballotsPayload: BallotsPayload;
+      tally: VerifyResult;
     }
   | { kind: 'err'; message: string };
 
 const status = ref<Status>({ kind: 'idle' });
+const showDetail = ref(false);
+const showIntro = ref(false);
 
 async function run() {
   status.value = { kind: 'fetching' };
@@ -55,11 +66,101 @@ async function run() {
       kind: 'ok',
       tallies: result.tallies,
       matches: result.matchesPublished,
-      ballots
+      ballots,
+      audit: payload,
+      ballotsPayload,
+      tally: result
     };
   } catch (err: any) {
     status.value = { kind: 'err', message: err?.message || String(err) };
   }
+}
+
+// ---- engine-room derived views (only meaningful once status.kind==='ok') ----
+
+const failureIndices = computed(() => {
+  if (status.value.kind !== 'ok') return new Set<number>();
+  return new Set(status.value.ballots.failures.map(f => f.index));
+});
+
+/** Per-ballot pass/fail breakdown for the ZK-proof stage. */
+const ballotRows = computed(() => {
+  if (status.value.kind !== 'ok') return [];
+  const s = status.value;
+  return s.ballotsPayload.ballots.map((b, i) => {
+    const failure = s.ballots.failures.find(f => f.index === i);
+    return {
+      index: i,
+      pseudonym: b.choice?.pseudonym || '-',
+      vp: b.vp,
+      ok: !failureIndices.value.has(i),
+      reason: failure?.reason
+    };
+  });
+});
+
+/** Fingerprint of the homomorphic aggregate the keypers decrypted. */
+const aggregateFingerprint = computed(() => {
+  if (status.value.kind !== 'ok') return '';
+  const parts: string[] = [];
+  for (const ct of status.value.audit.aggregate.ciphertexts) {
+    parts.push(ct.c1, ct.c2);
+  }
+  return parts.length ? fingerprintHex(parts) : '-';
+});
+
+const mpkFingerprint = computed(() => {
+  if (status.value.kind !== 'ok') return '';
+  return fingerprintHex([status.value.audit.te_mpk]);
+});
+
+/** Per-keyper participation: how many candidate shares each keyper submitted. */
+const keyperRows = computed(() => {
+  if (status.value.kind !== 'ok') return [];
+  const audit = status.value.audit;
+  const byKeyper = new Map<number, number>();
+  for (const s of audit.shares) {
+    byKeyper.set(s.keyper_index, (byKeyper.get(s.keyper_index) || 0) + 1);
+  }
+  const addresses: string[] = Array.isArray(audit.te_keyper_addresses)
+    ? audit.te_keyper_addresses
+    : [];
+  return Array.from(byKeyper.entries())
+    .sort((a, b) => a[0] - b[0])
+    .map(([idx, shares]) => ({
+      index: idx,
+      address: addresses[idx] || addresses[idx - 1] || null,
+      shares
+    }));
+});
+
+const numCandidates = computed(() =>
+  status.value.kind === 'ok' ? status.value.audit.aggregate.num_candidates : 0
+);
+
+function downloadBundle() {
+  if (status.value.kind !== 'ok') return;
+  const bundle = buildVerificationBundle({
+    proposalId: props.proposal.proposal_id as string,
+    choices: props.proposal.choices || [],
+    publishedScores: props.proposal.scores || [],
+    audit: status.value.audit,
+    ballots: status.value.ballotsPayload,
+    ballotResult: status.value.ballots,
+    tallyResult: status.value.tally
+  });
+  const blob = new Blob([JSON.stringify(bundle, null, 2)], {
+    type: 'application/json'
+  });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  const shortId = (props.proposal.proposal_id as string).slice(0, 10);
+  a.download = `private-vote-audit-${shortId}.json`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
 }
 </script>
 
@@ -71,12 +172,33 @@ async function run() {
     </div>
     <div class="text-skin-text text-sm">
       Every ballot was encrypted under a threshold key and never individually
-      decrypted. Anyone can independently (1) check each encrypted ballot's
-      zero-knowledge validity proof, (2) recompute the voting-power-weighted
-      aggregate and confirm it matches what the keypers decrypted, and (3)
-      recompute the totals from the keypers' public decryption shares — proving
-      the published scores were neither forged nor stuffed with invalid votes.
+      decrypted, yet anyone can independently confirm the published result.
+      <button
+        type="button"
+        class="text-skin-link inline-flex items-center gap-0.5 align-baseline"
+        @click="showIntro = !showIntro"
+      >
+        {{ showIntro ? 'Show less' : 'How?' }}
+        <IH-chevron-right
+          class="size-[13px] transition-transform"
+          :class="{ 'rotate-90': showIntro }"
+        />
+      </button>
     </div>
+    <ol
+      v-if="showIntro"
+      class="text-skin-text text-sm list-decimal pl-5 space-y-0.5"
+    >
+      <li>Check each encrypted ballot's zero-knowledge validity proof.</li>
+      <li>
+        Recompute the voting-power-weighted aggregate and confirm it matches
+        what the keypers decrypted.
+      </li>
+      <li>
+        Recompute the totals from the keypers' public decryption shares,
+        proving the scores were neither forged nor stuffed with invalid votes.
+      </li>
+    </ol>
     <div class="flex flex-wrap items-center gap-2">
       <button
         type="button"
@@ -100,7 +222,7 @@ async function run() {
         class="text-skin-danger flex items-center gap-1"
       >
         <IH-x-circle class="size-[16px] shrink-0" />
-        Mismatch — the recomputed tally differs from the published scores.
+        Mismatch: the recomputed tally differs from the published scores.
       </span>
       <span
         v-else-if="status.kind === 'ok'"
@@ -161,5 +283,172 @@ async function run() {
         <span class="font-mono">{{ tally.toString() }}</span>
       </li>
     </ul>
+
+    <!-- Engine room: progressive-disclosure cryptographic detail. -->
+    <div v-if="status.kind === 'ok'" class="pt-1">
+      <button
+        type="button"
+        class="text-sm text-skin-link flex items-center gap-1"
+        @click="showDetail = !showDetail"
+      >
+        <IH-chevron-right
+          class="size-[16px] transition-transform"
+          :class="{ 'rotate-90': showDetail }"
+        />
+        {{ showDetail ? 'Hide' : 'Show' }} cryptographic detail
+      </button>
+
+      <div v-if="showDetail" class="mt-2 space-y-3">
+        <!-- Stage 1: per-ballot zero-knowledge proofs. -->
+        <div class="border rounded-lg px-3 py-2">
+          <div
+            class="flex items-center gap-2 text-skin-link font-semibold text-sm"
+          >
+            <span
+              class="inline-flex items-center justify-center size-[18px] rounded-full bg-skin-border text-xs"
+              >1</span
+            >
+            Per-ballot zero-knowledge proofs
+            <IH-check-circle
+              v-if="status.ballots.failures.length === 0"
+              class="size-[15px] text-skin-success"
+            />
+            <IH-x-circle v-else class="size-[15px] text-skin-danger" />
+          </div>
+          <div class="text-xs text-skin-text mt-1">
+            Each ballot carries an OR-proof that its ciphertext encodes exactly
+            one valid choice, with no out-of-range or double votes. The voter is
+            identified only by a pseudonym
+            <span class="font-mono">keccak256(voter ‖ proposalId)</span>.
+          </div>
+          <ul class="mt-2 space-y-1 max-h-[180px] overflow-auto">
+            <li
+              v-for="row in ballotRows"
+              :key="row.index"
+              class="flex items-center justify-between text-xs gap-2"
+            >
+              <span class="flex items-center gap-1 truncate">
+                <IH-check-circle
+                  v-if="row.ok"
+                  class="size-[14px] text-skin-success shrink-0"
+                />
+                <IH-x-circle
+                  v-else
+                  class="size-[14px] text-skin-danger shrink-0"
+                />
+                <span class="font-mono truncate">{{
+                  shortHex(row.pseudonym)
+                }}</span>
+              </span>
+              <span class="text-skin-text shrink-0">
+                <span v-if="!row.ok" class="text-skin-danger">{{
+                  row.reason
+                }}</span>
+                <span v-else>vp {{ row.vp }}</span>
+              </span>
+            </li>
+          </ul>
+        </div>
+
+        <!-- Stage 2: homomorphic aggregate. -->
+        <div class="border rounded-lg px-3 py-2">
+          <div
+            class="flex items-center gap-2 text-skin-link font-semibold text-sm"
+          >
+            <span
+              class="inline-flex items-center justify-center size-[18px] rounded-full bg-skin-border text-xs"
+              >2</span
+            >
+            Homomorphic aggregate
+            <IH-check-circle
+              v-if="status.ballots.aggregateMatches"
+              class="size-[15px] text-skin-success"
+            />
+            <IH-x-circle v-else class="size-[15px] text-skin-danger" />
+          </div>
+          <div class="text-xs text-skin-text mt-1">
+            Adding all encrypted ballots (each scaled by its voting power)
+            yields one encrypted total per choice, without decrypting anyone's
+            vote. The recomputed aggregate
+            {{ status.ballots.aggregateMatches ? 'matches' : 'does NOT match' }}
+            the bytes the keypers decrypted.
+          </div>
+          <div class="text-xs mt-2 flex justify-between">
+            <span class="text-skin-text">Aggregate fingerprint</span>
+            <span class="font-mono">{{ aggregateFingerprint }}</span>
+          </div>
+        </div>
+
+        <!-- Stage 3: threshold decryption. -->
+        <div class="border rounded-lg px-3 py-2">
+          <div
+            class="flex items-center gap-2 text-skin-link font-semibold text-sm"
+          >
+            <span
+              class="inline-flex items-center justify-center size-[18px] rounded-full bg-skin-border text-xs"
+              >3</span
+            >
+            Threshold decryption
+            <IH-check-circle
+              v-if="status.tally.thresholdMet"
+              class="size-[15px] text-skin-success"
+            />
+            <IH-x-circle v-else class="size-[15px] text-skin-danger" />
+          </div>
+          <div class="text-xs text-skin-text mt-1">
+            Only the combined total is decrypted, and only when at least
+            {{ status.audit.te_threshold_t + 1 }} of
+            {{ status.audit.te_threshold_n }} keypers cooperate. Each keyper's
+            decryption share carries a DLEQ (Chaum–Pedersen) proof that it was
+            computed with the same secret key it committed to at setup; the
+            recovery below rejects any share whose proof fails.
+          </div>
+          <div class="text-xs mt-2 flex justify-between">
+            <span class="text-skin-text">Master public key</span>
+            <span class="font-mono">{{ mpkFingerprint }}</span>
+          </div>
+          <div class="text-xs mt-1 flex justify-between">
+            <span class="text-skin-text">Threshold</span>
+            <span class="font-mono">
+              {{ status.audit.te_threshold_t + 1 }}-of-{{
+                status.audit.te_threshold_n
+              }}
+            </span>
+          </div>
+          <ul class="mt-2 space-y-1">
+            <li
+              v-for="row in keyperRows"
+              :key="row.index"
+              class="flex items-center justify-between text-xs gap-2"
+            >
+              <span class="flex items-center gap-1 truncate">
+                <IH-check-circle
+                  class="size-[14px] text-skin-success shrink-0"
+                />
+                Keyper {{ row.index }}
+                <span
+                  v-if="row.address"
+                  class="font-mono text-skin-text truncate"
+                >
+                  {{ shortHex(row.address) }}
+                </span>
+              </span>
+              <span class="text-skin-text shrink-0">
+                {{ row.shares }}/{{ numCandidates }} shares
+              </span>
+            </li>
+          </ul>
+        </div>
+
+        <button
+          type="button"
+          class="text-sm border rounded-lg px-3 py-1.5 hover:bg-skin-border flex items-center gap-1"
+          @click="downloadBundle"
+        >
+          <IH-arrow-down-tray class="size-[15px]" />
+          Download verification bundle
+        </button>
+      </div>
+    </div>
   </div>
 </template>

@@ -882,7 +882,7 @@ watchEffect(() => {
             v-if="isOffchainSpace && space.privacy === 'any' && proposal.type !== 'ranked-choice'"
             v-model="privacy"
             title="Private voting"
-            tooltip="Permanent private voting. Each ballot is encrypted in your browser with threshold ElGamal and tallied homomorphically, so individual votes stay private forever — a committee of keypers publishes proven decryption shares to reveal only the final result."
+            tooltip="Permanent private voting. Each ballot is encrypted in your browser with threshold ElGamal and tallied homomorphically, so individual votes stay private forever. A committee of keypers publishes proven decryption shares to reveal only the final result."
           />
           <UiAlert
             v-if="rankedChoicePrivacyConflict"

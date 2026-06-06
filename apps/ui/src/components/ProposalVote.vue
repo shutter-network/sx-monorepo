@@ -81,6 +81,18 @@ const isEditable = computed(() => {
     props.proposal.state === 'active'
   );
 });
+
+const showBallotInfo = ref(false);
+
+// While the keypers are still running distributed key generation the
+// proposal has no master public key yet, so a ballot cannot be encrypted.
+// Voting must stay disabled until te_mpk is published.
+const dkgInProgress = computed(
+  () =>
+    props.proposal.privacy === 'shutter-elgamal' &&
+    props.proposal.state === 'active' &&
+    !props.proposal.te_mpk
+);
 </script>
 
 <template>
@@ -139,6 +151,28 @@ const isEditable = computed(() => {
       </div>
       <IH-pencil v-if="isEditable" class="shrink-0" />
     </UiButton>
+    <div v-if="proposal.privacy === 'shutter-elgamal'" class="mt-1.5">
+      <button
+        type="button"
+        class="flex items-center gap-1.5 text-sm text-skin-text"
+        @click="showBallotInfo = !showBallotInfo"
+      >
+        <IH-shield-check class="size-[15px] shrink-0" />
+        <span>Encrypted in your browser</span>
+        <IH-chevron-right
+          class="size-[14px] shrink-0 transition-transform"
+          :class="{ 'rotate-90': showBallotInfo }"
+        />
+      </button>
+      <div
+        v-if="showBallotInfo"
+        class="text-sm text-skin-text mt-1 pl-[22px]"
+      >
+        Your choice was encrypted to this proposal's threshold key before it was
+        sent. The server only ever stores the ciphertext above, never your
+        selection, and it stays sealed until voting closes.
+      </div>
+    </div>
   </slot>
   <slot
     v-else-if="
@@ -184,7 +218,44 @@ const isEditable = computed(() => {
     {{ networks[proposal.space.snapshot_chain_id]?.name ?? 'space network' }} to
     vote.
   </slot>
+  <div
+    v-else-if="dkgInProgress"
+    class="border rounded-lg px-3 py-4 flex flex-col items-center text-center gap-2"
+  >
+    <div class="relative size-[44px]">
+      <span
+        class="absolute inset-0 rounded-full border-2 border-skin-border border-t-skin-link animate-spin"
+      />
+      <IH-key
+        class="size-[20px] text-skin-link absolute inset-0 m-auto animate-pulse"
+      />
+    </div>
+    <div class="text-skin-link font-semibold">Generating encryption keys</div>
+    <div class="text-sm text-skin-text max-w-[320px]">
+      The keypers are running distributed key generation for this proposal.
+      Voting opens as soon as the shared key is published, usually within a few
+      seconds. Hang tight so your ballot can be encrypted.
+    </div>
+    <button
+      type="button"
+      disabled
+      class="mt-1 w-full rounded-lg border px-3 py-2.5 text-skin-text bg-skin-border/40 cursor-not-allowed flex items-center justify-center gap-2"
+    >
+      <UiLoading class="shrink-0" />
+      Preparing secure ballot...
+    </button>
+  </div>
   <div v-else>
     <slot />
   </div>
 </template>
+
+<style scoped>
+@media (prefers-reduced-motion: reduce) {
+  .animate-spin,
+  .animate-pulse {
+    animation: none;
+  }
+}
+</style>
+

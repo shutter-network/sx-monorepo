@@ -21,7 +21,7 @@ withDefaults(
   >
     <IH-lock-closed class="size-[16px] shrink-0" />
     <UiTooltip
-      title="This ballot is permanently encrypted under the keypers' threshold key. Only the combined tally is ever decrypted — individual choices are never revealed."
+      title="This ballot is permanently encrypted under the keypers' threshold key. Only the combined tally is ever decrypted, and individual choices are never revealed."
       class="max-w-full truncate"
     >
       <span class="font-mono text-skin-heading leading-[22px] truncate">

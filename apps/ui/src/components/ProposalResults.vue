@@ -34,6 +34,7 @@ const props = withDefaults(
 const queryClient = useQueryClient();
 
 const displayAllChoices = ref(false);
+const showEncryptedInfo = ref(false);
 
 const totalProgress = computed(() => quorumProgress(props.proposal));
 
@@ -153,10 +154,43 @@ onMounted(() => {
     "
     class="space-y-1"
   >
-    <div>
-      While voting is open, every ballot stays encrypted under the keypers'
-      threshold key. When the voting period ends, only the combined totals are
-      decrypted and published — individual voters' choices are never revealed.
+    <div
+      v-if="proposal.privacy === 'shutter-elgamal'"
+      class="flex items-center justify-between rounded-lg border px-3 py-2"
+    >
+      <span class="flex items-center gap-2 text-skin-link">
+        <IH-lock-closed class="size-[16px] shrink-0" />
+        Encrypted ballots sealed
+      </span>
+      <span class="font-mono">{{ _n(proposal.vote_count) }}</span>
+    </div>
+    <button
+      v-if="proposal.privacy === 'shutter-elgamal'"
+      type="button"
+      class="flex items-center gap-1 text-sm text-skin-text"
+      @click="showEncryptedInfo = !showEncryptedInfo"
+    >
+      <IH-chevron-right
+        class="size-[14px] shrink-0 transition-transform"
+        :class="{ 'rotate-90': showEncryptedInfo }"
+      />
+      Why can't I see results yet?
+    </button>
+    <div
+      v-if="proposal.privacy === 'shutter-elgamal' && showEncryptedInfo"
+      class="text-sm text-skin-text pl-[18px]"
+    >
+      Every ballot stays encrypted under the keypers' shared key while voting is
+      open. The running totals cannot be computed by anyone, not even the
+      keypers, until voting closes. Only then are the combined totals decrypted
+      and published. Individual choices are never revealed.
+    </div>
+    <div
+      v-else-if="proposal.privacy !== 'shutter-elgamal'"
+      class="text-sm text-skin-text"
+    >
+      Votes are encrypted while voting is open. When the voting period ends, the
+      results are decrypted and published.
     </div>
     <div v-if="proposal.quorum" class="flex items-center justify-between">
       <span class="text-skin-link">
@@ -295,6 +329,14 @@ onMounted(() => {
     <IC-Shutter class="w-[80px]" />
     <IH-arrow-sm-right class="-rotate-45" />
   </AppLink>
+  <TeCryptoSetupCard
+    v-if="
+      proposal.privacy === 'shutter-elgamal' &&
+      withDetails &&
+      offchainNetworks.includes(proposal.network)
+    "
+    :proposal="proposal"
+  />
   <TeVerifyTallyPanel
     v-if="
       proposal.privacy === 'shutter-elgamal' &&

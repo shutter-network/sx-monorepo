@@ -13,6 +13,7 @@
  * the UI can highlight any mismatch in the right place.
  */
 import { arrayify } from '@ethersproject/bytes';
+import { keccak256 } from '@ethersproject/keccak256';
 import {
   G2Point,
   PartialDecryption,
@@ -35,6 +36,27 @@ function u16BE(n: number): Uint8Array {
   b[0] = (n >> 8) & 0xff;
   b[1] = n & 0xff;
   return b;
+}
+
+/**
+ * Deterministic short fingerprint of one or more hex strings (e.g. a master
+ * public key, or the concatenation of an aggregate's ciphertexts). Used by the
+ * UI's "engine-room" inspector so a human can eyeball that two parties refer to
+ * the same cryptographic object without printing 96-byte blobs. This is a
+ * display aid only — the trust-bearing checks are the ZK/DLEQ verifications.
+ */
+export function fingerprintHex(parts: string[]): string {
+  const joined = parts.map(p => p.replace(/^0x/, '')).join('');
+  const digest = keccak256('0x' + joined).replace(/^0x/, '');
+  return `${digest.slice(0, 8)}…${digest.slice(-8)}`;
+}
+
+/** Shorten a long hex string to `0x1234…cdef` for compact display. */
+export function shortHex(hex: string | undefined | null, lead = 6, tail = 6): string {
+  if (!hex) return '-';
+  const s = hex.startsWith('0x') ? hex : `0x${hex}`;
+  if (s.length <= 2 + lead + tail + 1) return s;
+  return `${s.slice(0, 2 + lead)}…${s.slice(-tail)}`;
 }
 
 export interface AuditPayload {
@@ -377,5 +399,50 @@ export async function verifyTally(
     matchesPublished,
     shareCount: shares.length,
     thresholdMet
+  };
+}
+
+/**
+ * Assemble a self-contained verification bundle that a third party can
+ * re-verify offline (e.g. with the SDK's CLI) without trusting this UI or the
+ * hub. It contains the public audit payload (aggregate + decryption shares +
+ * committee keys), every encrypted ballot with its zero-knowledge proof, and
+ * the results this client computed locally. No secrets are present — only the
+ * public bytes anyone can already fetch from the hub.
+ */
+export function buildVerificationBundle(args: {
+  proposalId: string;
+  choices: string[];
+  publishedScores: number[];
+  audit: AuditPayload;
+  ballots: BallotsPayload;
+  ballotResult: BallotAuditResult;
+  tallyResult: VerifyResult;
+}): Record<string, any> {
+  return {
+    format: 'snapshot-permanent-private-vote-audit/v1',
+    generatedAt: new Date().toISOString(),
+    proposalId: args.proposalId,
+    choices: args.choices,
+    publishedScores: args.publishedScores,
+    threshold: {
+      t: args.audit.te_threshold_t,
+      n: args.audit.te_threshold_n,
+      mpk: args.audit.te_mpk,
+      committeePublicKeys: args.audit.te_committee_pks,
+      keyperAddresses: args.audit.te_keyper_addresses
+    },
+    aggregate: args.audit.aggregate,
+    decryptionShares: args.audit.shares,
+    encryptedBallots: args.ballots.ballots,
+    localVerification: {
+      ballotsVerified: args.ballotResult.verifiedCount,
+      ballotsTotal: args.ballotResult.total,
+      aggregateMatches: args.ballotResult.aggregateMatches,
+      ballotFailures: args.ballotResult.failures,
+      recoveredTallies: args.tallyResult.tallies.map(t => t.toString()),
+      thresholdMet: args.tallyResult.thresholdMet,
+      matchesPublishedScores: args.tallyResult.matchesPublished
+    }
   };
 }
