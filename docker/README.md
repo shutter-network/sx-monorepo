@@ -91,6 +91,17 @@ separate infrastructure rather than one compose file), and keep
   sequencer are started with `DB_SSL=false`. The MySQL helpers only attempt
   TLS when `DB_SSL` is not `false`, which keeps host-run dev (TLS to a managed
   DB) unchanged.
+- **Host port conflicts.** Only the host side of each mapping is configurable;
+  containers always reach each other on the fixed internal ports. If another
+  process already holds a default port (for example something else listening on
+  3000), override just that host port via env and leave the rest alone:
+
+  ```sh
+  HUB_PORT=3010 docker compose up
+  ```
+
+  Overridable: `HUB_PORT`, `SEQ_PORT`, `MYSQL_PORT`, `KEYPER1_PORT`,
+  `KEYPER2_PORT`, `KEYPER3_PORT`.
 
 ## Resetting state
 
