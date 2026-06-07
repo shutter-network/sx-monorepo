@@ -3,3 +3,5 @@ requests>=2.31,<3
 eth-account>=0.10,<1
 eth-utils>=4,<5
 py_arkworks_bls12381==0.4.1
+# auto-DKG coordinator polls the hub database directly.
+pymysql>=1.1,<2
