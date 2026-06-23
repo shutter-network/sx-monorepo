@@ -100,8 +100,7 @@ separate infrastructure rather than one compose file), and keep
   HUB_PORT=3010 docker compose up
   ```
 
-  Overridable: `HUB_PORT`, `SEQ_PORT`, `MYSQL_PORT`, `KEYPER1_PORT`,
-  `KEYPER2_PORT`, `KEYPER3_PORT`.
+  Overridable: `HUB_PORT`, `SEQ_PORT`, `MYSQL_PORT`.
 
 ## Resetting state
 

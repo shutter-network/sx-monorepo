@@ -138,7 +138,11 @@ export async function verifyTeBallot(
   // wrAttestation is satisfied by Snapshot's outer EIP-712 envelope, so
   // the SDK-level WR verifier is a constant ``() => true``. See module
   // docstring for the full auth-boundary argument.
-  return verifyBallot(inputs, proposal.te_config, mpk, () => true);
+  try {
+    return verifyBallot(inputs, proposal.te_config, mpk, () => true);
+  } finally {
+    mpk.destroyWasm();
+  }
 }
 
 // ---------- Phase 4: tally aggregation + recovery ----------
@@ -180,6 +184,17 @@ export function aggregateBallots(
     throw new Error('aggregateBallots: no votes to aggregate');
   }
 
+  // WASM heap management: BLST compiles to a fixed 16 MB WASM heap. G₂ points
+  // live there and are only freed when the JS GC fires the FinalizationRegistry
+  // callback — timing is non-deterministic. scalarMulCt and addCt each allocate
+  // a fresh pair of G₂ points; without explicit cleanup the intermediate points
+  // from every ballot accumulate until GC runs. At ~8 KB per ballot (10
+  // candidates × 2 points × ~400 B each) that exhausts the heap after ~2 000
+  // ballots if GC doesn't fire in time.
+  //
+  // Fix: call destroyWasm() on every point we no longer need immediately after
+  // it is superseded. This keeps heap usage at O(numCandidates) — just the
+  // running accumulators — regardless of voter count.
   const acc: (Ciphertext | null)[] = new Array(numCandidates).fill(null);
   for (const vote of votes) {
     const choiceJson =
@@ -192,11 +207,32 @@ export function aggregateBallots(
     }
     const w = BigInt(Math.round(vote.vp));
     if (w < 0n) throw new Error('aggregateBallots: negative vp');
-    if (w === 0n) continue;
+    if (w === 0n) {
+      for (const ct of cts) { ct.c1.destroyWasm(); ct.c2.destroyWasm(); }
+      continue;
+    }
 
     for (let j = 0; j < numCandidates; j++) {
-      const weighted = w === 1n ? cts[j] : scalarMulCt(w, cts[j]);
-      acc[j] = acc[j] === null ? weighted : addCt(acc[j]!, weighted);
+      const raw = cts[j];
+      // w === 1n: reuse raw directly (no new allocation).
+      // w  >  1n: scalarMulCt allocates a new ciphertext; raw is now stale.
+      const weighted = w === 1n ? raw : scalarMulCt(w, raw);
+      if (w !== 1n) {
+        raw.c1.destroyWasm();
+        raw.c2.destroyWasm();
+      }
+
+      if (acc[j] === null) {
+        acc[j] = weighted;
+      } else {
+        const prev = acc[j]!;
+        acc[j] = addCt(prev, weighted);
+        // Both inputs to addCt are superseded by the new sum — free them.
+        prev.c1.destroyWasm();
+        prev.c2.destroyWasm();
+        weighted.c1.destroyWasm();
+        weighted.c2.destroyWasm();
+      }
     }
   }
 

@@ -2,9 +2,21 @@ import express from 'express';
 import { verifyMessage } from '@ethersproject/wallet';
 import { capture } from '@snapshot-labs/snapshot-sentry';
 import { keccak256 } from '@ethersproject/keccak256';
+import {
+  G2Point,
+  Transcript,
+  initCurves,
+  verifyDecryptionShare
+} from '@snapshot-labs/private-vote-sdk';
 import db from './helpers/mysql';
 import log from './helpers/log';
 import { sendError } from './helpers/utils';
+
+let curvesReady: Promise<void> | null = null;
+function ensureCurvesInit(): Promise<void> {
+  if (!curvesReady) curvesReady = initCurves();
+  return curvesReady;
+}
 
 const router = express.Router();
 
@@ -404,6 +416,70 @@ router.post('/proposal/:id/te_decryption_share', async (req, res) => {
     }
     if (recovered.toLowerCase() !== keyperAddress.toLowerCase()) {
       return sendError(res, 'bad_signature', 401);
+    }
+
+    // DLEQ proof verification — reject a bad proof before it can be stored.
+    // INSERT IGNORE makes the first stored share permanent, so we must verify
+    // correctness here rather than letting an unverified share lock in.
+    await ensureCurvesInit();
+
+    const aggregate = parseJsonField<{
+      election_id: string;
+      num_candidates: number;
+      ciphertexts: Array<{ c1: string; c2: string }>;
+    } | null>(proposal.te_aggregate, null);
+    if (!aggregate?.ciphertexts || candidate < 0 || candidate >= aggregate.ciphertexts.length) {
+      return sendError(res, 'candidate_out_of_range', 400);
+    }
+    const committeePksArr = parseJsonField<string[] | null>(proposal.te_committee_pks, null);
+    if (!committeePksArr || keyperIndex > committeePksArr.length) {
+      return sendError(res, 'committee_pks_not_configured', 503);
+    }
+
+    let ctC1: G2Point | null = null;
+    let ctC2: G2Point | null = null;
+    let sigmaPoint: G2Point | null = null;
+    let committeePK: G2Point | null = null;
+    try {
+      const ctEntry = aggregate.ciphertexts[candidate];
+      ctC1 = G2Point.fromBytes(decodeHex(ctEntry.c1, 'ct.c1'));
+      ctC2 = G2Point.fromBytes(decodeHex(ctEntry.c2, 'ct.c2'));
+      sigmaPoint = G2Point.fromBytes(decodeHex(sigma, 'sigma'));
+      committeePK = G2Point.fromBytes(decodeHex(committeePksArr[keyperIndex - 1], 'committeePK'));
+    } catch (err: any) {
+      ctC1?.destroyWasm();
+      ctC2?.destroyWasm();
+      sigmaPoint?.destroyWasm();
+      committeePK?.destroyWasm();
+      return sendError(res, 'bad_request', 400);
+    }
+
+    // Transcript must match the keyper's sdk_compat.make_onchain_decrypt_transcript exactly:
+    //   label="SHUTTER-VOTE-DECRYPT-v1", electionId=32-byte proposalId, candidate=u16BE
+    const dleqTranscript = new Transcript('SHUTTER-VOTE-DECRYPT-v1');
+    dleqTranscript.append('electionId', decodeHex(proposalId, 'proposalId'));
+    const candidateBuf = Buffer.alloc(2);
+    candidateBuf.writeUInt16BE(candidate, 0);
+    dleqTranscript.append('candidate', candidateBuf);
+
+    let dleqOk: boolean;
+    try {
+      dleqOk = verifyDecryptionShare(
+        { c1: ctC1, c2: ctC2 },
+        { keyperIndex, sigma: sigmaPoint, proof: { e: BigInt(proofE), z: BigInt(proofZ) } },
+        committeePK,
+        dleqTranscript
+      );
+    } finally {
+      ctC1.destroyWasm();
+      ctC2.destroyWasm();
+      sigmaPoint.destroyWasm();
+      committeePK.destroyWasm();
+    }
+
+    if (!dleqOk) {
+      log.error(`[te_decryption_share] ${proposalId}: DLEQ proof invalid for keyper ${keyperIndex} candidate ${candidate}`);
+      return sendError(res, 'invalid_dleq_proof', 400);
     }
 
     const ts = Math.floor(Date.now() / 1000);

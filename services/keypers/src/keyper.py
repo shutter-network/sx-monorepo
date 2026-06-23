@@ -15,8 +15,8 @@ Usage:
 """
 
 import argparse
-import hashlib
 import json
+import logging
 import os
 import sys
 import requests
@@ -120,11 +120,12 @@ def create_keyper_app(keyper_id, *, hub_config=None, signing_key=None):
         if hub_config is not None:
             signing_key = hub_config["private_key"]
         else:
-            # Deterministic dev fallback so off-chain test runs work
-            # without explicit chain config.
-            seed = hashlib.sha256(f"keyper-{keyper_id}".encode()).digest()
-            signing_key = "0x" + seed.hex()
+            raise ValueError(
+                "signing_key is required. Pass KEYPER_PRIVATE_KEY via the environment "
+                "or --private-key on the command line."
+            )
     signing_address = Account.from_key(signing_key).address
+    logger = logging.getLogger(f'keyper.{keyper_id}')
 
     app = Flask(f"keyper_{keyper_id}")
     dkg_state = KeyperDKGState()
@@ -184,6 +185,7 @@ def create_keyper_app(keyper_id, *, hub_config=None, signing_key=None):
         if not isinstance(members, list) or len(members) != n:
             return jsonify({"error": f"members must be a list of {n} addresses, got {len(members)}"}), 400
 
+        logger.info("op=dkg_round1 proposal=%s n=%d t=%d", election_id, n, t)
         # Reset DKG state for this fresh run.
         commitments, shares = dkg_state.round1(kid, n, t)
         pending_shares.clear()
@@ -247,7 +249,11 @@ def create_keyper_app(keyper_id, *, hub_config=None, signing_key=None):
             try:
                 resp = requests.post(f"{url}/dkg/receive_commitments", json=body, timeout=10)
                 resp.raise_for_status()
+                logger.info("op=distribute_commitments proposal=%s recipient=%d status=ok",
+                            dkg_meta["election_id"], recipient_id)
             except Exception as e:
+                logger.error("op=distribute_commitments proposal=%s recipient=%d status=error err=%s",
+                             dkg_meta["election_id"], recipient_id, e)
                 return jsonify({
                     "error": f"Failed to send commitments to keyper {recipient_id}: {e}",
                 }), 500
@@ -289,13 +295,18 @@ def create_keyper_app(keyper_id, *, hub_config=None, signing_key=None):
         try:
             recovered = _recover(payload_hash, sig_hex)
         except Exception as e:
+            logger.warning("op=receive_commitments proposal=%s dealer=%d status=sig_error err=%s",
+                           election_id, dealer_id, e)
             return jsonify({"error": f"Signature recover failed: {e}"}), 401
         if recovered.lower() != expected.lower():
+            logger.warning("op=receive_commitments proposal=%s dealer=%d status=bad_sig "
+                           "expected=%s recovered=%s", election_id, dealer_id, expected, recovered)
             return jsonify({
                 "error": f"Bad signature: expected {expected}, recovered {recovered}",
             }), 401
 
         received_commitments[dealer_id] = commitments
+        logger.info("op=receive_commitments proposal=%s dealer=%d status=ok", election_id, dealer_id)
         return jsonify({"status": "ok"})
 
     @app.route("/dkg/distribute_shares", methods=["POST"])
@@ -308,6 +319,7 @@ def create_keyper_app(keyper_id, *, hub_config=None, signing_key=None):
         if dkg_meta["election_id"] is None:
             return jsonify({"error": "Run /dkg/round1 first"}), 400
 
+        logger.info("op=distribute_shares proposal=%s", dkg_meta["election_id"])
         for recipient_id_str, url in keyper_urls.items():
             recipient_id = int(recipient_id_str)
             share_val = pending_shares[recipient_id]
@@ -365,13 +377,18 @@ def create_keyper_app(keyper_id, *, hub_config=None, signing_key=None):
         try:
             recovered = _recover(payload_hash, sig_hex)
         except Exception as e:
+            logger.warning("op=receive_share proposal=%s dealer=%d status=sig_error err=%s",
+                           election_id, dealer_id, e)
             return jsonify({"error": f"Signature recover failed: {e}"}), 401
         if recovered.lower() != expected.lower():
+            logger.warning("op=receive_share proposal=%s dealer=%d status=bad_sig "
+                           "expected=%s recovered=%s", election_id, dealer_id, expected, recovered)
             return jsonify({
                 "error": f"Bad signature: expected {expected}, recovered {recovered}",
             }), 401
 
         received_shares[dealer_id] = share
+        logger.info("op=receive_share proposal=%s dealer=%d status=ok", election_id, dealer_id)
         return jsonify({"status": "ok"})
 
     @app.route("/dkg/reveal_share", methods=["POST"])
@@ -429,6 +446,8 @@ def create_keyper_app(keyper_id, *, hub_config=None, signing_key=None):
         except ValueError as e:
             # Use structured bad_dealers attribute from DKG (no regex parsing)
             bad_dealers = getattr(e, "bad_dealers", [])
+            logger.warning("op=dkg_round2 proposal=%s status=complaints dealers=%s err=%s",
+                           dkg_meta.get("election_id"), bad_dealers, e)
             return jsonify({
                 "keyper_id": keyper_meta["id"],
                 "verified": False,
@@ -436,6 +455,8 @@ def create_keyper_app(keyper_id, *, hub_config=None, signing_key=None):
                 "error": str(e),
             }), 200  # 200 so backend can parse the complaint
 
+        logger.info("op=dkg_round2 proposal=%s status=verified dealers=%s",
+                    dkg_meta.get("election_id"), sorted(received_shares.keys()))
         # Snapshot what we just consumed so a subsequent on-chain publish
         # uses the identical commitment set.
         last_round2["all_commitments"] = dict(all_commitments)
@@ -504,6 +525,7 @@ def create_keyper_app(keyper_id, *, hub_config=None, signing_key=None):
         from hub_client import HubClient, HubClientError
         cfg = keyper_meta["hub_config"]
         client = HubClient(cfg["hub_url"], cfg["private_key"])
+        logger.info("op=publish_dkg proposal=%s n=%d", proposal_id, n)
         try:
             resp = client.submit_dkg_result(
                 proposal_id=proposal_id,
@@ -512,8 +534,10 @@ def create_keyper_app(keyper_id, *, hub_config=None, signing_key=None):
                 committee_pks_hex=["0x" + p.hex() for p in committee_pks],
             )
         except HubClientError as e:
+            logger.error("op=publish_dkg proposal=%s status=error err=%s", proposal_id, e)
             return jsonify({"error": f"submit_dkg_result failed: {e}"}), 502
 
+        logger.info("op=publish_dkg proposal=%s status=submitted", proposal_id)
         return jsonify({
             "keyper_id": keyper_meta["id"],
             "hub_response": resp,
@@ -582,12 +606,15 @@ def create_keyper_app(keyper_id, *, hub_config=None, signing_key=None):
         mpk_k = dkg_state.public_key_share
         keyper_index = keyper_meta["id"]
 
+        logger.info("op=publish_decrypt proposal=%s candidates=%d", proposal_id, num_candidates)
         submitted = []
         for j in range(num_candidates):
             try:
                 C1 = g2_from_compressed(bytes.fromhex(ciphertexts[j]["c1"].removeprefix("0x")))
                 C2 = g2_from_compressed(bytes.fromhex(ciphertexts[j]["c2"].removeprefix("0x")))
             except Exception as e:
+                logger.error("op=publish_decrypt proposal=%s candidate=%d status=bad_ciphertext err=%s",
+                             proposal_id, j, e)
                 return jsonify({"error": f"Aggregate ciphertext {j} invalid: {e}"}), 502
 
             sigma = point_multiply(C1, msk_k)
@@ -605,7 +632,10 @@ def create_keyper_app(keyper_id, *, hub_config=None, signing_key=None):
                     proof_e=e_scalar,
                     proof_z=z_scalar,
                 )
+                logger.info("op=publish_decrypt proposal=%s candidate=%d status=submitted", proposal_id, j)
             except HubClientError as e:
+                logger.error("op=publish_decrypt proposal=%s candidate=%d status=error err=%s",
+                             proposal_id, j, e)
                 return jsonify({
                     "error": f"submit_decryption_share failed at candidate {j}: {e}",
                     "submitted": submitted,
@@ -649,6 +679,11 @@ def create_keyper_app(keyper_id, *, hub_config=None, signing_key=None):
 
 
 def main():
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s %(levelname)s [%(name)s] %(message)s',
+        datefmt='%Y-%m-%dT%H:%M:%S',
+    )
     parser = argparse.ArgumentParser(description="Keyper server for threshold ElGamal voting")
     parser.add_argument("--id", type=int, required=True, help="Keyper ID (1-indexed)")
     parser.add_argument("--port", type=int, required=True, help="Port to listen on")
@@ -661,6 +696,13 @@ def main():
     args = parser.parse_args()
 
     private_key = args.private_key or os.environ.get("KEYPER_PRIVATE_KEY")
+    if not private_key:
+        sys.exit(
+            "Error: KEYPER_PRIVATE_KEY is required.\n"
+            "Generate a fresh key with:\n"
+            "  python -c \"from eth_account import Account; import secrets; "
+            "k=secrets.token_bytes(32); print('0x'+k.hex())\""
+        )
     hub_url = args.hub_url or os.environ.get("KEYPER_HUB_URL")
     hub_config = None
     if hub_url and private_key:
@@ -669,9 +711,11 @@ def main():
     # Same key signs both the hub-bound submissions and the P2P DKG messages
     # so the recovered address matches the expected keyper-set entry.
     app = create_keyper_app(args.id, hub_config=hub_config, signing_key=private_key)
-    suffix = " [hub enabled]" if hub_config else ""
-    print(f"[Keyper {args.id}] Starting on {args.host}:{args.port}{suffix}")
-    print(f"[Keyper {args.id}] Signing address: {Account.from_key(private_key).address if private_key else '(deterministic dev key)'}")
+    startup_log = logging.getLogger(f'keyper.{args.id}')
+    startup_log.info("starting host=%s port=%d hub=%s address=%s",
+                     args.host, args.port,
+                     hub_url or "disabled",
+                     Account.from_key(private_key).address)
     app.run(host=args.host, port=args.port, debug=False, use_reloader=False)
 
 

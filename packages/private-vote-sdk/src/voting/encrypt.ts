@@ -27,7 +27,12 @@ export function encrypt(
 ): { ct: Ciphertext; r: bigint } {
   const P2 = G2Point.generator();
   const c1 = P2.mul(r);
-  const c2 = mpk.mul(r).add(P2.mul(modQ(m)));
+  const mpkR = mpk.mul(r);
+  const P2m = P2.mul(modQ(m));
+  const c2 = mpkR.add(P2m);
+  mpkR.destroyWasm();
+  P2m.destroyWasm();
+  P2.destroyWasm();
   return { ct: { c1, c2 }, r };
 }
 
@@ -46,7 +51,16 @@ export function sumCts(cts: readonly Ciphertext[]): Ciphertext {
   if (cts.length === 0) {
     return { c1: G2Point.identity(), c2: G2Point.identity() };
   }
-  let acc = cts[0]!;
-  for (let i = 1; i < cts.length; i++) acc = addCt(acc, cts[i]!);
+  if (cts.length === 1) return cts[0]!;
+  // Start from addCt(cts[0], cts[1]) so every acc we own is a fresh
+  // allocation and can be freed when superseded, avoiding WASM heap leaks
+  // at the 16MB boundary for large candidate/voter counts.
+  let acc = addCt(cts[0]!, cts[1]!);
+  for (let i = 2; i < cts.length; i++) {
+    const prev = acc;
+    acc = addCt(prev, cts[i]!);
+    prev.c1.destroyWasm();
+    prev.c2.destroyWasm();
+  }
   return acc;
 }

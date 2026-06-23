@@ -131,8 +131,7 @@ Notes:
 
 - **Port already in use (`Bind for 0.0.0.0:3000 failed`)** — another host process holds a default
   port. Override just the host side via env (containers always talk on fixed internal ports):
-  `HUB_PORT`, `SEQ_PORT`, `MYSQL_PORT`, `KEYPER1_PORT`, `KEYPER2_PORT`, `KEYPER3_PORT` (e.g.
-  `HUB_PORT=3010`).
+  `HUB_PORT`, `SEQ_PORT`, `MYSQL_PORT` (e.g. `HUB_PORT=3010`).
 - **Container-to-container MySQL** runs without TLS on the private compose network, so the hub and
   sequencer start with `DB_SSL=false`. The MySQL helpers only attempt TLS when `DB_SSL` is not
   `false`, so host-run dev (TLS to a managed DB) is unchanged.

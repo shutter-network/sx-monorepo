@@ -112,19 +112,25 @@ export async function buildTeBallotEnvelope(
   const votes: bigint[] = new Array(config.numCandidates).fill(0n);
   votes[choice - 1] = 1n;
 
-  const ballot = buildBallot({
-    mpk: mpkPoint,
-    electionId,
-    pseudonym,
-    sk,
-    vk: vkPoint,
-    votes,
-    params: config,
-    // Snapshot's outer EIP-712 envelope is the auth boundary, so the
-    // SDK's wrAttestation slot is unused. The sequencer's WR verifier
-    // is also a constant true. Send a zero-length blob.
-    wrAttestation: new Uint8Array(0)
-  });
+  let ballot;
+  try {
+    ballot = buildBallot({
+      mpk: mpkPoint,
+      electionId,
+      pseudonym,
+      sk,
+      vk: vkPoint,
+      votes,
+      params: config,
+      // Snapshot's outer EIP-712 envelope is the auth boundary, so the
+      // SDK's wrAttestation slot is unused. The sequencer's WR verifier
+      // is also a constant true. Send a zero-length blob.
+      wrAttestation: new Uint8Array(0)
+    });
+  } finally {
+    mpkPoint.destroyWasm();
+    vk.destroyWasm();
+  }
 
   return {
     electionId: toHex(ballot.electionId),

@@ -17,8 +17,8 @@ Environment:
                        Default: http://keyper1:5001,http://keyper2:5002,http://keyper3:5003
   KEYPER_PRIVATE_KEYS  Comma-separated keyper signing keys, in keyper-id order.
                        Used only to derive the te_keyper_addresses allow-list so
-                       the hub accepts each keyper's DKG submission. If unset,
-                       deterministic dev keys (sha256("keyper-{i}")) are used.
+                       the hub accepts each keyper's DKG submission. REQUIRED —
+                       the coordinator exits with an error if this is not set.
   TE_THRESHOLD_T       Threshold degree t (need t+1 shares). Default: 1.
   POLL_INTERVAL_S      Seconds between DB polls. Default: 2.
   HUB_DB_HOST          MySQL host. Default: mysql
@@ -29,10 +29,9 @@ Environment:
 """
 from __future__ import annotations
 
-import hashlib
 import json
+import logging
 import os
-import sys
 import time
 
 import pymysql
@@ -40,15 +39,18 @@ from eth_account import Account
 
 from dkg_coordinator import run_dkg  # vendored in this image at /app/src
 
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s %(levelname)s [auto-dkg] %(message)s',
+    datefmt='%Y-%m-%dT%H:%M:%S',
+)
+log = logging.getLogger('auto-dkg')
+
 POLL_INTERVAL_S = float(os.environ.get("POLL_INTERVAL_S", "2"))
 MAX_FAILURES = 5
 DEFAULT_T = int(os.environ.get("TE_THRESHOLD_T", "1"))
 DEFAULT_BUDGET = 1
 DEFAULT_MODE = "exact"
-
-
-def _default_keyper_key(i: int) -> str:
-    return "0x" + hashlib.sha256(f"keyper-{i}".encode()).hexdigest()
 
 
 def _keyper_urls() -> list[str]:
@@ -61,10 +63,13 @@ def _keyper_urls() -> list[str]:
 
 def _keyper_addresses(n: int) -> list[str]:
     raw = os.environ.get("KEYPER_PRIVATE_KEYS", "").strip()
-    if raw:
-        keys = [k.strip() for k in raw.split(",") if k.strip()]
-    else:
-        keys = [_default_keyper_key(i) for i in range(1, n + 1)]
+    if not raw:
+        raise SystemExit(
+            "Error: KEYPER_PRIVATE_KEYS is required.\n"
+            "Set it to a comma-separated list of the keyper signing keys (0x-prefixed) "
+            "in keyper-id order, matching KEYPER_PRIVATE_KEY_{1,2,3} in .env."
+        )
+    keys = [k.strip() for k in raw.split(",") if k.strip()]
     if len(keys) != n:
         raise SystemExit(
             f"KEYPER_PRIVATE_KEYS has {len(keys)} keys but KEYPER_URLS has {n} urls"
@@ -124,13 +129,12 @@ def _ensure_dkg(pid: str, choices: list) -> bool:
     finally:
         conn.close()
 
-    print(f"[auto-dkg] running DKG for {pid} (n={n}, t={t}, candidates={num_candidates})")
+    log.info("op=dkg_start proposal=%s n=%d t=%d candidates=%d", pid, n, t, num_candidates)
     run_dkg(
         keyper_urls=KEYPER_URLS,
         election_id=pid,
         election_address=pid,
         n=n, t=t,
-        verbose=False,
     )
 
     deadline = time.time() + 30
@@ -143,19 +147,17 @@ def _ensure_dkg(pid: str, choices: list) -> bool:
         finally:
             conn.close()
         if row and row[0]:
-            print(f"[auto-dkg] {pid} DKG complete - te_mpk set")
+            log.info("op=dkg_complete proposal=%s status=ok", pid)
             return True
         time.sleep(0.5)
 
-    print(f"[auto-dkg] {pid} timed out waiting for te_mpk", file=sys.stderr)
+    log.error("op=dkg_complete proposal=%s status=timeout", pid)
     return False
 
 
 def run_forever(poll_interval_s: float = POLL_INTERVAL_S) -> None:
-    print(
-        f"[auto-dkg] coordinator started "
-        f"(poll {poll_interval_s}s, keypers={KEYPER_URLS}, t={DEFAULT_T})"
-    )
+    log.info("coordinator started poll_interval=%.1fs keypers=%s t=%d",
+             poll_interval_s, KEYPER_URLS, DEFAULT_T)
     failures: dict[str, int] = {}
     while True:
         try:
@@ -163,15 +165,13 @@ def run_forever(poll_interval_s: float = POLL_INTERVAL_S) -> None:
             try:
                 with conn.cursor() as cur:
                     cur.execute(
-                        "SELECT id, choices, te_mpk FROM proposals "
-                        "WHERE privacy='shutter-elgamal'"
+                        "SELECT id, choices FROM proposals "
+                        "WHERE privacy='shutter-elgamal' AND te_mpk IS NULL"
                     )
                     rows = cur.fetchall()
             finally:
                 conn.close()
-            for pid, choices_json, te_mpk in rows:
-                if te_mpk is not None:
-                    continue
+            for pid, choices_json in rows:
                 if failures.get(pid, 0) >= MAX_FAILURES:
                     continue
                 choices = (
@@ -185,18 +185,14 @@ def run_forever(poll_interval_s: float = POLL_INTERVAL_S) -> None:
                         failures[pid] = failures.get(pid, 0) + 1
                 except Exception as e:  # noqa: BLE001
                     failures[pid] = failures.get(pid, 0) + 1
-                    print(
-                        f"[auto-dkg] {pid} DKG failed "
-                        f"({failures[pid]}/{MAX_FAILURES}): {e}",
-                        file=sys.stderr,
-                    )
+                    log.error("op=dkg_start proposal=%s status=error attempt=%d/%d err=%s",
+                              pid, failures[pid], MAX_FAILURES, e)
         except Exception as e:  # noqa: BLE001
-            print(f"[auto-dkg] poll error: {e}", file=sys.stderr)
+            log.error("poll_error err=%s", e)
         time.sleep(poll_interval_s)
-
 
 if __name__ == "__main__":
     try:
         run_forever()
     except KeyboardInterrupt:
-        print("\n[auto-dkg] stopped")
+        log.info("stopped")

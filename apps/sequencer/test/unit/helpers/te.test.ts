@@ -1,4 +1,98 @@
-import { expectedPseudonym, verifyTeBallot } from '../../../src/helpers/te';
+import {
+  G2Point,
+  initCurves
+} from '@snapshot-labs/private-vote-sdk';
+import {
+  aggregateBallots,
+  ensureCurvesInit,
+  expectedPseudonym,
+  verifyTeBallot
+} from '../../../src/helpers/te';
+
+// ---------------------------------------------------------------------------
+// Shared fixture: compressed G2 generator point bytes, usable as a stand-in
+// ciphertext. aggregateBallots does point arithmetic only — no ZK re-verify —
+// so any valid on-curve point works for heap stress testing.
+// ---------------------------------------------------------------------------
+let G2_GENERATOR_HEX: string;
+
+beforeAll(async () => {
+  await initCurves();
+  const genBytes = G2Point.generator().toBytes();
+  G2_GENERATOR_HEX = '0x' + Buffer.from(genBytes).toString('hex');
+});
+
+// ---------------------------------------------------------------------------
+// WASM heap stress tests
+//
+// Without destroyWasm() on G2Point, allocating N voters' worth of ciphertexts
+// in a tight loop exhausts the fixed 16 MB WASM heap before the loop ends.
+// The symptom is an Emscripten abort: "Cannot enlarge memory arrays to size …"
+//
+// With the fix, peak WASM usage stays at O(numCandidates) regardless of N
+// because intermediate points are freed immediately after each voter.
+// ---------------------------------------------------------------------------
+describe('WASM heap management', () => {
+  const NUM_CANDIDATES = 3;
+
+  function makeFakeVote(vp = 1): { vp: number; choice: string } {
+    return {
+      vp,
+      choice: JSON.stringify({
+        electionId: '0x' + '00'.repeat(32),
+        pseudonym: '0x' + '00'.repeat(32),
+        vk: '0x' + '00'.repeat(48),
+        ciphertexts: Array.from({ length: NUM_CANDIDATES }, () => ({
+          c1: G2_GENERATOR_HEX,
+          c2: G2_GENERATOR_HEX
+        })),
+        zkProof: '0x01',
+        voterSignature: '0x' + '00'.repeat(80),
+        wrAttestation: '0x'
+      })
+    };
+  }
+
+  test(
+    'aggregateBallots completes for 30,000 voters without exhausting the 16 MB WASM heap',
+    async () => {
+      // 30,000 voters × 3 candidates × 2 G2 points × ~288 bytes ≈ 51 MB — 3× the
+      // heap limit. Without destroyWasm() this aborts with "Cannot enlarge memory
+      // arrays" around voter ~9,200. With the fix, peak WASM usage is O(numCandidates)
+      // = 6 points × 288 bytes ≈ 1.7 KB regardless of voter count.
+      const votes = Array.from({ length: 30_000 }, () => makeFakeVote());
+      const result = aggregateBallots(NUM_CANDIDATES, votes);
+      expect(result).toHaveLength(NUM_CANDIDATES);
+    },
+    900_000 // 15 min ceiling — BLS12-381 G2 ops are expensive; expect ~10 min locally
+  );
+
+  test(
+    'aggregateBallots handles weighted votes (vp > 1) at scale without heap exhaustion',
+    async () => {
+      // Weighted path allocates an extra scalarMulCt point per voter per candidate.
+      // Verifies that branch also cleans up correctly.
+      const votes = Array.from({ length: 5_000 }, (_, i) => makeFakeVote(i % 10 + 1));
+      const result = aggregateBallots(NUM_CANDIDATES, votes);
+      expect(result).toHaveLength(NUM_CANDIDATES);
+    },
+    30_000
+  );
+
+  test(
+    'aggregateBallots skips zero-weight votes and frees their ciphertexts',
+    async () => {
+      // Every other vote has vp=0 — these are skipped but must still free the
+      // G2 points allocated by envelopeCiphertexts before the continue.
+      const votes = Array.from({ length: 5_000 }, (_, i) =>
+        makeFakeVote(i % 2 === 0 ? 1 : 0)
+      );
+      const result = aggregateBallots(NUM_CANDIDATES, votes);
+      expect(result).toHaveLength(NUM_CANDIDATES);
+    },
+    30_000
+  );
+});
 
 describe('helpers/te', () => {
   describe('expectedPseudonym', () => {

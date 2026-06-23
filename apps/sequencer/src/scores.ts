@@ -186,13 +186,7 @@ export async function updateProposalAndVotes(
     (proposal.votes > 20000 && proposal.scores_updated > ts - 300) ||
     pendingRequests[proposalId]
   ) {
-    console.log(
-      'ignore score calculation',
-      proposal.space,
-      proposalId,
-      proposal.votes,
-      proposal.scores_updated
-    );
+    log.info(`[scores] skipping recalculation space=${proposal.space} proposal=${proposalId} votes=${proposal.votes} scores_updated=${proposal.scores_updated}`);
     return false;
   }
   if (proposal.votes > 20000) pendingRequests[proposalId] = true;

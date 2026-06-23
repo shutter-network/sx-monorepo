@@ -285,149 +285,203 @@ export function verifyBallot(
     };
   }
 
-  // Decode vk (subgroup-checked in G1Point.fromBytes).
-  let vk: G1Point;
-  try {
-    vk = G1Point.fromBytes(inputs.vk);
-  } catch (e) {
-    return { ok: false, reason: `vk decode: ${(e as Error).message}` };
-  }
-  if (vk.isIdentity()) {
-    // sk=0 would make `s·P₁ == R + e·O = R` — every signature trivially
-    // verifies. The spec defines vk := sk·P₁ for random sk; WR-Server
-    // registration should reject identity, but we guard here too.
-    return { ok: false, reason: 'vk is the identity — rejected (sk=0 breaks signature soundness)' };
+  // Track every G1/G2 point we allocate so they are freed in the finally block
+  // regardless of which path (ok or early-return) this function takes.
+  // Callers own mpk — we do NOT free it here.
+  const ownedG1: G1Point[] = [];
+  const ownedG2: G2Point[] = [];
+
+  function trackG1(p: G1Point): G1Point { ownedG1.push(p); return p; }
+  function trackG2(p: G2Point): G2Point { ownedG2.push(p); return p; }
+  function freeOwned(): void {
+    for (const p of ownedG1) p.destroyWasm();
+    for (const p of ownedG2) p.destroyWasm();
+    ownedG1.length = 0;
+    ownedG2.length = 0;
   }
 
-  // Decode every (C1, C2). Each G2Point.fromBytes runs a subgroup check.
-  const cts: Ciphertext[] = new Array(inputs.ciphertexts.length);
-  for (let i = 0; i < inputs.ciphertexts.length; i++) {
-    const [c1Bytes, c2Bytes] = inputs.ciphertexts[i]!;
+  try {
+    // Decode vk (subgroup-checked in G1Point.fromBytes).
+    let vk: G1Point;
     try {
-      cts[i] = {
-        c1: G2Point.fromBytes(c1Bytes),
-        c2: G2Point.fromBytes(c2Bytes),
-      };
+      vk = trackG1(G1Point.fromBytes(inputs.vk));
     } catch (e) {
-      return { ok: false, reason: `ciphertext[${i}] decode: ${(e as Error).message}` };
+      return { ok: false, reason: `vk decode: ${(e as Error).message}` };
     }
-  }
+    if (vk.isIdentity()) {
+      return { ok: false, reason: 'vk is the identity — rejected (sk=0 breaks signature soundness)' };
+    }
 
-  // WR-Server attestation (caller-supplied).
-  if (
-    !verifyWRAttestation(
-      inputs.electionId,
-      inputs.pseudonym,
-      inputs.vk,
-      inputs.wrAttestation,
-    )
-  ) {
-    return { ok: false, reason: 'wrAttestation verification failed' };
-  }
+    // Decode every (C1, C2). Each G2Point.fromBytes runs a subgroup check.
+    const cts: Ciphertext[] = new Array(inputs.ciphertexts.length);
+    for (let i = 0; i < inputs.ciphertexts.length; i++) {
+      const [c1Bytes, c2Bytes] = inputs.ciphertexts[i]!;
+      try {
+        cts[i] = {
+          c1: trackG2(G2Point.fromBytes(c1Bytes)),
+          c2: trackG2(G2Point.fromBytes(c2Bytes)),
+        };
+      } catch (e) {
+        return { ok: false, reason: `ciphertext[${i}] decode: ${(e as Error).message}` };
+      }
+    }
 
-  // Decode zkProof.
-  let bvp: BallotValidityProof;
-  try {
-    bvp = decodeBallotValidityProof(inputs.zkProof, {
-      variant: params.variant,
-      numCandidates: params.numCandidates,
-      budget: params.budget,
-      d: params.d,
+    // WR-Server attestation (caller-supplied).
+    if (
+      !verifyWRAttestation(
+        inputs.electionId,
+        inputs.pseudonym,
+        inputs.vk,
+        inputs.wrAttestation,
+      )
+    ) {
+      return { ok: false, reason: 'wrAttestation verification failed' };
+    }
+
+    // Decode zkProof.
+    let bvp: BallotValidityProof;
+    try {
+      bvp = decodeBallotValidityProof(inputs.zkProof, {
+        variant: params.variant,
+        numCandidates: params.numCandidates,
+        budget: params.budget,
+        d: params.d,
+      });
+    } catch (e) {
+      return { ok: false, reason: `zkProof decode: ${(e as Error).message}` };
+    }
+    // Track all G2 commitment points decoded from the proof (a1, a2 per branch).
+    for (const orProof of bvp.rangeOrBit) {
+      for (const br of orProof.branches) {
+        trackG2(br.a1);
+        trackG2(br.a2);
+      }
+    }
+    if (bvp.budget.mode === 'atMost') {
+      for (const br of bvp.budget.proof.branches) {
+        trackG2(br.a1);
+        trackG2(br.a2);
+      }
+    }
+
+    if (bvp.budget.mode !== params.mode) {
+      return {
+        ok: false,
+        reason: `budget mode on wire (${bvp.budget.mode}) differs from params (${params.mode})`,
+      };
+    }
+
+    // Build the shared transcript and run every proof against it.
+    const t = seedBallotTranscript(inputs.electionId, mpk, vk, cts, params);
+
+    let ctSum: Ciphertext;
+    if (params.variant === 'A') {
+      // ℓ range proofs over {0, …, B}, one per candidate.
+      if (bvp.rangeOrBit.length !== params.numCandidates) {
+        return {
+          ok: false,
+          reason: `rangeOrBit.length (${bvp.rangeOrBit.length}) != numCandidates (${params.numCandidates})`,
+        };
+      }
+      const candidates = rangeCandidates(params.budget);
+      for (let j = 0; j < params.numCandidates; j++) {
+        t.append('ballot:range', u16BE(j));
+        const stmt: ORStatement = { ct: cts[j]!, mpk, candidates };
+        if (!verifyOR(stmt, bvp.rangeOrBit[j]!, t)) {
+          return { ok: false, reason: `range proof ${j} failed` };
+        }
+      }
+      if (cts.length === 1) {
+        ctSum = cts[0]!;
+      } else {
+        ctSum = sumCts(cts);
+        // sumCts returns a fresh allocation — track it so it gets freed.
+        trackG2(ctSum.c1);
+        trackG2(ctSum.c2);
+      }
+    } else {
+      // Variant B: ℓ·d bit proofs over {0,1}. Caller reconstructs
+      //   ĉ_j = Σ_k 2^k · c_{j,k}  (Munich §6.2.2)
+      // and the budget proof runs on ĉ = Σ_j ĉ_j.
+      const d = params.d!;
+      const totalBits = params.numCandidates * d;
+      if (bvp.rangeOrBit.length !== totalBits) {
+        return {
+          ok: false,
+          reason: `rangeOrBit.length (${bvp.rangeOrBit.length}) != numCandidates·d (${totalBits})`,
+        };
+      }
+      const bitCandidates: readonly bigint[] = [0n, 1n];
+      for (let jk = 0; jk < totalBits; jk++) {
+        t.append('ballot:bit', u16BE(jk));
+        const stmt: ORStatement = { ct: cts[jk]!, mpk, candidates: bitCandidates };
+        if (!verifyOR(stmt, bvp.rangeOrBit[jk]!, t)) {
+          return { ok: false, reason: `bit proof ${jk} failed` };
+        }
+      }
+      // Reconstruct each ĉ_j, then ĉ = Σ_j ĉ_j.
+      const cHats: Ciphertext[] = new Array(params.numCandidates);
+      for (let j = 0; j < params.numCandidates; j++) {
+        let acc: Ciphertext | null = null;
+        for (let k = 0; k < d; k++) {
+          const weighted = scalarMulCt(1n << BigInt(k), cts[j * d + k]!);
+          trackG2(weighted.c1);
+          trackG2(weighted.c2);
+          if (acc === null) {
+            acc = weighted;
+          } else {
+            const next = addCt(acc, weighted);
+            trackG2(next.c1);
+            trackG2(next.c2);
+            acc = next;
+          }
+        }
+        cHats[j] = acc!;
+      }
+      if (cHats.length === 1) {
+        ctSum = cHats[0]!;
+      } else {
+        ctSum = sumCts(cHats);
+        trackG2(ctSum.c1);
+        trackG2(ctSum.c2);
+      }
+    }
+
+    t.append('ballot:budget', new Uint8Array([0]));
+    if (
+      !verifyBudget(
+        { ctSum, mpk, budget: BigInt(params.budget) },
+        bvp.budget,
+        t,
+      )
+    ) {
+      return { ok: false, reason: 'budget proof failed' };
+    }
+
+    // Schnorr — canonical preimage → keccak256 → verify.
+    let sig;
+    try {
+      sig = decodeSchnorr(inputs.voterSignature);
+    } catch (e) {
+      return { ok: false, reason: `signature decode: ${(e as Error).message}` };
+    }
+    trackG1(sig.R); // R is a G1Point allocated by decodeSchnorr
+
+    const preimage = canonicalBallotMessage({
+      electionId: inputs.electionId,
+      pseudonym: inputs.pseudonym,
+      ciphertexts: inputs.ciphertexts,
+      zkProof: inputs.zkProof,
     });
-  } catch (e) {
-    return { ok: false, reason: `zkProof decode: ${(e as Error).message}` };
-  }
-  if (bvp.budget.mode !== params.mode) {
-    return {
-      ok: false,
-      reason: `budget mode on wire (${bvp.budget.mode}) differs from params (${params.mode})`,
-    };
-  }
-
-  // Build the shared transcript and run every proof against it.
-  const t = seedBallotTranscript(inputs.electionId, mpk, vk, cts, params);
-
-  let ctSum: Ciphertext;
-  if (params.variant === 'A') {
-    // ℓ range proofs over {0, …, B}, one per candidate.
-    if (bvp.rangeOrBit.length !== params.numCandidates) {
-      return {
-        ok: false,
-        reason: `rangeOrBit.length (${bvp.rangeOrBit.length}) != numCandidates (${params.numCandidates})`,
-      };
+    const msg = keccak256(preimage, 'bytes');
+    if (!schnorrVerify(vk, msg, sig)) {
+      return { ok: false, reason: 'signature invalid' };
     }
-    const candidates = rangeCandidates(params.budget);
-    for (let j = 0; j < params.numCandidates; j++) {
-      t.append('ballot:range', u16BE(j));
-      const stmt: ORStatement = { ct: cts[j]!, mpk, candidates };
-      if (!verifyOR(stmt, bvp.rangeOrBit[j]!, t)) {
-        return { ok: false, reason: `range proof ${j} failed` };
-      }
-    }
-    ctSum = cts.length === 1 ? cts[0]! : sumCts(cts);
-  } else {
-    // Variant B: ℓ·d bit proofs over {0,1}. Caller reconstructs
-    //   ĉ_j = Σ_k 2^k · c_{j,k}  (Munich §6.2.2)
-    // and the budget proof runs on ĉ = Σ_j ĉ_j.
-    const d = params.d!;
-    const totalBits = params.numCandidates * d;
-    if (bvp.rangeOrBit.length !== totalBits) {
-      return {
-        ok: false,
-        reason: `rangeOrBit.length (${bvp.rangeOrBit.length}) != numCandidates·d (${totalBits})`,
-      };
-    }
-    const bitCandidates: readonly bigint[] = [0n, 1n];
-    for (let jk = 0; jk < totalBits; jk++) {
-      t.append('ballot:bit', u16BE(jk));
-      const stmt: ORStatement = { ct: cts[jk]!, mpk, candidates: bitCandidates };
-      if (!verifyOR(stmt, bvp.rangeOrBit[jk]!, t)) {
-        return { ok: false, reason: `bit proof ${jk} failed` };
-      }
-    }
-    // Reconstruct each ĉ_j, then ĉ = Σ_j ĉ_j.
-    const cHats: Ciphertext[] = new Array(params.numCandidates);
-    for (let j = 0; j < params.numCandidates; j++) {
-      let acc: Ciphertext | null = null;
-      for (let k = 0; k < d; k++) {
-        const weighted = scalarMulCt(1n << BigInt(k), cts[j * d + k]!);
-        acc = acc === null ? weighted : addCt(acc, weighted);
-      }
-      cHats[j] = acc!;
-    }
-    ctSum = cHats.length === 1 ? cHats[0]! : sumCts(cHats);
-  }
 
-  t.append('ballot:budget', new Uint8Array([0]));
-  if (
-    !verifyBudget(
-      { ctSum, mpk, budget: BigInt(params.budget) },
-      bvp.budget,
-      t,
-    )
-  ) {
-    return { ok: false, reason: 'budget proof failed' };
+    return { ok: true };
+  } finally {
+    freeOwned();
   }
-
-  // Schnorr — canonical preimage → keccak256 → verify.
-  let sig;
-  try {
-    sig = decodeSchnorr(inputs.voterSignature);
-  } catch (e) {
-    return { ok: false, reason: `signature decode: ${(e as Error).message}` };
-  }
-  const preimage = canonicalBallotMessage({
-    electionId: inputs.electionId,
-    pseudonym: inputs.pseudonym,
-    ciphertexts: inputs.ciphertexts,
-    zkProof: inputs.zkProof,
-  });
-  const msg = keccak256(preimage, 'bytes');
-  if (!schnorrVerify(vk, msg, sig)) {
-    return { ok: false, reason: 'signature invalid' };
-  }
-
-  return { ok: true };
 }
 
 function u16BE(n: number): Uint8Array {
