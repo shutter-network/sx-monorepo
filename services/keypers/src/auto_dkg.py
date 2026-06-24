@@ -20,6 +20,8 @@ Environment:
                        the hub accepts each keyper's DKG submission. REQUIRED —
                        the coordinator exits with an error if this is not set.
   TE_THRESHOLD_T       Threshold degree t (need t+1 shares). Default: 1.
+  TE_WEIGHTED_BUDGET   Denominator for weighted vote splits (e.g. 100 = percentages,
+                       1000 = 0.1% granularity). Default: 100.
   POLL_INTERVAL_S      Seconds between DB polls. Default: 2.
   HUB_DB_HOST          MySQL host. Default: mysql
   HUB_DB_PORT          MySQL port. Default: 3306
@@ -50,6 +52,7 @@ POLL_INTERVAL_S = float(os.environ.get("POLL_INTERVAL_S", "2"))
 MAX_FAILURES = 5
 DEFAULT_T = int(os.environ.get("TE_THRESHOLD_T", "1"))
 DEFAULT_BUDGET = 1
+WEIGHTED_BUDGET = int(os.environ.get("TE_WEIGHTED_BUDGET", "100"))
 DEFAULT_MODE = "exact"
 
 
@@ -93,14 +96,17 @@ KEYPER_URLS = _keyper_urls()
 KEYPER_ADDRS = _keyper_addresses(len(KEYPER_URLS))
 
 
-def _ensure_dkg(pid: str, choices: list) -> bool:
+def _ensure_dkg(pid: str, choices: list, vote_type: str) -> bool:
     """Populate te_* config and run DKG for one proposal. Returns True on success."""
     n = len(KEYPER_URLS)
     t = DEFAULT_T
     num_candidates = len(choices)
+    # Weighted proposals encode proportional splits as integers out of WEIGHTED_BUDGET
+    # (e.g. 60+40=100); the tally path divides recovered sums by budget at the end.
+    budget = WEIGHTED_BUDGET if vote_type == "weighted" else DEFAULT_BUDGET
     te_config = {
         "numCandidates": num_candidates,
-        "budget": DEFAULT_BUDGET,
+        "budget": budget,
         "mode": DEFAULT_MODE,
         "variant": "A",
     }
@@ -129,7 +135,8 @@ def _ensure_dkg(pid: str, choices: list) -> bool:
     finally:
         conn.close()
 
-    log.info("op=dkg_start proposal=%s n=%d t=%d candidates=%d", pid, n, t, num_candidates)
+    log.info("op=dkg_start proposal=%s n=%d t=%d candidates=%d budget=%d vote_type=%s",
+             pid, n, t, num_candidates, budget, vote_type)
     run_dkg(
         keyper_urls=KEYPER_URLS,
         election_id=pid,
@@ -165,13 +172,13 @@ def run_forever(poll_interval_s: float = POLL_INTERVAL_S) -> None:
             try:
                 with conn.cursor() as cur:
                     cur.execute(
-                        "SELECT id, choices FROM proposals "
+                        "SELECT id, choices, type FROM proposals "
                         "WHERE privacy='shutter-elgamal' AND te_mpk IS NULL"
                     )
                     rows = cur.fetchall()
             finally:
                 conn.close()
-            for pid, choices_json in rows:
+            for pid, choices_json, vote_type in rows:
                 if failures.get(pid, 0) >= MAX_FAILURES:
                     continue
                 choices = (
@@ -180,13 +187,13 @@ def run_forever(poll_interval_s: float = POLL_INTERVAL_S) -> None:
                     else choices_json
                 )
                 try:
-                    ok = _ensure_dkg(pid, choices)
+                    ok = _ensure_dkg(pid, choices, vote_type or "single-choice")
                     if not ok:
                         failures[pid] = failures.get(pid, 0) + 1
                 except Exception as e:  # noqa: BLE001
                     failures[pid] = failures.get(pid, 0) + 1
-                    log.error("op=dkg_start proposal=%s status=error attempt=%d/%d err=%s",
-                              pid, failures[pid], MAX_FAILURES, e)
+                    log.error("op=dkg_start proposal=%s vote_type=%s status=error attempt=%d/%d err=%s",
+                              pid, vote_type, failures[pid], MAX_FAILURES, e)
         except Exception as e:  # noqa: BLE001
             log.error("poll_error err=%s", e)
         time.sleep(poll_interval_s)

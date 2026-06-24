@@ -77,7 +77,7 @@ before the homomorphic sum — **no change to the ballot cryptography**.
 | --- | --- |
 | Curve | BLS12-381 (ElGamal in G₂, Schnorr in G₁) |
 | Threshold | `t = 1, n = 3` (two honest keypers required to open a tally) |
-| Ballot variant | Variant A, exact budget `B = 1` |
+| Ballot variant | Variant A, exact budget `B = 1` (single-choice) or `B = 100` (weighted) |
 | DKG | Feldman verifiable secret sharing |
 | Parity gate | TS↔Python byte-for-byte, `scripts/parity-gate.mjs` |
 
@@ -266,7 +266,7 @@ When a `shutter-elgamal` proposal is created, the hub writes:
 
 | Column | Value |
 | --- | --- |
-| `te_config` | JSON: `{ numCandidates, budget: 1, mode: 'exact', variant: 'A' }` |
+| `te_config` | JSON: `{ numCandidates, budget, mode: 'exact', variant: 'A' }` — `budget=1` for single-choice, `budget=100` (default, configurable via `TE_WEIGHTED_BUDGET`) for weighted |
 | `te_threshold_t` / `te_threshold_n` | `1` / `3` |
 | `te_keyper_urls` | JSON array of three keyper URLs |
 | `te_keyper_addresses` | JSON array of three EIP-191 signer addresses (the allow-list) |
@@ -307,7 +307,7 @@ nothing.
 | Single malicious keyper | Holds 1 of 3 shares — learns nothing. Malformed shares are caught by the DLEQ proof (`verifyDecryptionShare`, re-run by the "Verify tally" button). |
 | Two colluding keypers | Can decrypt the per-candidate **aggregate** only. Per-ballot ciphertexts are never sent to keypers; an auditor can replay the aggregation from the published ballot list. |
 | Malicious sequencer | Cannot forge ballots (each carries a Schnorr signature + EIP-712). Dropping ballots is detectable censorship; lying about the aggregate is detectable by client-side recompute. |
-| Ballot stuffing | The budget proof requires the ciphertext sum to encrypt exactly 1 (Variant A exact `B=1`). Over-budget ballots fail `verifyBallot` at ingest and are rejected. |
+| Ballot stuffing | The budget proof requires the ciphertext sum to encrypt exactly `B` (Variant A exact). For single-choice `B=1`; for weighted `B=100`. Over-budget ballots fail `verifyBallot` at ingest and are rejected. |
 | Replay across proposals | Each ballot binds the proposal id into `electionId` and `pseudonym = keccak256(voter ‖ proposalId)`; replays fail the pseudonym and Schnorr checks. |
 | Long-term key compromise | Forward secrecy is per-proposal — each proposal runs a fresh DKG. A leak does not retroactively compromise past tallies unless ≥2 leaked keys are from the same proposal's committee. |
 

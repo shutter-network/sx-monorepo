@@ -57,10 +57,12 @@ async function run() {
       payload.aggregate
     );
     // Step 2: recover the tally from the public decryption shares.
+    const budget = (props.proposal.te_config as any)?.budget ?? 1;
     const result = await verifyTally(
       proposalId,
       payload,
-      props.proposal.scores
+      props.proposal.scores,
+      budget
     );
     status.value = {
       kind: 'ok',

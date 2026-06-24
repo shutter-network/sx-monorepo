@@ -6,7 +6,7 @@
 # points directly, so no separate tsc build step is needed for the apps.
 #
 # Build context is the monorepo root (sx-monorepo/).
-FROM oven/bun:1.3.9
+FROM oven/bun:1.3.14
 
 WORKDIR /app
 

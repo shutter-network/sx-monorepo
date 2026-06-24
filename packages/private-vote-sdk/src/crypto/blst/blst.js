@@ -1481,18 +1481,27 @@ var __abort_js = () => {
 
 var __emscripten_memcpy_js = (dest, src, num) => HEAPU8.copyWithin(dest, src, src + num);
 
-var getHeapMax = () => HEAPU8.length;
+var getHeapMax = () => 2147483648; // 2 GB max
 
-var abortOnCannotGrowMemory = (requestedSize) => {
-    abort(
-        `Cannot enlarge memory arrays to size ${requestedSize} bytes (OOM). Either (1) compile with -sINITIAL_MEMORY=X with X higher than the current value ${HEAP8.length}, (2) compile with -sALLOW_MEMORY_GROWTH which allows increasing the size at runtime, or (3) if you want malloc to return NULL (0) instead of this abort, compile with -sABORTING_MALLOC=0`,
-    );
-};
 var _emscripten_resize_heap = (requestedSize) => {
     var oldSize = HEAPU8.length;
-    // With CAN_ADDRESS_2GB or MEMORY64, pointers are already unsigned.
     requestedSize >>>= 0;
-    abortOnCannotGrowMemory(requestedSize);
+    var maxHeapSize = getHeapMax();
+    if (requestedSize > maxHeapSize) {
+        abort(`Cannot enlarge memory, requested ${requestedSize} bytes, max ${maxHeapSize}`);
+    }
+    var alignUp = (x, multiple) => x + (multiple - (x % multiple)) % multiple;
+    for (var cutDown = 1; cutDown <= 4; cutDown *= 2) {
+        var overGrownHeapSize = oldSize * (1 + 0.2 / cutDown);
+        overGrownHeapSize = Math.min(overGrownHeapSize, requestedSize + 100663296);
+        var newSize = Math.min(maxHeapSize, alignUp(Math.max(requestedSize, overGrownHeapSize), 65536));
+        var replacement = wasmMemory.grow((newSize - oldSize) / 65536);
+        if (replacement) {
+            updateMemoryViews();
+            return true;
+        }
+    }
+    return false;
 };
 
 var SYSCALLS = {

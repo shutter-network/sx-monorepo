@@ -356,12 +356,15 @@ async function runShutterElgamalTally(proposal: any): Promise<boolean> {
     }
   }
 
-  // Upper bound for BSGS table sizing. Each ballot contributes vp · 1 per
-  // chosen candidate (Variant A exact B=1), so the maximum tally is the
-  // sum of all voting power. Add a safety pad of 1 for empty-vote edge.
+  // For weighted proposals, each ballot encodes proportional weights that sum
+  // to budget (e.g. [60, 40] out of 100). The aggregate for candidate j is
+  // Σ(vp_i × votes_i[j]) = budget × Σ(vp_i × fraction_i_j), so the BSGS
+  // upper bound must be scaled by budget. For single-choice (budget=1) this
+  // is a no-op.
+  const budget = BigInt(proposal.te_config.budget ?? 1);
   let totalVp = 0n;
   for (const v of rawVotes) totalVp += BigInt(Math.round(v.vp));
-  const upperBound = totalVp > 0n ? totalVp : 1n;
+  const upperBound = totalVp > 0n ? budget * totalVp : 1n;
 
   let scores: bigint[];
   try {
@@ -379,7 +382,10 @@ async function runShutterElgamalTally(proposal: any): Promise<boolean> {
     return false;
   }
 
-  const numericScores = scores.map(s => Number(s));
+  // Divide by budget to recover the actual VP-weighted tally. For
+  // single-choice (budget=1) this divides by 1 — no change.
+  const budgetN = Number(budget);
+  const numericScores = scores.map(s => Number(s) / budgetN);
   const total = numericScores.reduce((a, b) => a + b, 0);
   await updateProposalScores(
     proposal,

@@ -282,24 +282,38 @@ export function createActions(
         // sequencer's writer/vote.ts re-runs ``verifyBallot`` against the
         // proposal's ``te_mpk`` before persisting. Reasons are not
         // supported in private mode — the hub rejects them.
-        const { buildTeBallotEnvelope } = await import('@/helpers/teBallot');
-        if (typeof sdkChoice !== 'number') {
-          throw new Error(
-            'shutter-elgamal currently supports single-choice ballots only'
-          );
-        }
         if (!proposal.te_mpk || !proposal.te_config) {
           throw new Error(
             'proposal does not yet have a finalised threshold key; try again once the keypers have completed DKG'
           );
         }
-        sdkChoice = await buildTeBallotEnvelope({
-          voter: account,
-          proposalId: proposal.proposal_id as string,
-          mpk: proposal.te_mpk,
-          config: proposal.te_config,
-          choice: sdkChoice
-        });
+        if (typeof sdkChoice === 'number') {
+          const { buildTeBallotEnvelope } = await import('@/helpers/teBallot');
+          sdkChoice = await buildTeBallotEnvelope({
+            voter: account,
+            proposalId: proposal.proposal_id as string,
+            mpk: proposal.te_mpk,
+            config: proposal.te_config,
+            choice: sdkChoice
+          });
+        } else if (
+          sdkChoice !== null &&
+          typeof sdkChoice === 'object' &&
+          !Array.isArray(sdkChoice)
+        ) {
+          const { buildTeWeightedBallotEnvelope } = await import('@/helpers/teBallot');
+          sdkChoice = await buildTeWeightedBallotEnvelope({
+            voter: account,
+            proposalId: proposal.proposal_id as string,
+            mpk: proposal.te_mpk,
+            config: proposal.te_config,
+            choice: sdkChoice as Record<string, number>
+          });
+        } else {
+          throw new Error(
+            'shutter-elgamal does not support this vote type'
+          );
+        }
         voteReason = '';
       }
 

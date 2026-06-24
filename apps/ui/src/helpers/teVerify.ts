@@ -335,7 +335,8 @@ export async function verifyBallots(
 export async function verifyTally(
   proposalId: string,
   payload: AuditPayload,
-  publishedScores?: number[]
+  publishedScores?: number[],
+  budget = 1
 ): Promise<VerifyResult> {
   await ensureCurvesInit();
 
@@ -390,14 +391,12 @@ export async function verifyTally(
     }
 
     const electionIdBytes = arrayify(proposalId);
-    // BSGS upper bound: total VP across all ballots is bounded above by
-    // sum of published scores when published scores are available.
-    // Otherwise fall back to a generous default of 1<<40 so the audit
-    // can still run (the BSGS table size is `sqrt(upperBound)`).
-    const sumPublished = (publishedScores || []).reduce(
-      (s, n) => s + BigInt(Math.floor(n)),
-      0n
+    // Published scores are divided by budget (e.g. 0.6, 0.4 for a 60/40 weighted
+    // split). Scale them back to raw integers for BSGS upper bound and comparison.
+    const rawPublished = (publishedScores || []).map(
+      s => BigInt(Math.round(s * budget))
     );
+    const sumPublished = rawPublished.reduce((s, n) => s + n, 0n);
     const upperBound = sumPublished > 0n ? sumPublished + 1n : 1n << 40n;
 
     const tallies = recoverTally({
@@ -415,10 +414,10 @@ export async function verifyTally(
     });
 
     let matchesPublished: boolean | null = null;
-    if (publishedScores) {
+    if (publishedScores && rawPublished.length > 0) {
       matchesPublished =
-        publishedScores.length === tallies.length &&
-        tallies.every((v, i) => v === BigInt(Math.floor(publishedScores[i])));
+        rawPublished.length === tallies.length &&
+        tallies.every((v, i) => v === rawPublished[i]);
     }
 
     return {
