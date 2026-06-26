@@ -15,10 +15,6 @@ read from the environment so it works inside a compose network.
 Environment:
   KEYPER_URLS          Comma-separated keyper base URLs.
                        Default: http://keyper1:5001,http://keyper2:5002,http://keyper3:5003
-  KEYPER_PRIVATE_KEYS  Comma-separated keyper signing keys, in keyper-id order.
-                       Used only to derive the te_keyper_addresses allow-list so
-                       the hub accepts each keyper's DKG submission. REQUIRED —
-                       the coordinator exits with an error if this is not set.
   TE_THRESHOLD_T       Threshold degree t (need t+1 shares). Default: 1.
   TE_WEIGHTED_BUDGET   Denominator for weighted vote splits (e.g. 100 = percentages,
                        1000 = 0.1% granularity). Default: 100.
@@ -37,9 +33,12 @@ import os
 import time
 
 import pymysql
-from eth_account import Account
 
-from dkg_coordinator import run_dkg  # vendored in this image at /app/src
+from dkg_coordinator import (  # vendored in this image at /app/src
+    run_dkg,
+    fetch_members_from_status,
+    _keypers_from_urls,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -64,21 +63,6 @@ def _keyper_urls() -> list[str]:
     return [u.strip().rstrip("/") for u in raw.split(",") if u.strip()]
 
 
-def _keyper_addresses(n: int) -> list[str]:
-    raw = os.environ.get("KEYPER_PRIVATE_KEYS", "").strip()
-    if not raw:
-        raise SystemExit(
-            "Error: KEYPER_PRIVATE_KEYS is required.\n"
-            "Set it to a comma-separated list of the keyper signing keys (0x-prefixed) "
-            "in keyper-id order, matching KEYPER_PRIVATE_KEY_{1,2,3} in .env."
-        )
-    keys = [k.strip() for k in raw.split(",") if k.strip()]
-    if len(keys) != n:
-        raise SystemExit(
-            f"KEYPER_PRIVATE_KEYS has {len(keys)} keys but KEYPER_URLS has {n} urls"
-        )
-    return [Account.from_key(k).address for k in keys]
-
 
 def _db_connect():
     return pymysql.connect(
@@ -93,13 +77,14 @@ def _db_connect():
 
 
 KEYPER_URLS = _keyper_urls()
-KEYPER_ADDRS = _keyper_addresses(len(KEYPER_URLS))
 
 
 def _ensure_dkg(pid: str, choices: list, vote_type: str) -> bool:
     """Populate te_* config and run DKG for one proposal. Returns True on success."""
     n = len(KEYPER_URLS)
     t = DEFAULT_T
+    keypers = _keypers_from_urls(KEYPER_URLS)
+    keyper_addrs = fetch_members_from_status(keypers)
     num_candidates = len(choices)
     # Weighted proposals encode proportional splits as integers out of WEIGHTED_BUDGET
     # (e.g. 60+40=100); the tally path divides recovered sums by budget at the end.
@@ -127,7 +112,7 @@ def _ensure_dkg(pid: str, choices: list, vote_type: str) -> bool:
                 (
                     t, n,
                     json.dumps(KEYPER_URLS),
-                    json.dumps(KEYPER_ADDRS),
+                    json.dumps(keyper_addrs),
                     json.dumps(te_config),
                     pid,
                 ),
@@ -142,6 +127,7 @@ def _ensure_dkg(pid: str, choices: list, vote_type: str) -> bool:
         election_id=pid,
         election_address=pid,
         n=n, t=t,
+        members=keyper_addrs,
     )
 
     deadline = time.time() + 30
