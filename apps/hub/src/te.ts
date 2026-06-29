@@ -334,6 +334,7 @@ router.get('/proposal/:id/te_ballots', async (req, res) => {
       return sendError(res, 'dkg_not_finalized', 400);
     }
     const rows = await (db as any).queryAsync(
+      // cb != -3 excludes soft-deleted votes (CB.PENDING_DELETE in sequencer/constants.ts)
       'SELECT voter, vp, choice FROM votes WHERE proposal = ? AND cb != -3 ORDER BY created ASC',
       [proposalId]
     );

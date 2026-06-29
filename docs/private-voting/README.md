@@ -136,8 +136,7 @@ Notes:
   sequencer start with `DB_SSL=false`. The MySQL helpers only attempt TLS when `DB_SSL` is not
   `false`, so host-run dev (TLS to a managed DB) is unchanged.
 - **Keyper committee keys** default to deterministic dev keys (`sha256("keyper-{id}")`). For a real
-  deployment, set `KEYPER_PRIVATE_KEY_1/2/3` in `.env` to keys held by three independent operators
-  and keep `KEYPER_PRIVATE_KEYS` (the `auto-dkg` allow-list) in sync.
+  deployment, set `KEYPER_PRIVATE_KEY_1/2/3` in `.env` to keys held by three independent operators.
 - **First boot only**: MySQL loads schemas from `apps/hub/src/helpers/schema.sql` and
   `apps/sequencer/src/helpers/schema.sql` (mounted read-only). The `mysql-data` volume persists
   across `up`/`down`; use `down -v` to re-run schema init from scratch.
@@ -251,7 +250,7 @@ The keyper committee and the auto-DKG coordinator both live at
 - `src/keyper.py` — a single committee member (run three, on ports 5001/5002/5003).
 - `src/auto_dkg.py` — the DKG coordinator. Polls the hub database for new `shutter-elgamal`
   proposals with no key yet and drives the committee through the DKG ceremony. All endpoints and DB
-  connection details come from the environment (`KEYPER_URLS`, `KEYPER_PRIVATE_KEYS`, `HUB_DB_HOST`,
+  connection details come from the environment (`KEYPER_URLS`, `HUB_DB_HOST`,
   …), so the same script runs natively and in the `auto-dkg` container.
 - `src/dkg_coordinator.py` — the orchestration primitives `auto_dkg.py` builds on.
 

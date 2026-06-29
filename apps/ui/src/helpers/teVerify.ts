@@ -397,7 +397,12 @@ export async function verifyTally(
       s => BigInt(Math.round(s * budget))
     );
     const sumPublished = rawPublished.reduce((s, n) => s + n, 0n);
-    const upperBound = sumPublished > 0n ? sumPublished + 1n : 1n << 40n;
+    // Upper bound for BSGS: actual sum of published scores + 1.
+    // When sumPublished = 0 (zero-vote election), upperBound = 1 and the
+    // baby-step table has a single entry (the identity), so the lookup is
+    // trivial. The caller must ensure scores are final before calling this
+    // function — verifying against unfinalised (all-zero) scores is meaningless.
+    const upperBound = sumPublished + 1n;
 
     const tallies = recoverTally({
       ctSums,

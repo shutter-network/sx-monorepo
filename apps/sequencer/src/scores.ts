@@ -335,7 +335,13 @@ async function runShutterElgamalTally(proposal: any): Promise<boolean> {
     [JSON.stringify(aggregateJson), proposal.id]
   );
 
-  // Nudge keypers; they may already be done.
+  // Trigger keypers to compute and submit their decryption shares. This call
+  // blocks until all reachable keypers respond — the keyper handler is
+  // synchronous end-to-end, submitting shares to the hub before returning.
+  // By the time this resolves, all reachable keypers have already submitted.
+  // If a keyper is unreachable, the error is swallowed and the share-count
+  // gate below decides whether t+1 shares are available from the others.
+  // If not in this tick, the next one will trigger keypers again.
   await triggerKeypers(proposal.id, keyperUrls);
 
   // Read shares. Each (keyper, candidate) row is one PartialDecryption.

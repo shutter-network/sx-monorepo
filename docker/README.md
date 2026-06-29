@@ -81,8 +81,7 @@ The three dev keypers use deterministic signing keys derived from
 
 These are dev-only. For a real deployment, set `KEYPER_PRIVATE_KEY_1/2/3` in
 `.env` to keys held by three independent operators (ideally each keyper runs on
-separate infrastructure rather than one compose file), and keep
-`KEYPER_PRIVATE_KEYS` for `auto-dkg` in sync so the derived allow-list matches.
+separate infrastructure rather than one compose file).
 
 ## Networking notes
 
