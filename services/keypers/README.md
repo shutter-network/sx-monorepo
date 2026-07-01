@@ -32,6 +32,46 @@ services/keypers/
     └── sdk_compat.py       # vendored, untouched (SDK-byte-equality is the parity gate)
 ```
 
+## DKG secret retention
+
+Each keyper persists per-proposal `combined_share` values encrypted to a file on disk (`dkg_secrets.enc`). After a successful `/decrypt/publish_on_chain` run, the share is kept for a configurable window so operators can re-trigger decryption if the hub path fails.
+
+| Variable | Default | Description |
+| -------- | ------- | ----------- |
+| `KEYPER_DKG_RETENTION_TIME` | `172800` (2 days) | Seconds to retain shares after decrypt. `0` disables pruning. |
+| `KEYPER_DKG_PRUNE_INTERVAL_S` | `3600` | Background prune loop interval (seconds). |
+
+Shares for proposals that have not yet decrypted successfully are never
+pruned (`expires_at` unset until decrypt completes).
+
+### State directory on the host
+
+`docker-compose.yml` bind-mounts three host directories into the keyper
+containers so the encrypted state files are visible on your machine and
+survive `docker compose down -v`:
+
+```
+keyper-state/
+  keyper1/   →  mounted to /keyper-state inside keyper1
+  keyper2/   →  mounted to /keyper-state inside keyper2
+  keyper3/   →  mounted to /keyper-state inside keyper3
+```
+
+**Before the first `compose up`, create these directories manually:**
+
+```sh
+mkdir -p keyper-state/keyper1 keyper-state/keyper2 keyper-state/keyper3
+```
+
+This matters on Linux: if Docker creates the directory automatically it
+does so as `root:root`, which can cause permission errors if the
+container ever runs as a non-root user. Pre-creating them as your own
+user avoids the issue entirely. On Mac (Docker Desktop) this is not a
+problem, but the one-liner is harmless to run regardless.
+
+`keyper-state/` is in `.gitignore` — the files are Fernet-encrypted but
+they contain secret key material and must never be committed.
+
 ## Auth
 
 Every keyper-to-hub message is EIP-191 personal-signed by the keyper's
@@ -48,6 +88,18 @@ Domain separation tags (DSTs) are mirrored on both sides:
 | `SX-TE-DECRYPT-v1`        | `submit_decryption_share` payload (proposal_id ‖ candidate ‖ sigma ‖ e ‖ z) |
 
 See `src/hub_client.py` and `apps/hub/src/te.ts`.
+
+## Tests
+
+From `services/keypers/` with a venv (one-time setup):
+
+```sh
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+
+python tests/test_dkg_persistence.py -v
+```
 
 ## Local dev
 

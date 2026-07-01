@@ -84,6 +84,7 @@ def run_dkg(
     members: Optional[list[str]] = None,
     timeout: float = 60.0,
     sleep_between: float = 0.0,
+    proposal_end_time: Optional[int] = None,
 ) -> None:
     """
     Orchestrate DKG across keypers and publish the DKG result on-chain.
@@ -128,9 +129,12 @@ def run_dkg(
             time.sleep(sleep_between)
 
     # round2
+    round2_payload: dict[str, Any] = {"election_id": election_id}
+    if proposal_end_time is not None:
+        round2_payload["proposal_end_time"] = proposal_end_time
     for kp in keypers:
         log.info("op=dkg_round2 proposal=%s keyper=%d", election_id, kp.kid)
-        _post(kp.url, "/dkg/round2", {"election_id": election_id}, timeout=timeout)
+        _post(kp.url, "/dkg/round2", round2_payload, timeout=timeout)
         if sleep_between:
             time.sleep(sleep_between)
 

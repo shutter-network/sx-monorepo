@@ -79,7 +79,7 @@ def _db_connect():
 KEYPER_URLS = _keyper_urls()
 
 
-def _ensure_dkg(pid: str, choices: list, vote_type: str) -> bool:
+def _ensure_dkg(pid: str, choices: list, vote_type: str, end_time: int) -> bool:
     """Populate te_* config and run DKG for one proposal. Returns True on success."""
     n = len(KEYPER_URLS)
     t = DEFAULT_T
@@ -128,6 +128,7 @@ def _ensure_dkg(pid: str, choices: list, vote_type: str) -> bool:
         election_address=pid,
         n=n, t=t,
         members=keyper_addrs,
+        proposal_end_time=end_time,
     )
 
     deadline = time.time() + 30
@@ -158,13 +159,13 @@ def run_forever(poll_interval_s: float = POLL_INTERVAL_S) -> None:
             try:
                 with conn.cursor() as cur:
                     cur.execute(
-                        "SELECT id, choices, type FROM proposals "
+                        "SELECT id, choices, type, end FROM proposals "
                         "WHERE privacy='shutter-elgamal' AND te_mpk IS NULL"
                     )
                     rows = cur.fetchall()
             finally:
                 conn.close()
-            for pid, choices_json, vote_type in rows:
+            for pid, choices_json, vote_type, end_time in rows:
                 if failures.get(pid, 0) >= MAX_FAILURES:
                     continue
                 choices = (
@@ -173,7 +174,7 @@ def run_forever(poll_interval_s: float = POLL_INTERVAL_S) -> None:
                     else choices_json
                 )
                 try:
-                    ok = _ensure_dkg(pid, choices, vote_type or "single-choice")
+                    ok = _ensure_dkg(pid, choices, vote_type or "single-choice", end_time)
                     if not ok:
                         failures[pid] = failures.get(pid, 0) + 1
                 except Exception as e:  # noqa: BLE001

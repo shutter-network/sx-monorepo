@@ -117,6 +117,10 @@ services:
       # DEV ONLY — this default is a publicly-known key committed to the repo.
       # Production deployments MUST set KEYPER_PRIVATE_KEY_1 in .env.
       KEYPER_PRIVATE_KEY: ${KEYPER_PRIVATE_KEY_1:-0x4e057a764bb4fec72d8a09c7e04862cf293f87103459f216b41a885f36e27b6d}
+      KEYPER_DKG_RETENTION_TIME: "${KEYPER_DKG_RETENTION_TIME:-172800}"
+      KEYPER_DKG_PRUNE_INTERVAL_S: "${KEYPER_DKG_PRUNE_INTERVAL_S:-3600}"
+    volumes:
+      - ./keyper-state/keyper1:/keyper-state
     depends_on:
       hub:
         condition: service_started
@@ -134,6 +138,10 @@ services:
       KEYPER_HUB_URL: http://hub:3000
       # DEV ONLY — publicly-known key; set KEYPER_PRIVATE_KEY_2 in .env for production.
       KEYPER_PRIVATE_KEY: ${KEYPER_PRIVATE_KEY_2:-0x99f276d9a8045c01649f153f69b1c446a24aee8fd546a147fe5e29cc061edc88}
+      KEYPER_DKG_RETENTION_TIME: "${KEYPER_DKG_RETENTION_TIME:-172800}"
+      KEYPER_DKG_PRUNE_INTERVAL_S: "${KEYPER_DKG_PRUNE_INTERVAL_S:-3600}"
+    volumes:
+      - ./keyper-state/keyper2:/keyper-state
     depends_on:
       hub:
         condition: service_started
@@ -153,6 +161,10 @@ services:
       KEYPER_HUB_URL: http://hub:3000
       # DEV ONLY — publicly-known key; set KEYPER_PRIVATE_KEY_3 in .env for production.
       KEYPER_PRIVATE_KEY: ${KEYPER_PRIVATE_KEY_3:-0xfdf5c2f83276e56c374b54aaef3c0a3f989ad11d3f6a1faf29373e5e528ea94c}
+      KEYPER_DKG_RETENTION_TIME: "${KEYPER_DKG_RETENTION_TIME:-172800}"
+      KEYPER_DKG_PRUNE_INTERVAL_S: "${KEYPER_DKG_PRUNE_INTERVAL_S:-3600}"
+    volumes:
+      - ./keyper-state/keyper3:/keyper-state
     depends_on:
       hub:
         condition: service_started

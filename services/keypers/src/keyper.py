@@ -15,11 +15,14 @@ Usage:
 """
 
 import argparse
-import json
+import base64
+import hashlib
 import logging
 import os
 import sys
+import threading
 import requests
+from cryptography.fernet import Fernet
 from flask import Flask, request, jsonify
 
 from eth_account import Account
@@ -32,7 +35,14 @@ from crypto.primitives import (
     point_multiply,
 )
 from crypto.dkg import KeyperDKGState, derive_joint_mpk, derive_mpk_share
-from crypto.proofs import prove_decryption_share
+from dkg_persistence import (
+    DkgEntry,
+    load_dkg_secrets,
+    prune_expired_dkg_secrets,
+    retention_time,
+    save_dkg_secrets,
+    start_prune_loop,
+)
 import sdk_compat
 
 
@@ -102,6 +112,21 @@ def _recover(payload_hash: bytes, signature_hex: str) -> str:
     return Account.recover_message(msg, signature=bytes.fromhex(signature_hex.removeprefix("0x")))
 
 
+# ----------------------------------------------------------------------
+#  DKG secret persistence — see dkg_persistence.py
+#
+#  combined_share (the keyper's secret scalar for each proposal) is stored
+#  encrypted on a Docker volume so it survives container restarts. After a
+#  successful decrypt, shares are retained for KEYPER_DKG_RETENTION_TIME
+#  (default 2) then pruned by a background thread.
+# ----------------------------------------------------------------------
+
+def _derive_fernet(private_key_hex: str) -> Fernet:
+    raw = bytes.fromhex(private_key_hex.removeprefix('0x'))
+    key = base64.urlsafe_b64encode(hashlib.sha256(b'KEYPER-DKG-STATE-v1' + raw).digest())
+    return Fernet(key)
+
+
 def create_keyper_app(keyper_id, *, hub_config=None, signing_key=None):
     """Create a Flask app for a single keyper.
 
@@ -128,7 +153,18 @@ def create_keyper_app(keyper_id, *, hub_config=None, signing_key=None):
     logger = logging.getLogger(f'keyper.{keyper_id}')
 
     app = Flask(f"keyper_{keyper_id}")
+    fernet = _derive_fernet(signing_key)
     dkg_state = KeyperDKGState()
+    # Per-proposal key material retained after DKG round2.
+    # dkg_state holds only the most recent ceremony; decryption must look up
+    # the key for the specific proposal being decrypted, not the latest one.
+    # Persisted encrypted to a Docker volume so restarts don't lose key material.
+    completed_dkgs: dict[str, DkgEntry] = {}
+    dkg_lock = threading.Lock()
+    with dkg_lock:
+        load_dkg_secrets(fernet, completed_dkgs, logger)
+        prune_expired_dkg_secrets(fernet, completed_dkgs, logger)
+    start_prune_loop(completed_dkgs, fernet, logger, dkg_lock)
     keyper_meta = {
         "id": keyper_id,
         "hub_config": hub_config,
@@ -457,6 +493,18 @@ def create_keyper_app(keyper_id, *, hub_config=None, signing_key=None):
 
         logger.info("op=dkg_round2 proposal=%s status=verified dealers=%s",
                     dkg_meta.get("election_id"), sorted(received_shares.keys()))
+        # Persist key material per proposal so decryption can retrieve the
+        # correct share regardless of how many subsequent DKGs have run.
+        # expires_at = proposal end time + retention window, set now so entries
+        # for zero-vote proposals are pruned automatically after they close.
+        if dkg_meta.get("election_id"):
+            proposal_end_time = data.get("proposal_end_time")
+            expires_at = None
+            if proposal_end_time is not None:
+                expires_at = int(proposal_end_time) + int(retention_time())
+            with dkg_lock:
+                completed_dkgs[dkg_meta["election_id"]] = DkgEntry(combined_share, expires_at=expires_at)
+                save_dkg_secrets(fernet, completed_dkgs)
         # Snapshot what we just consumed so a subsequent on-chain publish
         # uses the identical commitment set.
         last_round2["all_commitments"] = dict(all_commitments)
@@ -562,13 +610,16 @@ def create_keyper_app(keyper_id, *, hub_config=None, signing_key=None):
         if keyper_meta["hub_config"] is None:
             return jsonify({"error": "Keyper not configured with hub credentials"}), 400
 
-        if dkg_state.combined_share is None:
-            return jsonify({"error": "DKG not completed; cannot decrypt"}), 400
-
         data = request.get_json() or {}
         proposal_id = data.get("proposal_id") or data.get("election_address")
         if not proposal_id:
             return jsonify({"error": "Missing proposal_id"}), 400
+
+        with dkg_lock:
+            entry = completed_dkgs.get(proposal_id)
+        if entry is None:
+            return jsonify({"error": f"DKG not completed for proposal {proposal_id}"}), 400
+        msk_k, mpk_k = entry.combined_share, entry.public_key_share
 
         from hub_client import HubClient, HubClientError
         cfg = keyper_meta["hub_config"]
@@ -602,8 +653,6 @@ def create_keyper_app(keyper_id, *, hub_config=None, signing_key=None):
         if len(ciphertexts) != num_candidates:
             return jsonify({"error": f"Aggregate length {len(ciphertexts)} != numCandidates {num_candidates}"}), 502
 
-        msk_k = dkg_state.combined_share
-        mpk_k = dkg_state.public_key_share
         keyper_index = keyper_meta["id"]
 
         logger.info("op=publish_decrypt proposal=%s candidates=%d", proposal_id, num_candidates)
@@ -646,33 +695,6 @@ def create_keyper_app(keyper_id, *, hub_config=None, signing_key=None):
             "keyper_id": keyper_index,
             "shares_count": num_candidates,
             "submitted": submitted,
-        })
-
-    @app.route("/decrypt", methods=["POST"])
-    def decrypt():
-        """Compute partial decryption shares with DLEQ proofs for each candidate."""
-        data = request.get_json()
-        ciphertexts_c1 = [dict_to_point(c) for c in data["ciphertexts_c1"]]
-
-        if dkg_state.combined_share is None:
-            return jsonify({"error": "DKG not completed"}), 400
-
-        msk_k = dkg_state.combined_share
-        mpk_k = dkg_state.public_key_share
-
-        results = []
-        for c1 in ciphertexts_c1:
-            sigma = dkg_state.partial_decrypt(c1)
-            proof_e, proof_z = prove_decryption_share(c1, msk_k, mpk_k, sigma)
-            results.append({
-                "sigma": point_to_dict(sigma),
-                "proof": {"e": str(proof_e), "z": str(proof_z)},
-            })
-
-        return jsonify({
-            "keyper_id": keyper_meta["id"],
-            "public_key_share": point_to_dict(mpk_k),
-            "shares": results,
         })
 
     return app
