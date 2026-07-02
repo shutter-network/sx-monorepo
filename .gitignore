@@ -51,3 +51,6 @@ services/keypers/**/*.pyc
 
 # Keyper DKG state — encrypted secrets, must never be committed
 keyper-state/
+
+# MySQL data directory — bind-mounted from the container, must never be committed
+mysql-data/

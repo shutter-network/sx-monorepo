@@ -14,7 +14,14 @@
 #
 # Quick start:
 #   cp .env.example .env        # optional - sensible dev defaults are baked in
+#   mkdir -p mysql-data keyper-state/keyper1 keyper-state/keyper2 keyper-state/keyper3
 #   docker compose up --build
+#
+# State directories on the host (bind-mounted, gitignored):
+#   mysql-data/        MySQL data dir. The MySQL image entrypoint starts as root, chowns the
+#                      directory to the mysql user (UID 999) internally, then re-execs as mysql —
+#                      so no manual chown is needed on Linux or Mac.
+#   keyper-state/      Fernet-encrypted DKG secrets per keyper (see services/keypers/README.md).
 #
 # Then create a permanent-private proposal from the UI; auto-dkg generates its
 # threshold key within a few seconds and the proposal becomes votable.
@@ -30,7 +37,7 @@ services:
     ports:
       - "${MYSQL_PORT:-3306}:3306"
     volumes:
-      - mysql-data:/var/lib/mysql
+      - ./mysql-data:/var/lib/mysql
       - ./docker/mysql-init:/docker-entrypoint-initdb.d:ro
       - ./apps/hub/src/helpers/schema.sql:/schema/hub-schema.sql:ro
       - ./apps/sequencer/src/helpers/schema.sql:/schema/sequencer-schema.sql:ro
@@ -125,7 +132,7 @@ services:
       hub:
         condition: service_started
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5001/status')"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5001/health')"]
       interval: 5s
       timeout: 5s
       retries: 20
@@ -148,7 +155,7 @@ services:
       keyper1:
         condition: service_started
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5002/status')"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5002/health')"]
       interval: 5s
       timeout: 5s
       retries: 20
@@ -171,7 +178,7 @@ services:
       keyper1:
         condition: service_started
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5003/status')"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5003/health')"]
       interval: 5s
       timeout: 5s
       retries: 20
@@ -203,6 +210,3 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
-volumes:
-  mysql-data:
-    driver: local

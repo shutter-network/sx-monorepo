@@ -21,6 +21,7 @@ import logging
 import os
 import sys
 import threading
+import time
 import requests
 from cryptography.fernet import Fernet
 from flask import Flask, request, jsonify
@@ -153,6 +154,9 @@ def create_keyper_app(keyper_id, *, hub_config=None, signing_key=None):
     logger = logging.getLogger(f'keyper.{keyper_id}')
 
     app = Flask(f"keyper_{keyper_id}")
+    start_time = time.time()
+    # Tracks when the most recent DKG round2 completed successfully.
+    health_state = {"last_dkg_at": None}
     fernet = _derive_fernet(signing_key)
     dkg_state = KeyperDKGState()
     # Per-proposal key material retained after DKG round2.
@@ -197,6 +201,15 @@ def create_keyper_app(keyper_id, *, hub_config=None, signing_key=None):
             "address": keyper_meta["signing_address"],
             "dkg_completed": dkg_state.combined_share is not None,
             "public_key_share": point_to_dict(dkg_state.public_key_share) if dkg_state.public_key_share else None,
+        })
+
+    @app.route("/health", methods=["GET"])
+    def health():
+        return jsonify({
+            "ok": True,
+            "dkg_in_progress": dkg_meta["election_id"] is not None and dkg_state.combined_share is None,
+            "uptime_s": int(time.time() - start_time),
+            "last_dkg_at": health_state["last_dkg_at"],
         })
 
     @app.route("/dkg/round1", methods=["POST"])
@@ -493,6 +506,7 @@ def create_keyper_app(keyper_id, *, hub_config=None, signing_key=None):
 
         logger.info("op=dkg_round2 proposal=%s status=verified dealers=%s",
                     dkg_meta.get("election_id"), sorted(received_shares.keys()))
+        health_state["last_dkg_at"] = int(time.time())
         # Persist key material per proposal so decryption can retrieve the
         # correct share regardless of how many subsequent DKGs have run.
         # expires_at = proposal end time + retention window, set now so entries

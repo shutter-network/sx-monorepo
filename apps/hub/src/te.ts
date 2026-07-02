@@ -1,5 +1,6 @@
 import express from 'express';
 import { verifyMessage } from '@ethersproject/wallet';
+import { getAddress } from '@ethersproject/address';
 import { capture } from '@snapshot-labs/snapshot-sentry';
 import { keccak256 } from '@ethersproject/keccak256';
 import {
@@ -153,6 +154,13 @@ router.post('/proposal/:id/te_dkg', async (req, res) => {
       return sendError(res, 'bad_request', 400);
     }
 
+    let normalizedKeyperAddress: string;
+    try {
+      normalizedKeyperAddress = getAddress(keyperAddress);
+    } catch {
+      return sendError(res, 'bad_request', 400);
+    }
+
     const keyperAddresses = parseJsonField<string[] | null>(
       proposal.te_keyper_addresses,
       null
@@ -167,7 +175,7 @@ router.post('/proposal/:id/te_dkg', async (req, res) => {
     if (
       keyperIndex < 1 ||
       keyperIndex > keyperAddresses.length ||
-      keyperAddresses[keyperIndex - 1].toLowerCase() !== keyperAddress.toLowerCase()
+      keyperAddresses[keyperIndex - 1] !== normalizedKeyperAddress
     ) {
       return sendError(res, 'unknown_keyper', 401);
     }
@@ -179,7 +187,7 @@ router.post('/proposal/:id/te_dkg', async (req, res) => {
     } catch (err: any) {
       return sendError(res, 'bad_signature', 401);
     }
-    if (recovered.toLowerCase() !== keyperAddress.toLowerCase()) {
+    if (recovered !== normalizedKeyperAddress) {
       return sendError(res, 'bad_signature', 401);
     }
 
@@ -206,7 +214,7 @@ router.post('/proposal/:id/te_dkg', async (req, res) => {
         [
           proposalId,
           keyperIndex,
-          keyperAddress.toLowerCase(),
+          normalizedKeyperAddress,
           mpk,
           committeePksJson,
           signature,
@@ -390,6 +398,13 @@ router.post('/proposal/:id/te_decryption_share', async (req, res) => {
       return sendError(res, 'bad_request', 400);
     }
 
+    let normalizedKeyperAddress: string;
+    try {
+      normalizedKeyperAddress = getAddress(keyperAddress);
+    } catch {
+      return sendError(res, 'bad_request', 400);
+    }
+
     const keyperAddresses = parseJsonField<string[] | null>(
       proposal.te_keyper_addresses,
       null
@@ -398,7 +413,7 @@ router.post('/proposal/:id/te_decryption_share', async (req, res) => {
       !keyperAddresses ||
       keyperIndex < 1 ||
       keyperIndex > keyperAddresses.length ||
-      keyperAddresses[keyperIndex - 1].toLowerCase() !== keyperAddress.toLowerCase()
+      keyperAddresses[keyperIndex - 1] !== normalizedKeyperAddress
     ) {
       return sendError(res, 'unknown_keyper', 401);
     }
@@ -415,7 +430,7 @@ router.post('/proposal/:id/te_decryption_share', async (req, res) => {
     } catch {
       return sendError(res, 'bad_signature', 401);
     }
-    if (recovered.toLowerCase() !== keyperAddress.toLowerCase()) {
+    if (recovered !== normalizedKeyperAddress) {
       return sendError(res, 'bad_signature', 401);
     }
 
