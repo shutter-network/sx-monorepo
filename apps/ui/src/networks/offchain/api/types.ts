@@ -138,6 +138,7 @@ export type ApiProposal = {
   privacy: 'shutter' | 'shutter-elgamal' | '';
   te_config?: any;
   te_mpk?: string | null;
+  te_dkg_status?: string | null;
   te_committee_pks?: any;
   te_threshold_t?: number | null;
   te_threshold_n?: number | null;

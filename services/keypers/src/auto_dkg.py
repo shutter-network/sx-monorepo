@@ -48,7 +48,11 @@ logging.basicConfig(
 log = logging.getLogger('auto-dkg')
 
 POLL_INTERVAL_S = float(os.environ.get("POLL_INTERVAL_S", "2"))
-MAX_FAILURES = 5
+# Retry budget and exponential backoff parameters.
+MAX_ATTEMPTS = 5
+BACKOFF_BASE_S = 10        # minimum delay between retries (floor)
+BACKOFF_CAP_S = 500        # maximum single delay (cap)
+LAST_ATTEMPT_MARGIN_S = 10 # fire the final retry at least this many seconds before start
 DEFAULT_T = int(os.environ.get("TE_THRESHOLD_T", "1"))
 DEFAULT_BUDGET = 1
 WEIGHTED_BUDGET = int(os.environ.get("TE_WEIGHTED_BUDGET", "100"))
@@ -77,6 +81,63 @@ def _db_connect():
 
 
 KEYPER_URLS = _keyper_urls()
+
+
+def _mark_dkg_failed(pid: str) -> None:
+    """Write te_dkg_status='dkg_failed' so the poll query stops retrying."""
+    conn = _db_connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE proposals SET te_dkg_status='dkg_failed' WHERE id=%s",
+                (pid,)
+            )
+    finally:
+        conn.close()
+
+
+def _on_failure(
+    pid: str,
+    reason: str,
+    proposal_start: int,
+    attempt_count: dict[str, int],
+    next_retry_at: dict[str, float],
+) -> None:
+    """Record a DKG attempt failure. Backoff is proportional to the remaining
+    time before the proposal opens: retries are spaced evenly within that window
+    so the most urgent proposals always get the fastest retries. Marks the
+    proposal permanently failed in the DB after MAX_ATTEMPTS."""
+    attempt = attempt_count.get(pid, 0) + 1
+    attempt_count[pid] = attempt
+
+    if attempt >= MAX_ATTEMPTS:
+        log.error(
+            "op=dkg_permanently_failed proposal=%s attempts=%d reason=%s "
+            "-- set te_dkg_status=NULL in the DB to retry",
+            pid, attempt, reason,
+        )
+        _mark_dkg_failed(pid)
+        attempt_count.pop(pid, None)
+        next_retry_at.pop(pid, None)
+    else:
+        remaining_attempts = MAX_ATTEMPTS - attempt
+        time_until_start = max(0.0, proposal_start - time.time())
+        # Exponential geometric series: delays double each attempt and sum to
+        # exactly the usable budget (time left minus the last-attempt margin).
+        # d + 2d + 4d + ... + 2^(n-1)d = d * (2^n - 1) = budget
+        # => d = budget / (2^n - 1)
+        budget = max(0.0, time_until_start - LAST_ATTEMPT_MARGIN_S)
+        slots = (2 ** remaining_attempts) - 1
+        delay = min(
+            max(float(BACKOFF_BASE_S), budget / slots),
+            float(BACKOFF_CAP_S),
+        )
+        next_retry_at[pid] = time.time() + delay
+        log.warning(
+            "op=dkg_retry proposal=%s attempt=%d/%d delay_s=%.0f "
+            "time_until_start=%.0f reason=%s",
+            pid, attempt, MAX_ATTEMPTS, delay, time_until_start, reason,
+        )
 
 
 def _ensure_dkg(pid: str, choices: list, vote_type: str, end_time: int) -> bool:
@@ -152,21 +213,29 @@ def _ensure_dkg(pid: str, choices: list, vote_type: str, end_time: int) -> bool:
 def run_forever(poll_interval_s: float = POLL_INTERVAL_S) -> None:
     log.info("coordinator started poll_interval=%.1fs keypers=%s t=%d",
              poll_interval_s, KEYPER_URLS, DEFAULT_T)
-    failures: dict[str, int] = {}
+
+    # Per-proposal retry state (in-memory; resets on restart, which is fine
+    # since a restart is an intentional operator action that clears backoff).
+    attempt_count: dict[str, int] = {}
+    next_retry_at: dict[str, float] = {}
+
     while True:
         try:
             conn = _db_connect()
             try:
                 with conn.cursor() as cur:
                     cur.execute(
-                        "SELECT id, choices, type, end FROM proposals "
-                        "WHERE privacy='shutter-elgamal' AND te_mpk IS NULL"
+                        "SELECT id, choices, type, end, start FROM proposals "
+                        "WHERE privacy='shutter-elgamal' AND te_mpk IS NULL "
+                        "AND (te_dkg_status IS NULL OR te_dkg_status = '') "
+                        "ORDER BY start ASC"
                     )
                     rows = cur.fetchall()
             finally:
                 conn.close()
-            for pid, choices_json, vote_type, end_time in rows:
-                if failures.get(pid, 0) >= MAX_FAILURES:
+            for pid, choices_json, vote_type, end_time, start_time in rows:
+                # skip until backoff window expires.
+                if time.time() < next_retry_at.get(pid, 0):
                     continue
                 choices = (
                     json.loads(choices_json)
@@ -175,12 +244,13 @@ def run_forever(poll_interval_s: float = POLL_INTERVAL_S) -> None:
                 )
                 try:
                     ok = _ensure_dkg(pid, choices, vote_type or "single-choice", end_time)
-                    if not ok:
-                        failures[pid] = failures.get(pid, 0) + 1
+                    if ok:
+                        attempt_count.pop(pid, None)
+                        next_retry_at.pop(pid, None)
+                    else:
+                        _on_failure(pid, "timeout", start_time, attempt_count, next_retry_at)
                 except Exception as e:  # noqa: BLE001
-                    failures[pid] = failures.get(pid, 0) + 1
-                    log.error("op=dkg_start proposal=%s vote_type=%s status=error attempt=%d/%d err=%s",
-                              pid, vote_type, failures[pid], MAX_FAILURES, e)
+                    _on_failure(pid, str(e), start_time, attempt_count, next_retry_at)
         except Exception as e:  # noqa: BLE001
             log.error("poll_error err=%s", e)
         time.sleep(poll_interval_s)

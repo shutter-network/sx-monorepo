@@ -468,6 +468,7 @@ function formatProposal(proposal: ApiProposal, networkId: NetworkID): Proposal {
     privacy: proposal.privacy || 'none',
     te_config: proposal.te_config ?? undefined,
     te_mpk: proposal.te_mpk ?? null,
+    te_dkg_status: proposal.te_dkg_status ?? null,
     te_committee_pks: proposal.te_committee_pks ?? undefined,
     te_threshold_t: proposal.te_threshold_t ?? null,
     te_threshold_n: proposal.te_threshold_n ?? null,

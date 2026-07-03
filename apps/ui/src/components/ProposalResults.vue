@@ -105,10 +105,17 @@ const otherResultsSummary = computed(() => {
   );
 });
 
+const dkgFailed = computed(
+  () =>
+    props.proposal.privacy === 'shutter-elgamal' &&
+    props.proposal.te_dkg_status === 'dkg_failed'
+);
+
 const isFinalizing = computed(() => {
   return (
     offchainNetworks.includes(props.proposal.network) &&
     !props.proposal.completed &&
+    !dkgFailed.value &&
     ['passed', 'executed', 'rejected', 'closed'].includes(props.proposal.state)
   );
 });
@@ -139,7 +146,20 @@ onMounted(() => {
 </script>
 
 <template>
-  <div v-if="isFinalizing && withDetails" class="border rounded-lg px-3 py-2.5">
+  <div
+    v-if="dkgFailed && withDetails && !['pending', 'active'].includes(props.proposal.state)"
+    class="border border-red-500/40 rounded-lg px-3 py-2.5"
+  >
+    <div class="flex items-center gap-2 text-red-500">
+      <IH-x-circle class="shrink-0" />
+      Encryption setup failed
+    </div>
+    <div class="text-sm text-skin-text mt-1">
+      The keypers could not complete distributed key generation. No votes could
+      be cast and no results are available for this proposal.
+    </div>
+  </div>
+  <div v-else-if="isFinalizing && withDetails" class="border rounded-lg px-3 py-2.5">
     <div class="flex items-center gap-2 text-skin-link">
       <IH-exclamation-circle class="shrink-0" />
       Finalizing results
