@@ -17,7 +17,8 @@ import { pseudonymFor } from './teBallot';
 // accumulation path exercises the actual WASM allocation and destroyWasm calls.
 // ---------------------------------------------------------------------------
 vi.mock('@snapshot-labs/private-vote-sdk', async importOriginal => {
-  const mod = await importOriginal<typeof import('@snapshot-labs/private-vote-sdk')>();
+  const mod =
+    await importOriginal<typeof import('@snapshot-labs/private-vote-sdk')>();
   return { ...mod, verifyBallot: vi.fn(() => ({ ok: true })) };
 });
 
@@ -50,7 +51,10 @@ function makeDummyAggregate(numCandidates = BASE_CONFIG.numCandidates) {
   return {
     election_id: PROPOSAL_ID,
     num_candidates: numCandidates,
-    ciphertexts: Array.from({ length: numCandidates }, () => ({ c1: '0x01', c2: '0x01' }))
+    ciphertexts: Array.from({ length: numCandidates }, () => ({
+      c1: '0x01',
+      c2: '0x01'
+    }))
   };
 }
 
@@ -154,13 +158,15 @@ describe('verifyBallots — structural rejections', () => {
   it('throws when expectedAggregate is falsy', async () => {
     await expect(
       verifyBallots(PROPOSAL_ID, makeBallotsPayload([]), null as any)
-    ).rejects.toThrow('no published aggregate');
+    ).rejects.toThrow('No published aggregate');
   });
 
   it('marks an empty-choice ballot as failure', async () => {
     const result = await verifyBallots(
       PROPOSAL_ID,
-      makeBallotsPayload([{ voter: '0x' + '11'.repeat(20), vp: 1, choice: null }]),
+      makeBallotsPayload([
+        { voter: '0x' + '11'.repeat(20), vp: 1, choice: null }
+      ]),
       makeDummyAggregate()
     );
     expect(result.failures).toHaveLength(1);
@@ -179,10 +185,13 @@ describe('verifyBallots — structural rejections', () => {
             electionId: PROPOSAL_ID,
             pseudonym: '0x' + '00'.repeat(32), // wrong — does not match keccak(voter||proposalId)
             vk: '0x' + '00'.repeat(48),
-            ciphertexts: Array.from({ length: BASE_CONFIG.numCandidates }, () => ({
-              c1: G2_GEN_HEX,
-              c2: G2_GEN_HEX
-            })),
+            ciphertexts: Array.from(
+              { length: BASE_CONFIG.numCandidates },
+              () => ({
+                c1: G2_GEN_HEX,
+                c2: G2_GEN_HEX
+              })
+            ),
             zkProof: '0x',
             voterSignature: '0x' + '00'.repeat(80)
           }
@@ -210,7 +219,11 @@ describe('verifyBallots — structural rejections', () => {
       { voter: '0x' + 'ff'.repeat(20), vp: 1, choice: null }, // empty → failure
       makeBallot(3, 2)
     ];
-    const result = await verifyBallots(PROPOSAL_ID, makeBallotsPayload(ballots), makeDummyAggregate());
+    const result = await verifyBallots(
+      PROPOSAL_ID,
+      makeBallotsPayload(ballots),
+      makeDummyAggregate()
+    );
     expect(result.total).toBe(3);
     expect(result.verifiedCount).toBe(2);
     expect(result.failures).toHaveLength(1);
@@ -230,35 +243,39 @@ describe('verifyBallots — structural rejections', () => {
 describe('verifyBallots — WASM accumulation path', () => {
   const NUM_CANDIDATES = 3;
 
-  it(
-    'vp=1 path: accumulates 100 ballots through the raw-reuse branch without WASM abort',
-    async () => {
-      const ballots = Array.from({ length: 100 }, (_, i) => makeBallot(i + 1, 1, NUM_CANDIDATES));
-      const result = await verifyBallots(
-        PROPOSAL_ID,
-        { te_mpk: G2_GEN_HEX, te_config: { ...BASE_CONFIG, numCandidates: NUM_CANDIDATES }, ballots },
-        makeDummyAggregate(NUM_CANDIDATES)
-      );
-      expect(result.verifiedCount).toBe(100);
-      expect(result.failures).toHaveLength(0);
-    },
-    30_000
-  );
+  it('vp=1 path: accumulates 100 ballots through the raw-reuse branch without WASM abort', async () => {
+    const ballots = Array.from({ length: 100 }, (_, i) =>
+      makeBallot(i + 1, 1, NUM_CANDIDATES)
+    );
+    const result = await verifyBallots(
+      PROPOSAL_ID,
+      {
+        te_mpk: G2_GEN_HEX,
+        te_config: { ...BASE_CONFIG, numCandidates: NUM_CANDIDATES },
+        ballots
+      },
+      makeDummyAggregate(NUM_CANDIDATES)
+    );
+    expect(result.verifiedCount).toBe(100);
+    expect(result.failures).toHaveLength(0);
+  }, 30_000);
 
-  it(
-    'vp=2 path: accumulates 50 ballots through the scalarMulCt branch without WASM abort',
-    async () => {
-      const ballots = Array.from({ length: 50 }, (_, i) => makeBallot(i + 200, 2, NUM_CANDIDATES));
-      const result = await verifyBallots(
-        PROPOSAL_ID,
-        { te_mpk: G2_GEN_HEX, te_config: { ...BASE_CONFIG, numCandidates: NUM_CANDIDATES }, ballots },
-        makeDummyAggregate(NUM_CANDIDATES)
-      );
-      expect(result.verifiedCount).toBe(50);
-      expect(result.failures).toHaveLength(0);
-    },
-    30_000
-  );
+  it('vp=2 path: accumulates 50 ballots through the scalarMulCt branch without WASM abort', async () => {
+    const ballots = Array.from({ length: 50 }, (_, i) =>
+      makeBallot(i + 200, 2, NUM_CANDIDATES)
+    );
+    const result = await verifyBallots(
+      PROPOSAL_ID,
+      {
+        te_mpk: G2_GEN_HEX,
+        te_config: { ...BASE_CONFIG, numCandidates: NUM_CANDIDATES },
+        ballots
+      },
+      makeDummyAggregate(NUM_CANDIDATES)
+    );
+    expect(result.verifiedCount).toBe(50);
+    expect(result.failures).toHaveLength(0);
+  }, 30_000);
 });
 
 // ---------------------------------------------------------------------------
@@ -273,23 +290,32 @@ describe('verifyTally — structural rejections', () => {
 
   it('throws when num_candidates mismatches ciphertexts length', async () => {
     await expect(
-      verifyTally(PROPOSAL_ID, makeAuditPayload({
-        aggregate: {
-          election_id: PROPOSAL_ID,
-          num_candidates: 5, // says 5 but ciphertexts has 3
-          ciphertexts: Array.from({ length: BASE_CONFIG.numCandidates }, () => ({
-            c1: G2_GEN_HEX,
-            c2: G2_GEN_HEX
-          }))
-        }
-      }))
+      verifyTally(
+        PROPOSAL_ID,
+        makeAuditPayload({
+          aggregate: {
+            election_id: PROPOSAL_ID,
+            num_candidates: 5, // says 5 but ciphertexts has 3
+            ciphertexts: Array.from(
+              { length: BASE_CONFIG.numCandidates },
+              () => ({
+                c1: G2_GEN_HEX,
+                c2: G2_GEN_HEX
+              })
+            )
+          }
+        })
+      )
     ).rejects.toThrow('disagrees with ciphertexts.length');
   });
 
   it('throws when not enough shares (thresholdMet=false)', async () => {
     // te_threshold_t=2 needs t+1=3 shares per candidate; 0 provided → throws.
     await expect(
-      verifyTally(PROPOSAL_ID, makeAuditPayload({ te_threshold_t: 2, shares: [] }))
+      verifyTally(
+        PROPOSAL_ID,
+        makeAuditPayload({ te_threshold_t: 2, shares: [] })
+      )
     ).rejects.toThrow('not enough decryption shares');
   });
 });
@@ -304,25 +330,21 @@ describe('verifyTally — structural rejections', () => {
 // The test confirms the finally block frees all points so memory is stable.
 // ---------------------------------------------------------------------------
 describe('verifyTally — WASM heap cleanup on early throw', () => {
-  it(
-    'frees ctSums and committeePKs after thresholdMet=false across 100 iterations',
-    async () => {
-      const NUM_PKS = 10;
-      const payload = makeAuditPayload({
-        te_committee_pks: Array.from({ length: NUM_PKS }, () => G2_GEN_HEX),
-        te_threshold_t: 5, // needs 6 shares; 0 provided → always throws
-        te_threshold_n: NUM_PKS,
-        shares: []
-      });
+  it('frees ctSums and committeePKs after thresholdMet=false across 100 iterations', async () => {
+    const NUM_PKS = 10;
+    const payload = makeAuditPayload({
+      te_committee_pks: Array.from({ length: NUM_PKS }, () => G2_GEN_HEX),
+      te_threshold_t: 5, // needs 6 shares; 0 provided → always throws
+      te_threshold_n: NUM_PKS,
+      shares: []
+    });
 
-      for (let i = 0; i < 100; i++) {
-        await expect(verifyTally(PROPOSAL_ID, payload)).rejects.toThrow(
-          'not enough decryption shares'
-        );
-      }
-      // Reaching here without a WASM OOM abort confirms the finally block freed
-      // ctSums + committeePKs on every iteration.
-    },
-    30_000
-  );
+    for (let i = 0; i < 100; i++) {
+      await expect(verifyTally(PROPOSAL_ID, payload)).rejects.toThrow(
+        'not enough decryption shares'
+      );
+    }
+    // Reaching here without a WASM OOM abort confirms the finally block freed
+    // ctSums + committeePKs on every iteration.
+  }, 30_000);
 });

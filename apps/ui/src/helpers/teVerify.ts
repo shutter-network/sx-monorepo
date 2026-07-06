@@ -52,7 +52,11 @@ export function fingerprintHex(parts: string[]): string {
 }
 
 /** Shorten a long hex string to `0x1234…cdef` for compact display. */
-export function shortHex(hex: string | undefined | null, lead = 6, tail = 6): string {
+export function shortHex(
+  hex: string | undefined | null,
+  lead = 6,
+  tail = 6
+): string {
   if (!hex) return '-';
   const s = hex.startsWith('0x') ? hex : `0x${hex}`;
   if (s.length <= 2 + lead + tail + 1) return s;
@@ -189,9 +193,10 @@ export async function verifyBallots(
   await ensureCurvesInit();
 
   const config = payload.te_config;
-  if (!config) throw new Error('proposal te_config missing — cannot verify ballots');
+  if (!config)
+    throw new Error('proposal te_config missing — cannot verify ballots');
   if (!expectedAggregate) {
-    throw new Error('no published aggregate to compare the ballots against');
+    throw new Error('No published aggregate to compare the ballots against');
   }
   const numCandidates = expectedAggregate.num_candidates;
   const mpk = G2Point.fromBytes(arrayify(payload.te_mpk));
@@ -219,7 +224,11 @@ export async function verifyBallots(
         typeof env.pseudonym !== 'string' ||
         env.pseudonym.toLowerCase() !== expectedPseudonym.toLowerCase()
       ) {
-        failures.push({ index: i, voter: b.voter, reason: 'pseudonym mismatch' });
+        failures.push({
+          index: i,
+          voter: b.voter,
+          reason: 'pseudonym mismatch'
+        });
         continue;
       }
 
@@ -232,8 +241,7 @@ export async function verifyBallots(
           pseudonym: arrayify(env.pseudonym),
           vk: arrayify(env.vk),
           ciphertexts: env.ciphertexts.map(
-            c =>
-              [arrayify(c.c1), arrayify(c.c2)] as [Uint8Array, Uint8Array]
+            c => [arrayify(c.c1), arrayify(c.c2)] as [Uint8Array, Uint8Array]
           ),
           zkProof: arrayify(env.zkProof),
           voterSignature: arrayify(env.voterSignature),
@@ -358,7 +366,9 @@ export async function verifyTally(
     c2: G2Point.fromBytes(arrayify(c2))
   }));
 
-  const committeePKs = te_committee_pks.map(hex => G2Point.fromBytes(arrayify(hex)));
+  const committeePKs = te_committee_pks.map(hex =>
+    G2Point.fromBytes(arrayify(hex))
+  );
 
   // Group shares per candidate (0-indexed). Each share's DLEQ bytes
   // are the concatenation of proof_e || proof_z (32+32). The SDK
@@ -393,8 +403,8 @@ export async function verifyTally(
     const electionIdBytes = arrayify(proposalId);
     // Published scores are divided by budget (e.g. 0.6, 0.4 for a 60/40 weighted
     // split). Scale them back to raw integers for BSGS upper bound and comparison.
-    const rawPublished = (publishedScores || []).map(
-      s => BigInt(Math.round(s * budget))
+    const rawPublished = (publishedScores || []).map(s =>
+      BigInt(Math.round(s * budget))
     );
     const sumPublished = rawPublished.reduce((s, n) => s + n, 0n);
     // Upper bound for BSGS: actual sum of published scores + 1.
