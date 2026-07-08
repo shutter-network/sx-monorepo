@@ -142,9 +142,9 @@ describe('shortHex', () => {
 });
 
 // ---------------------------------------------------------------------------
-// verifyBallots — structural rejections (no WASM point allocation needed)
+// verifyBallots: structural rejections (no WASM point allocation needed)
 // ---------------------------------------------------------------------------
-describe('verifyBallots — structural rejections', () => {
+describe('verifyBallots: structural rejections', () => {
   it('throws when te_config is missing', async () => {
     await expect(
       verifyBallots(
@@ -183,7 +183,7 @@ describe('verifyBallots — structural rejections', () => {
           vp: 1,
           choice: {
             electionId: PROPOSAL_ID,
-            pseudonym: '0x' + '00'.repeat(32), // wrong — does not match keccak(voter||proposalId)
+            pseudonym: '0x' + '00'.repeat(32), // wrong; does not match keccak(voter||proposalId)
             vk: '0x' + '00'.repeat(48),
             ciphertexts: Array.from(
               { length: BASE_CONFIG.numCandidates },
@@ -232,7 +232,7 @@ describe('verifyBallots — structural rejections', () => {
 });
 
 // ---------------------------------------------------------------------------
-// verifyBallots — WASM accumulation path (smoke test + scalarMulCt branch)
+// verifyBallots: WASM accumulation path (smoke test + scalarMulCt branch)
 //
 // 200 voters × 3 candidates exercises both the vp=1 (raw reuse) and vp=2
 // (scalarMulCt) branches of the accumulation loop, as well as the addCt
@@ -240,7 +240,7 @@ describe('verifyBallots — structural rejections', () => {
 // WASM abort. A full OOM regression (requiring ~7,000+ G2 ops without the
 // fix) is covered by the SDK's `npm run bench:wasm` script.
 // ---------------------------------------------------------------------------
-describe('verifyBallots — WASM accumulation path', () => {
+describe('verifyBallots: WASM accumulation path', () => {
   const NUM_CANDIDATES = 3;
 
   it('vp=1 path: accumulates 100 ballots through the raw-reuse branch without WASM abort', async () => {
@@ -279,9 +279,9 @@ describe('verifyBallots — WASM accumulation path', () => {
 });
 
 // ---------------------------------------------------------------------------
-// verifyTally — structural rejections
+// verifyTally: structural rejections
 // ---------------------------------------------------------------------------
-describe('verifyTally — structural rejections', () => {
+describe('verifyTally: structural rejections', () => {
   it('throws when aggregate is missing', async () => {
     await expect(
       verifyTally(PROPOSAL_ID, makeAuditPayload({ aggregate: null as any }))
@@ -321,15 +321,15 @@ describe('verifyTally — structural rejections', () => {
 });
 
 // ---------------------------------------------------------------------------
-// verifyTally — WASM cleanup on thresholdMet=false
+// verifyTally: WASM cleanup on thresholdMet=false
 //
 // Each call allocates ctSums (3 G2 pairs) + committeePKs (3 G2 points) before
 // the thresholdMet throw. Without the try/finally those 9 G2 points per call
-// would accumulate. 100 iterations × 9 × 288 B = ~259 KB — small relative to
+// would accumulate. 100 iterations × 9 × 288 B = ~259 KB, small relative to
 // the 16 MB heap, but with more PKs (10 × 3 candidates) the leak is larger.
 // The test confirms the finally block frees all points so memory is stable.
 // ---------------------------------------------------------------------------
-describe('verifyTally — WASM heap cleanup on early throw', () => {
+describe('verifyTally: WASM heap cleanup on early throw', () => {
   it('frees ctSums and committeePKs after thresholdMet=false across 100 iterations', async () => {
     const NUM_PKS = 10;
     const payload = makeAuditPayload({

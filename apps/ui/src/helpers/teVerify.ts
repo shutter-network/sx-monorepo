@@ -1,5 +1,5 @@
 /**
- * Phase 8 — client-side tally audit.
+ * Phase 8. Client-side tally audit.
  *
  * Calls the hub's public GET endpoint for decryption shares + the
  * proposal's TE configuration, then runs the SDK's ``recoverTally``
@@ -43,7 +43,7 @@ function u16BE(n: number): Uint8Array {
  * public key, or the concatenation of an aggregate's ciphertexts). Used by the
  * UI's "engine-room" inspector so a human can eyeball that two parties refer to
  * the same cryptographic object without printing 96-byte blobs. This is a
- * display aid only — the trust-bearing checks are the ZK/DLEQ verifications.
+ * display aid only. The trust-bearing checks are the ZK/DLEQ verifications.
  */
 export function fingerprintHex(parts: string[]): string {
   const joined = parts.map(p => p.replace(/^0x/, '')).join('');
@@ -174,14 +174,14 @@ function ctToHex(ct: Ciphertext): { c1: string; c2: string } {
  *      checks it matches the envelope (a ballot cannot be re-attributed),
  *   2. runs the SDK ``verifyBallot`` zero-knowledge check against the
  *      proposal's ``te_config`` + master public key (the ballot is a
- *      well-formed unit vote — no out-of-range or multi-vote stuffing),
+ *      well-formed unit vote (no out-of-range or multi-vote stuffing),
  *   3. homomorphically re-accumulates the ballot into a local aggregate,
  *      scaling by the ballot's voting power (the exact weighting the
  *      sequencer applied in ``aggregateBallots``).
  *
  * Finally it compares the recomputed vp-weighted aggregate to the
  * ``expectedAggregate`` the keypers actually decrypted. A match proves
- * the published tally is over the real, valid ballots — not a number the
+ * the published tally is over the real, valid ballots, not a number the
  * sequencer invented. Verification of ill-formed ballots is reported per
  * index rather than thrown so the UI can show which voter failed.
  */
@@ -194,7 +194,7 @@ export async function verifyBallots(
 
   const config = payload.te_config;
   if (!config)
-    throw new Error('proposal te_config missing — cannot verify ballots');
+    throw new Error('proposal te_config missing; cannot verify ballots');
   if (!expectedAggregate) {
     throw new Error('No published aggregate to compare the ballots against');
   }
@@ -259,7 +259,7 @@ export async function verifyBallots(
         continue;
       }
 
-      // (3) vp-weighted homomorphic accumulation — sequencer pattern:
+      // (3) vp-weighted homomorphic accumulation. Sequencer pattern:
       // explicitly free superseded G2 points so they don't accumulate on
       // the fixed 16 MB WASM heap across many ballots.
       const w = BigInt(Math.round(b.vp));
@@ -411,7 +411,7 @@ export async function verifyTally(
     // When sumPublished = 0 (zero-vote election), upperBound = 1 and the
     // baby-step table has a single entry (the identity), so the lookup is
     // trivial. The caller must ensure scores are final before calling this
-    // function — verifying against unfinalised (all-zero) scores is meaningless.
+    // function; verifying against unfinalised (all-zero) scores is meaningless.
     const upperBound = sumPublished + 1n;
 
     const tallies = recoverTally({
@@ -462,7 +462,7 @@ export async function verifyTally(
  * re-verify offline (e.g. with the SDK's CLI) without trusting this UI or the
  * hub. It contains the public audit payload (aggregate + decryption shares +
  * committee keys), every encrypted ballot with its zero-knowledge proof, and
- * the results this client computed locally. No secrets are present — only the
+ * the results this client computed locally. No secrets are present, only the
  * public bytes anyone can already fetch from the hub.
  */
 export function buildVerificationBundle(args: {

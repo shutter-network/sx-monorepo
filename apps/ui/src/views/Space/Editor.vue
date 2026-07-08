@@ -99,9 +99,13 @@ const unsupportedPremiumStrategiesList = computed(() => {
   );
 });
 
+const isPrivateVoting = computed(
+  () => proposal.value?.privacy === 'shutter-elgamal'
+);
+
 const privacy = computed({
   get() {
-    return proposal.value?.privacy === 'shutter-elgamal';
+    return isPrivateVoting.value;
   },
   set(value) {
     if (proposal.value) {
@@ -110,7 +114,7 @@ const privacy = computed({
   }
 });
 
-// Phase 9 — ranked-choice ballots cannot be privately tallied: any
+// Phase 9. Ranked-choice ballots cannot be privately tallied: any
 // homomorphic / threshold-decryption scheme that hides individual
 // ballots also hides the rank ordering needed for IRV/Borda. We block
 // the combination at the editor level. The hub also rejects it on
@@ -331,9 +335,7 @@ const defaultVotingDelay = computed(() =>
 // here so both the display and the picker never surface a value the backend
 // would reject.
 const privateVotingStartFloor = computed(() =>
-  proposal.value?.privacy === 'shutter-elgamal'
-    ? unixTimestamp.value + MIN_DKG_LEAD_TIME_S
-    : 0
+  isPrivateVoting.value ? unixTimestamp.value + MIN_DKG_LEAD_TIME_S : 0
 );
 
 const proposalStart = computed(() => {
