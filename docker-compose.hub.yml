@@ -1,0 +1,137 @@
+# Hub operator stack — multi-operator deployment.
+#
+# Run this on the hub droplet. The keypers run independently on separate
+# droplets (docker-compose.keyper.yml) and are referenced by public URL.
+#
+# Required .env on this machine:
+#   KEYPER_URLS             Comma-separated public keyper URLs (https://...)
+#   COORDINATOR_SIGNING_KEY This coordinator's own signing key -- mints and
+#                           pushes bearer tokens to every keyper automatically
+#                           via /auth/bootstrap. Generate once with:
+#                             python3 -c "from eth_account import Account; import secrets; print('0x'+secrets.token_bytes(32).hex())"
+#                           Its address must be set as COORDINATOR_ADDRESS on
+#                           every keyper operator's stack -- share the address
+#                           (not the key) with them once, out of band. No
+#                           per-keyper token exchange needed anymore -- see
+#                           docs/private-voting/keyper-token-bootstrap.md.
+#   HUB_RELAYER_PK          Hub relayer private key
+#   SEQ_RELAYER_PK          Sequencer relayer private key
+#   SEQ_AUTH_SECRET         Sequencer auth secret
+#
+# Quick start:
+#   cp .env.hub.example .env
+#   mkdir -p mysql-data
+#   docker compose -f docker-compose.hub.yml up -d
+
+services:
+  mysql:
+    image: mysql:8.0
+    command:
+      - --default-authentication-plugin=mysql_native_password
+      - --max_connections=300
+    environment:
+      MYSQL_ALLOW_EMPTY_PASSWORD: "yes"
+    ports:
+      - "${MYSQL_PORT:-3306}:3306"
+    volumes:
+      - ./mysql-data:/var/lib/mysql
+      - ./docker/mysql-init:/docker-entrypoint-initdb.d:ro
+      - ./apps/hub/src/helpers/schema.sql:/schema/hub-schema.sql:ro
+      - ./apps/sequencer/src/helpers/schema.sql:/schema/sequencer-schema.sql:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  hub:
+    build:
+      context: .
+      dockerfile: docker/backend.Dockerfile
+    image: sx-backend:local
+    command: ["bun", "run", "apps/hub/src/index.ts"]
+    environment:
+      PORT: "3000"
+      NETWORK: testnet
+      DB_SSL: "false"
+      HUB_DATABASE_URL: mysql://root@mysql:3306/snapshot_hub
+      SEQ_DATABASE_URL: mysql://root@mysql:3306/snapshot_hub
+      SEQUENCER_URL: http://sequencer:3001
+      RELAYER_PK: ${HUB_RELAYER_PK}
+      STAMP_URL: https://stamp.fyi
+      SCORE_API_URL: https://score.snapshot.org
+      SIDEKICK_URL: https://sh5.co
+      KEYCARD_URL: ""
+      RATE_LIMIT_DATABASE_URL: ""
+    ports:
+      - "${HUB_PORT:-3000}:3000"
+    depends_on:
+      mysql:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - bun
+        - -e
+        - "const r = await fetch('http://localhost:3000/api'); process.exit(r ? 0 : 1)"
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    restart: unless-stopped
+
+  sequencer:
+    image: sx-backend:local
+    command: ["bun", "run", "apps/sequencer/src/index.ts"]
+    environment:
+      PORT: "3001"
+      NETWORK: testnet
+      DB_SSL: "false"
+      HUB_DATABASE_URL: mysql://root@mysql:3306/snapshot_hub
+      SEQ_DATABASE_URL: mysql://root@mysql:3306/snapshot_sequencer
+      RELAYER_PK: ${SEQ_RELAYER_PK}
+      DEFAULT_NETWORK: "11155111"
+      SHUTTER_URL: ""
+      SIDEKICK_URL: https://sh5.co
+      SCORE_API_URL: https://score.snapshot.org
+      SCHNAPS_API_URL: https://schnaps.snapshot.box
+      BROVIDER_URL: https://rpc.snapshot.org
+      OVERLORD_URL: https://overlord.snapshot.box
+      AUTH_SECRET: ${SEQ_AUTH_SECRET}
+      WALLETCONNECT_PROJECT_ID: ${WALLETCONNECT_PROJECT_ID}
+      LAST_CB: "1"
+      MIN_DKG_LEAD_TIME_S: "${MIN_DKG_LEAD_TIME_S:-180}"
+    ports:
+      - "${SEQ_PORT:-3001}:3001"
+    depends_on:
+      mysql:
+        condition: service_healthy
+      hub:
+        condition: service_started
+    restart: unless-stopped
+
+  auto-dkg:
+    image: sx-keypers:local
+    command: ["python", "/app/src/auto_dkg.py"]
+    environment:
+      # External keyper URLs — must be publicly reachable from this machine.
+      KEYPER_URLS: ${KEYPER_URLS}
+      # Mints and pushes bearer tokens to every keyper once, at startup, via
+      # /auth/bootstrap -- no ongoing rotation, and no manual token exchange
+      # with keyper operators needed. To force a rotation later, see
+      # scripts/rotate_keyper_token.py.
+      COORDINATOR_SIGNING_KEY: ${COORDINATOR_SIGNING_KEY}
+      TE_THRESHOLD_T: "${TE_THRESHOLD_T:-1}"
+      TE_WEIGHTED_BUDGET: "${TE_WEIGHTED_BUDGET:-100}"
+      POLL_INTERVAL_S: "2"
+      HUB_DB_HOST: mysql
+      HUB_DB_PORT: "3306"
+      HUB_DB_USER: root
+      HUB_DB_PASSWORD: ""
+      HUB_DB_NAME: snapshot_hub
+    depends_on:
+      mysql:
+        condition: service_healthy
+      hub:
+        condition: service_started
+    restart: unless-stopped
+

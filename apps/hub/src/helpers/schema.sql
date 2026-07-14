@@ -76,6 +76,12 @@ CREATE TABLE proposals (
   te_threshold_n INT DEFAULT NULL,
   te_keyper_urls JSON DEFAULT NULL,
   te_keyper_addresses JSON DEFAULT NULL,
+  -- Coordinator/API bearer token per keyper, same order as te_keyper_urls.
+  -- Plaintext by design -- the hub DB is already the trust boundary
+  -- te_keyper_urls/te_keyper_addresses live inside. The sequencer reads
+  -- this alongside te_keyper_urls to authenticate /decrypt/publish_on_chain
+  -- calls.
+  te_keyper_tokens JSON DEFAULT NULL,
   te_aggregate JSON DEFAULT NULL,
   -- NULL = pending/ok; 'dkg_failed' = all attempts exhausted, needs operator intervention.
   te_dkg_status VARCHAR(24) DEFAULT NULL,
@@ -158,6 +164,20 @@ CREATE TABLE te_dkg_submissions (
   posted_at BIGINT NOT NULL,
   PRIMARY KEY (proposal_id, keyper_index),
   INDEX idx_te_dkg_match (proposal_id, mpk_hex(64))
+);
+
+-- auto-dkg's durable record of each keyper's bearer tokens -- so an
+-- auto-dkg restart loads existing tokens instead of re-minting the whole
+-- fleet. Plaintext by the same deliberate choice as proposals.te_keyper_tokens
+-- (this DB is already the trust boundary those live inside). No rotation:
+-- a row is only replaced when a keyper is new, or when an operator deletes
+-- it to deliberately force a fresh mint (see scripts/rotate_keyper_token.py).
+CREATE TABLE keyper_bootstrap_tokens (
+  keyper_url VARCHAR(255) NOT NULL,
+  api_token VARCHAR(64) NOT NULL,
+  peer_token VARCHAR(64) NOT NULL,
+  updated BIGINT NOT NULL,
+  PRIMARY KEY (keyper_url)
 );
 
 CREATE TABLE follows (
