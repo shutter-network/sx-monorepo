@@ -127,6 +127,12 @@ services:
       KEYPER_PRIVATE_KEY: ${KEYPER_PRIVATE_KEY_1:-0x4e057a764bb4fec72d8a09c7e04862cf293f87103459f216b41a885f36e27b6d}
       KEYPER_DKG_RETENTION_TIME: "${KEYPER_DKG_RETENTION_TIME:-172800}"
       KEYPER_DKG_PRUNE_INTERVAL_S: "${KEYPER_DKG_PRUNE_INTERVAL_S:-3600}"
+      # Multi-operator auth. Empty = single-operator dev mode (no auth).
+      # Bearer tokens are no longer set here directly -- auto-dkg mints and
+      # pushes them at runtime via POST /auth/bootstrap. COORDINATOR_ADDRESS
+      # must be set together with auto-dkg's COORDINATOR_SIGNING_KEY (set
+      # both or neither -- see keyper-token-bootstrap.md, "Identities").
+      COORDINATOR_ADDRESS: "${COORDINATOR_ADDRESS:-}"
     volumes:
       - ./keyper-state/keyper1:/keyper-state
     depends_on:
@@ -148,6 +154,7 @@ services:
       KEYPER_PRIVATE_KEY: ${KEYPER_PRIVATE_KEY_2:-0x99f276d9a8045c01649f153f69b1c446a24aee8fd546a147fe5e29cc061edc88}
       KEYPER_DKG_RETENTION_TIME: "${KEYPER_DKG_RETENTION_TIME:-172800}"
       KEYPER_DKG_PRUNE_INTERVAL_S: "${KEYPER_DKG_PRUNE_INTERVAL_S:-3600}"
+      COORDINATOR_ADDRESS: "${COORDINATOR_ADDRESS:-}"
     volumes:
       - ./keyper-state/keyper2:/keyper-state
     depends_on:
@@ -171,6 +178,7 @@ services:
       KEYPER_PRIVATE_KEY: ${KEYPER_PRIVATE_KEY_3:-0xfdf5c2f83276e56c374b54aaef3c0a3f989ad11d3f6a1faf29373e5e528ea94c}
       KEYPER_DKG_RETENTION_TIME: "${KEYPER_DKG_RETENTION_TIME:-172800}"
       KEYPER_DKG_PRUNE_INTERVAL_S: "${KEYPER_DKG_PRUNE_INTERVAL_S:-3600}"
+      COORDINATOR_ADDRESS: "${COORDINATOR_ADDRESS:-}"
     volumes:
       - ./keyper-state/keyper3:/keyper-state
     depends_on:
@@ -190,6 +198,14 @@ services:
     command: ["python", "/app/src/auto_dkg.py"]
     environment:
       KEYPER_URLS: http://keyper1:5001,http://keyper2:5002,http://keyper3:5003
+      # Coordinator's own signing key -- mints and pushes bearer tokens to
+      # every keyper once, at startup, via /auth/bootstrap (no ongoing
+      # rotation). Empty = single-operator dev mode (no bootstrap runs,
+      # keypers enforce no auth). Must be set together with
+      # COORDINATOR_ADDRESS on every keyper, or a keyper configured with
+      # COORDINATOR_ADDRESS but never bootstrapped is locked out
+      # permanently -- see keyper-token-bootstrap.md, "Identities".
+      COORDINATOR_SIGNING_KEY: "${COORDINATOR_SIGNING_KEY:-}"
       TE_THRESHOLD_T: "1"
       TE_WEIGHTED_BUDGET: "${TE_WEIGHTED_BUDGET:-100}"
       POLL_INTERVAL_S: "2"
