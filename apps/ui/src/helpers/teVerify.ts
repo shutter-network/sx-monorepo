@@ -1,5 +1,5 @@
 /**
- * Phase 8 — client-side tally audit.
+ * Phase 8. Client-side tally audit.
  *
  * Calls the hub's public GET endpoint for decryption shares + the
  * proposal's TE configuration, then runs the SDK's ``recoverTally``
@@ -43,7 +43,7 @@ function u16BE(n: number): Uint8Array {
  * public key, or the concatenation of an aggregate's ciphertexts). Used by the
  * UI's "engine-room" inspector so a human can eyeball that two parties refer to
  * the same cryptographic object without printing 96-byte blobs. This is a
- * display aid only — the trust-bearing checks are the ZK/DLEQ verifications.
+ * display aid only. The trust-bearing checks are the ZK/DLEQ verifications.
  */
 export function fingerprintHex(parts: string[]): string {
   const joined = parts.map(p => p.replace(/^0x/, '')).join('');
@@ -52,7 +52,11 @@ export function fingerprintHex(parts: string[]): string {
 }
 
 /** Shorten a long hex string to `0x1234…cdef` for compact display. */
-export function shortHex(hex: string | undefined | null, lead = 6, tail = 6): string {
+export function shortHex(
+  hex: string | undefined | null,
+  lead = 6,
+  tail = 6
+): string {
   if (!hex) return '-';
   const s = hex.startsWith('0x') ? hex : `0x${hex}`;
   if (s.length <= 2 + lead + tail + 1) return s;
@@ -170,14 +174,14 @@ function ctToHex(ct: Ciphertext): { c1: string; c2: string } {
  *      checks it matches the envelope (a ballot cannot be re-attributed),
  *   2. runs the SDK ``verifyBallot`` zero-knowledge check against the
  *      proposal's ``te_config`` + master public key (the ballot is a
- *      well-formed unit vote — no out-of-range or multi-vote stuffing),
+ *      well-formed unit vote (no out-of-range or multi-vote stuffing),
  *   3. homomorphically re-accumulates the ballot into a local aggregate,
  *      scaling by the ballot's voting power (the exact weighting the
  *      sequencer applied in ``aggregateBallots``).
  *
  * Finally it compares the recomputed vp-weighted aggregate to the
  * ``expectedAggregate`` the keypers actually decrypted. A match proves
- * the published tally is over the real, valid ballots — not a number the
+ * the published tally is over the real, valid ballots, not a number the
  * sequencer invented. Verification of ill-formed ballots is reported per
  * index rather than thrown so the UI can show which voter failed.
  */
@@ -189,9 +193,10 @@ export async function verifyBallots(
   await ensureCurvesInit();
 
   const config = payload.te_config;
-  if (!config) throw new Error('proposal te_config missing — cannot verify ballots');
+  if (!config)
+    throw new Error('proposal te_config missing; cannot verify ballots');
   if (!expectedAggregate) {
-    throw new Error('no published aggregate to compare the ballots against');
+    throw new Error('No published aggregate to compare the ballots against');
   }
   const numCandidates = expectedAggregate.num_candidates;
   const mpk = G2Point.fromBytes(arrayify(payload.te_mpk));
@@ -200,102 +205,130 @@ export async function verifyBallots(
   let verifiedCount = 0;
   const acc: (Ciphertext | null)[] = new Array(numCandidates).fill(null);
 
-  for (let i = 0; i < payload.ballots.length; i++) {
-    const b = payload.ballots[i];
-    const env = b.choice;
-    if (!env) {
-      failures.push({ index: i, voter: b.voter, reason: 'empty ballot' });
-      continue;
-    }
-
-    // (1) pseudonym binding.
-    const expectedPseudonym =
-      '0x' +
-      Array.from(pseudonymFor(b.voter, proposalId))
-        .map(x => x.toString(16).padStart(2, '0'))
-        .join('');
-    if (
-      typeof env.pseudonym !== 'string' ||
-      env.pseudonym.toLowerCase() !== expectedPseudonym.toLowerCase()
-    ) {
-      failures.push({ index: i, voter: b.voter, reason: 'pseudonym mismatch' });
-      continue;
-    }
-
-    // (2) zero-knowledge validity proof.
-    let ok = false;
-    let reason = '';
-    try {
-      const inputs: BallotInputs = {
-        electionId: arrayify(env.electionId),
-        pseudonym: arrayify(env.pseudonym),
-        vk: arrayify(env.vk),
-        ciphertexts: env.ciphertexts.map(
-          c =>
-            [arrayify(c.c1), arrayify(c.c2)] as [Uint8Array, Uint8Array]
-        ),
-        zkProof: arrayify(env.zkProof),
-        voterSignature: arrayify(env.voterSignature),
-        wrAttestation: arrayify(env.wrAttestation || '0x')
-      };
-      const result = verifyBallot(inputs, config, mpk, () => true);
-      ok = result.ok;
-      reason = result.reason || 'invalid zk proof';
-    } catch (err: any) {
-      ok = false;
-      reason = `bad envelope: ${err?.message || err}`;
-    }
-    if (!ok) {
-      failures.push({ index: i, voter: b.voter, reason });
-      continue;
-    }
-
-    // (3) vp-weighted homomorphic accumulation. Mirror aggregateBallots:
-    // round vp to an integer, skip zero, reject negative.
-    const w = BigInt(Math.round(b.vp));
-    if (w < 0n) {
-      failures.push({ index: i, voter: b.voter, reason: 'negative vp' });
-      continue;
-    }
-    verifiedCount++;
-    if (w === 0n) continue;
-
-    const cts: Ciphertext[] = env.ciphertexts.map(c => ({
-      c1: G2Point.fromBytes(arrayify(c.c1)),
-      c2: G2Point.fromBytes(arrayify(c.c2))
-    }));
-    for (let j = 0; j < numCandidates; j++) {
-      const weighted = w === 1n ? cts[j] : scalarMulCt(w, cts[j]);
-      acc[j] = acc[j] === null ? weighted : addCt(acc[j]!, weighted);
-    }
-  }
-
-  // Compare the recomputed aggregate to the published one byte-for-byte.
-  let aggregateMatches = failures.length === 0;
-  if (aggregateMatches) {
-    for (let j = 0; j < numCandidates; j++) {
-      if (acc[j] === null) {
-        aggregateMatches = false;
-        break;
+  try {
+    for (let i = 0; i < payload.ballots.length; i++) {
+      const b = payload.ballots[i];
+      const env = b.choice;
+      if (!env) {
+        failures.push({ index: i, voter: b.voter, reason: 'empty ballot' });
+        continue;
       }
-      const got = ctToHex(acc[j]!);
-      const want = expectedAggregate.ciphertexts[j];
+
+      // (1) pseudonym binding.
+      const expectedPseudonym =
+        '0x' +
+        Array.from(pseudonymFor(b.voter, proposalId))
+          .map(x => x.toString(16).padStart(2, '0'))
+          .join('');
       if (
-        got.c1.toLowerCase() !== want.c1.toLowerCase() ||
-        got.c2.toLowerCase() !== want.c2.toLowerCase()
+        typeof env.pseudonym !== 'string' ||
+        env.pseudonym.toLowerCase() !== expectedPseudonym.toLowerCase()
       ) {
-        aggregateMatches = false;
-        break;
+        failures.push({
+          index: i,
+          voter: b.voter,
+          reason: 'pseudonym mismatch'
+        });
+        continue;
+      }
+
+      // (2) zero-knowledge validity proof.
+      let ok = false;
+      let reason = '';
+      try {
+        const inputs: BallotInputs = {
+          electionId: arrayify(env.electionId),
+          pseudonym: arrayify(env.pseudonym),
+          vk: arrayify(env.vk),
+          ciphertexts: env.ciphertexts.map(
+            c => [arrayify(c.c1), arrayify(c.c2)] as [Uint8Array, Uint8Array]
+          ),
+          zkProof: arrayify(env.zkProof),
+          voterSignature: arrayify(env.voterSignature),
+          wrAttestation: arrayify(env.wrAttestation || '0x')
+        };
+        const result = verifyBallot(inputs, config, mpk, () => true);
+        ok = result.ok;
+        reason = result.reason || 'invalid zk proof';
+      } catch (err: any) {
+        ok = false;
+        reason = `bad envelope: ${err?.message || err}`;
+      }
+      if (!ok) {
+        failures.push({ index: i, voter: b.voter, reason });
+        continue;
+      }
+
+      // (3) vp-weighted homomorphic accumulation. Sequencer pattern:
+      // explicitly free superseded G2 points so they don't accumulate on
+      // the fixed 16 MB WASM heap across many ballots.
+      const w = BigInt(Math.round(b.vp));
+      if (w < 0n) {
+        failures.push({ index: i, voter: b.voter, reason: 'negative vp' });
+        continue;
+      }
+      verifiedCount++;
+      if (w === 0n) continue;
+
+      const cts: Ciphertext[] = env.ciphertexts.map(c => ({
+        c1: G2Point.fromBytes(arrayify(c.c1)),
+        c2: G2Point.fromBytes(arrayify(c.c2))
+      }));
+      for (let j = 0; j < numCandidates; j++) {
+        const raw = cts[j];
+        const weighted = w === 1n ? raw : scalarMulCt(w, raw);
+        if (w !== 1n) {
+          raw.c1.destroyWasm();
+          raw.c2.destroyWasm();
+        }
+        if (acc[j] === null) {
+          acc[j] = weighted;
+        } else {
+          const prev = acc[j]!;
+          acc[j] = addCt(prev, weighted);
+          prev.c1.destroyWasm();
+          prev.c2.destroyWasm();
+          weighted.c1.destroyWasm();
+          weighted.c2.destroyWasm();
+        }
+      }
+    }
+
+    // Compare the recomputed aggregate to the published one byte-for-byte.
+    let aggregateMatches = failures.length === 0;
+    if (aggregateMatches) {
+      for (let j = 0; j < numCandidates; j++) {
+        if (acc[j] === null) {
+          aggregateMatches = false;
+          break;
+        }
+        const got = ctToHex(acc[j]!);
+        const want = expectedAggregate.ciphertexts[j];
+        if (
+          got.c1.toLowerCase() !== want.c1.toLowerCase() ||
+          got.c2.toLowerCase() !== want.c2.toLowerCase()
+        ) {
+          aggregateMatches = false;
+          break;
+        }
+      }
+    }
+
+    return {
+      verifiedCount,
+      total: payload.ballots.length,
+      aggregateMatches,
+      failures
+    };
+  } finally {
+    mpk.destroyWasm();
+    for (const ct of acc) {
+      if (ct !== null) {
+        ct.c1.destroyWasm();
+        ct.c2.destroyWasm();
       }
     }
   }
-
-  return {
-    verifiedCount,
-    total: payload.ballots.length,
-    aggregateMatches,
-    failures
-  };
 }
 
 /**
@@ -310,7 +343,8 @@ export async function verifyBallots(
 export async function verifyTally(
   proposalId: string,
   payload: AuditPayload,
-  publishedScores?: number[]
+  publishedScores?: number[],
+  budget = 1
 ): Promise<VerifyResult> {
   await ensureCurvesInit();
 
@@ -332,7 +366,9 @@ export async function verifyTally(
     c2: G2Point.fromBytes(arrayify(c2))
   }));
 
-  const committeePKs = te_committee_pks.map(hex => G2Point.fromBytes(arrayify(hex)));
+  const committeePKs = te_committee_pks.map(hex =>
+    G2Point.fromBytes(arrayify(hex))
+  );
 
   // Group shares per candidate (0-indexed). Each share's DLEQ bytes
   // are the concatenation of proof_e || proof_z (32+32). The SDK
@@ -356,50 +392,69 @@ export async function verifyTally(
   const thresholdMet = sharesPerCandidate.every(
     arr => arr.length >= te_threshold_t + 1
   );
-  if (!thresholdMet) {
-    throw new Error(
-      `not enough decryption shares per candidate (need t+1=${te_threshold_t + 1})`
-    );
-  }
 
-  const electionIdBytes = arrayify(proposalId);
-  // BSGS upper bound: total VP across all ballots is bounded above by
-  // sum of published scores when published scores are available.
-  // Otherwise fall back to a generous default of 1<<40 so the audit
-  // can still run (the BSGS table size is `sqrt(upperBound)`).
-  const sumPublished = (publishedScores || []).reduce(
-    (s, n) => s + BigInt(Math.floor(n)),
-    0n
-  );
-  const upperBound = sumPublished > 0n ? sumPublished + 1n : 1n << 40n;
-
-  const tallies = recoverTally({
-    ctSums,
-    sharesPerCandidate,
-    threshold: te_threshold_t,
-    committeePKs,
-    upperBound,
-    transcriptFor: (j: number) => {
-      const t = new Transcript(DECRYPT_TRANSCRIPT_LABEL);
-      t.append('electionId', electionIdBytes);
-      t.append('candidate', u16BE(j));
-      return t;
+  try {
+    if (!thresholdMet) {
+      throw new Error(
+        `not enough decryption shares per candidate (need t+1=${te_threshold_t + 1})`
+      );
     }
-  });
 
-  let matchesPublished: boolean | null = null;
-  if (publishedScores) {
-    matchesPublished =
-      publishedScores.length === tallies.length &&
-      tallies.every((v, i) => v === BigInt(Math.floor(publishedScores[i])));
+    const electionIdBytes = arrayify(proposalId);
+    // Published scores are divided by budget (e.g. 0.6, 0.4 for a 60/40 weighted
+    // split). Scale them back to raw integers for BSGS upper bound and comparison.
+    const rawPublished = (publishedScores || []).map(s =>
+      BigInt(Math.round(s * budget))
+    );
+    const sumPublished = rawPublished.reduce((s, n) => s + n, 0n);
+    // Upper bound for BSGS: actual sum of published scores + 1.
+    // When sumPublished = 0 (zero-vote election), upperBound = 1 and the
+    // baby-step table has a single entry (the identity), so the lookup is
+    // trivial. The caller must ensure scores are final before calling this
+    // function; verifying against unfinalised (all-zero) scores is meaningless.
+    const upperBound = sumPublished + 1n;
+
+    const tallies = recoverTally({
+      ctSums,
+      sharesPerCandidate,
+      threshold: te_threshold_t,
+      committeePKs,
+      upperBound,
+      transcriptFor: (j: number) => {
+        const t = new Transcript(DECRYPT_TRANSCRIPT_LABEL);
+        t.append('electionId', electionIdBytes);
+        t.append('candidate', u16BE(j));
+        return t;
+      }
+    });
+
+    let matchesPublished: boolean | null = null;
+    if (publishedScores && rawPublished.length > 0) {
+      matchesPublished =
+        rawPublished.length === tallies.length &&
+        tallies.every((v, i) => v === rawPublished[i]);
+    }
+
+    return {
+      tallies,
+      matchesPublished,
+      shareCount: shares.length,
+      thresholdMet
+    };
+  } finally {
+    for (const ct of ctSums) {
+      ct.c1.destroyWasm();
+      ct.c2.destroyWasm();
+    }
+    for (const pk of committeePKs) {
+      pk.destroyWasm();
+    }
+    for (const candidateShares of sharesPerCandidate) {
+      for (const share of candidateShares) {
+        share.sigma.destroyWasm();
+      }
+    }
   }
-
-  return {
-    tallies,
-    matchesPublished,
-    shareCount: shares.length,
-    thresholdMet
-  };
 }
 
 /**
@@ -407,7 +462,7 @@ export async function verifyTally(
  * re-verify offline (e.g. with the SDK's CLI) without trusting this UI or the
  * hub. It contains the public audit payload (aggregate + decryption shares +
  * committee keys), every encrypted ballot with its zero-knowledge proof, and
- * the results this client computed locally. No secrets are present — only the
+ * the results this client computed locally. No secrets are present, only the
  * public bytes anyone can already fetch from the hub.
  */
 export function buildVerificationBundle(args: {

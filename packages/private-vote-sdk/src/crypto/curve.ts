@@ -68,7 +68,10 @@ const blstRegistry = new FinalizationRegistry<BlstHeld>(({ ptr, klass }) => {
 function trackPoint<T extends object>(wrapper: object, inner: T): T {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const held = inner as any;
-  blstRegistry.register(wrapper, { ptr: held.ptr as number, klass: held.__class__ });
+  // Pass wrapper as the unregister token so destroyWasm() can cancel the
+  // registry entry before freeing, preventing FinalizationRegistry from
+  // calling __destroy__ on already-freed (and potentially reused) WASM memory.
+  blstRegistry.register(wrapper, { ptr: held.ptr as number, klass: held.__class__ }, wrapper);
   return inner;
 }
 
@@ -107,11 +110,14 @@ export class G1Point {
   }
 
   static generator(): G1Point {
-    // .dup() returns an owned heap copy — never pass the static generator pointer
-    // directly to the G1Point constructor, because trackPoint() would register it
-    // with FinalizationRegistry and blst().destroy() would free the WASM static
-    // constant, corrupting all subsequent curve operations.
-    return new G1Point(blst().P1.generator().dup());
+    // P1.generator() allocates a NEW heap copy of the static generator (it does
+    // `new P1(static_gen)`) and stores it in P1.__cache__.  We dup() it to get our
+    // owned copy, then immediately free the intermediate — otherwise the P1.__cache__
+    // entry for the generator copy accumulates forever (144 bytes × every call).
+    const raw = blst().P1.generator();
+    const dup = raw.dup();
+    destroyWasm(raw);
+    return new G1Point(dup);
   }
 
   static identity(): G1Point {
@@ -153,10 +159,10 @@ export class G1Point {
   }
 
   sub(o: G1Point): G1Point {
-    // Go through tracked wrappers so the intermediate negation gets
-    // cleaned up by the FinalizationRegistry rather than leaking on
-    // the WASM heap.
-    return this.add(o.neg());
+    const neg_o = o.neg();
+    const result = this.add(neg_o);
+    neg_o.destroyWasm();
+    return result;
   }
 
   neg(): G1Point {
@@ -173,6 +179,11 @@ export class G1Point {
   equals(o: G1Point): boolean {
     return this.inner.is_equal(o.inner);
   }
+
+  destroyWasm(): void {
+    blstRegistry.unregister(this);
+    destroyWasm(this.inner);
+  }
 }
 
 // ---------- G2 (encryption group; mpk, C1, C2 all live here) ----------
@@ -185,9 +196,13 @@ export class G2Point {
   }
 
   static generator(): G2Point {
-    // .dup() — same rationale as G1Point.generator(): avoid registering the
-    // static generator pointer with FinalizationRegistry.
-    return new G2Point(blst().P2.generator().dup());
+    // Same as G1Point.generator(): P2.generator() allocates a new heap copy,
+    // stored in P2.__cache__.  Free it after dup() to avoid the per-call leak
+    // of 288 bytes (≈ 17 calls/ballot × 288 B × 2000 ballots ≈ 9.5 MB → OOM).
+    const raw = blst().P2.generator();
+    const dup = raw.dup();
+    destroyWasm(raw);
+    return new G2Point(dup);
   }
 
   static identity(): G2Point {
@@ -229,7 +244,10 @@ export class G2Point {
   }
 
   sub(o: G2Point): G2Point {
-    return this.add(o.neg());
+    const neg_o = o.neg();
+    const result = this.add(neg_o);
+    neg_o.destroyWasm();
+    return result;
   }
 
   neg(): G2Point {
@@ -245,5 +263,10 @@ export class G2Point {
 
   equals(o: G2Point): boolean {
     return this.inner.is_equal(o.inner);
+  }
+
+  destroyWasm(): void {
+    blstRegistry.unregister(this);
+    destroyWasm(this.inner);
   }
 }

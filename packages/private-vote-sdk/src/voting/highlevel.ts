@@ -194,8 +194,13 @@ export function buildBallot(args: BuildBallotArgs): BallotInputs {
   // mistake class (mismatched keypair, swapped voters) at construction time
   // rather than producing a ballot whose Schnorr signature fails at the
   // verifier.
-  if (G1Point.generator().mul(sk).equals(vk) === false) {
-    throw new Error('buildBallot: vk does not match sk · P₁ (mismatched keypair)');
+  {
+    const P1 = G1Point.generator();
+    const expected = P1.mul(sk);
+    P1.destroyWasm();
+    const ok = expected.equals(vk);
+    expected.destroyWasm();
+    if (!ok) throw new Error('buildBallot: vk does not match sk · P₁ (mismatched keypair)');
   }
 
   // 1. Encrypt.
@@ -261,18 +266,24 @@ export function buildBallot(args: BuildBallotArgs): BallotInputs {
     rSum = rs.reduce((a, r) => a + r, 0n);
   } else {
     const d = params.d!;
-    const weighted = cts.map((ct, i) => ({
-      ct,
-      r: rs[i]!,
-      w: 1n << BigInt(i % d),
-    }));
-    ctSum = weighted
-      .map(({ ct, w }) => ({ c1: ct.c1.mul(w), c2: ct.c2.mul(w) }))
-      .reduce((acc, cur) => ({
-        c1: acc.c1.add(cur.c1),
-        c2: acc.c2.add(cur.c2),
-      }));
-    rSum = weighted.reduce((a, { r, w }) => a + r * w, 0n);
+    rSum = 0n;
+    let acc: Ciphertext | null = null;
+    for (let i = 0; i < cts.length; i++) {
+      const w   = 1n << BigInt(i % d);
+      const wCt = { c1: cts[i]!.c1.mul(w), c2: cts[i]!.c2.mul(w) };
+      rSum += rs[i]! * w;
+      if (acc === null) {
+        acc = wCt;
+      } else {
+        const prev: Ciphertext = acc;
+        acc = { c1: prev.c1.add(wCt.c1), c2: prev.c2.add(wCt.c2) };
+        prev.c1.destroyWasm();
+        prev.c2.destroyWasm();
+        wCt.c1.destroyWasm();
+        wCt.c2.destroyWasm();
+      }
+    }
+    ctSum = acc!;
   }
 
   const V = votes.reduce((a, b) => a + b, 0n);
@@ -290,6 +301,14 @@ export function buildBallot(args: BuildBallotArgs): BallotInputs {
           t,
         );
 
+  // Free ctSum only when sumCts allocated a fresh pair (length > 1).
+  // When length === 1, sumCts returns cts[0] directly — freeing here would
+  // double-free when the cts cleanup loop runs below.
+  if (params.variant === 'A' && cts.length > 1) {
+    ctSum.c1.destroyWasm();
+    ctSum.c2.destroyWasm();
+  }
+
   const bvp: BallotValidityProof = {
     version: 0x01,
     variant: params.variant,
@@ -298,11 +317,30 @@ export function buildBallot(args: BuildBallotArgs): BallotInputs {
   };
   const zkProof = encodeBallotValidityProof(bvp);
 
+  // After encoding to bytes, free all G2 commitment points in rangeOrBit.
+  for (const orProof of rangeOrBit) {
+    for (const br of orProof.branches) {
+      br.a1.destroyWasm();
+      br.a2.destroyWasm();
+    }
+  }
+  if (budget.mode === 'atMost') {
+    for (const br of budget.proof.branches) {
+      br.a1.destroyWasm();
+      br.a2.destroyWasm();
+    }
+  }
+
   // 5. Canonical preimage + Schnorr.
   const ciphertextBytes: [Uint8Array, Uint8Array][] = cts.map((ct) => [
     ct.c1.toBytes(),
     ct.c2.toBytes(),
   ]);
+  for (const ct of cts) {
+    ct.c1.destroyWasm();
+    ct.c2.destroyWasm();
+  }
+
   const preimage = canonicalBallotMessage({
     electionId,
     pseudonym,
@@ -310,6 +348,8 @@ export function buildBallot(args: BuildBallotArgs): BallotInputs {
     zkProof,
   });
   const sig = schnorrSign(sk, vk, keccak256(preimage, 'bytes'));
+  const voterSignature = encodeSchnorr(sig);
+  sig.R.destroyWasm();
 
   return {
     electionId,
@@ -317,7 +357,7 @@ export function buildBallot(args: BuildBallotArgs): BallotInputs {
     vk: vk.toBytes(),
     ciphertexts: ciphertextBytes,
     zkProof,
-    voterSignature: encodeSchnorr(sig),
+    voterSignature,
     wrAttestation,
   };
 }

@@ -4,7 +4,12 @@ import networks from '@snapshot-labs/snapshot.js/src/networks.json';
 import { useQueryClient } from '@tanstack/vue-query';
 import { LocationQueryValue } from 'vue-router';
 import { StrategyWithTreasury } from '@/composables/useTreasuries';
-import { BASIC_CHOICES, DOCS_URL, VERIFIED_URL } from '@/helpers/constants';
+import {
+  BASIC_CHOICES,
+  DOCS_URL,
+  MIN_DKG_LEAD_TIME_S,
+  VERIFIED_URL
+} from '@/helpers/constants';
 import { omit, prettyConcat } from '@/helpers/utils';
 import { validateForm } from '@/helpers/validation';
 import { explorePageProtocols, getNetwork, offchainNetworks } from '@/networks';
@@ -94,9 +99,13 @@ const unsupportedPremiumStrategiesList = computed(() => {
   );
 });
 
+const isPrivateVoting = computed(
+  () => proposal.value?.privacy === 'shutter-elgamal'
+);
+
 const privacy = computed({
   get() {
-    return proposal.value?.privacy === 'shutter-elgamal';
+    return isPrivateVoting.value;
   },
   set(value) {
     if (proposal.value) {
@@ -105,7 +114,7 @@ const privacy = computed({
   }
 });
 
-// Phase 9 — ranked-choice ballots cannot be privately tallied: any
+// Phase 9. Ranked-choice ballots cannot be privately tallied: any
 // homomorphic / threshold-decryption scheme that hides individual
 // ballots also hides the rank ordering needed for IRV/Borda. We block
 // the combination at the editor level. The hub also rejects it on
@@ -321,9 +330,36 @@ const defaultVotingDelay = computed(() =>
   isOffchainSpace.value ? DEFAULT_VOTING_DELAY : 0
 );
 
-const proposalStart = computed(
-  () => proposal.value?.start ?? unixTimestamp.value + props.space.voting_delay
+// Shutter-elgamal proposals need a DKG cool-off before voting opens; the
+// sequencer rejects starts closer than MIN_DKG_LEAD_TIME_S. Apply the floor
+// here so both the display and the picker never surface a value the backend
+// would reject.
+const privateVotingStartFloor = computed(() =>
+  isPrivateVoting.value ? unixTimestamp.value + MIN_DKG_LEAD_TIME_S : 0
 );
+
+const proposalStart = computed(() => {
+  const base =
+    proposal.value?.start ?? unixTimestamp.value + props.space.voting_delay;
+  return Math.max(base, privateVotingStartFloor.value);
+});
+
+// If the user toggles Private voting ON with an existing draft whose start
+// is already too soon, push it out to the floor so the on-disk value stays
+// in sync with what the picker shows.
+watch(privateVotingStartFloor, floor => {
+  if (!proposal.value || floor === 0) return;
+  if ((proposal.value.start ?? 0) < floor) {
+    const originalPeriod =
+      proposal.value.min_end != null && proposal.value.start != null
+        ? proposal.value.min_end - proposal.value.start
+        : 0;
+    proposal.value.start = floor;
+    if (originalPeriod > 0) {
+      proposal.value.min_end = floor + originalPeriod;
+    }
+  }
+});
 
 const proposalMinEnd = computed(
   () =>
@@ -879,7 +915,11 @@ watchEffect(() => {
             </UiInputArray>
           </div>
           <UiSwitch
-            v-if="isOffchainSpace && space.privacy === 'any' && proposal.type !== 'ranked-choice'"
+            v-if="
+              isOffchainSpace &&
+              space.privacy === 'any' &&
+              proposal.type !== 'ranked-choice'
+            "
             v-model="privacy"
             title="Private voting"
             tooltip="Permanent private voting. Each ballot is encrypted in your browser with threshold ElGamal and tallied homomorphically, so individual votes stay private forever. A committee of keypers publishes proven decryption shares to reveal only the final result."
@@ -890,8 +930,8 @@ watchEffect(() => {
             class="!my-0"
           >
             Ranked-choice voting requires access to individual ballots and is
-            not compatible with permanent private voting. Switch the voting
-            type or disable private voting before submitting.
+            not compatible with permanent private voting. Switch the voting type
+            or disable private voting before submitting.
           </UiAlert>
           <EditorLabels
             v-if="space.labels?.length"
@@ -905,8 +945,18 @@ watchEffect(() => {
             :start="proposalStart"
             :min_end="proposalMinEnd"
             :max_end="proposalMaxEnd"
+            :min_start="privateVotingStartFloor"
             :editable="!proposal.originalProposal"
           />
+          <div
+            v-if="privateVotingStartFloor > 0"
+            class="text-sm text-skin-text -mt-2.5"
+          >
+            Private voting requires a
+            {{ Math.round(MIN_DKG_LEAD_TIME_S / 60) }}-minute setup window
+            before voting opens so the keyper committee can generate the
+            encryption key. The start time is scheduled accordingly.
+          </div>
         </div>
       </UiAffix>
     </div>

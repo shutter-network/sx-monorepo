@@ -67,6 +67,8 @@ export function proveDLEQ(
   t.appendPoint('dleq:a2', a2);
   const e = t.challenge('dleq:e');
   const z = modQ(w + witness.x * e);
+  a1.destroyWasm();
+  a2.destroyWasm();
   return { e, z };
 }
 
@@ -78,13 +80,26 @@ export function verifyDLEQ(
   // Recompute commitments from the verification equation:
   //   a1 = z·base1 - e·point1
   //   a2 = z·base2 - e·point2
-  const a1 = stmt.base1.mul(proof.z).sub(stmt.point1.mul(proof.e));
-  const a2 = stmt.base2.mul(proof.z).sub(stmt.point2.mul(proof.e));
+  // Break chained expressions so every intermediate WASM allocation is
+  // named and can be freed immediately after it is no longer needed.
+  const b1z = stmt.base1.mul(proof.z);
+  const p1e = stmt.point1.mul(proof.e);
+  const a1  = b1z.sub(p1e); // sub() frees its own neg temporary
+  b1z.destroyWasm();
+  p1e.destroyWasm();
+
+  const b2z = stmt.base2.mul(proof.z);
+  const p2e = stmt.point2.mul(proof.e);
+  const a2  = b2z.sub(p2e);
+  b2z.destroyWasm();
+  p2e.destroyWasm();
 
   bindStatementDLEQ(t, stmt);
   t.appendPoint('dleq:a1', a1);
   t.appendPoint('dleq:a2', a2);
   const ePrime = t.challenge('dleq:e');
+  a1.destroyWasm();
+  a2.destroyWasm();
   return proof.e === ePrime;
 }
 
@@ -155,17 +170,29 @@ export function proveOR(
       branches[i] = { a1, a2, e: 0n, z: 0n };
     } else {
       // Simulated branch: sample (e_i, z_i), derive commitments.
+      // All intermediates are freed immediately after use.
       const sim = sims[i] ?? {
         e: randomScalar(),
         z: randomScalar(),
       };
       const ei = modQ(sim.e);
       const zi = modQ(sim.z);
-      const Di = ct.c2.sub(P2.mul(modQ(stmt.candidates[i]!)));
+      const candMul = P2.mul(modQ(stmt.candidates[i]!));
+      const Di      = ct.c2.sub(candMul); // sub() frees candMul.neg()
+      candMul.destroyWasm();
       // a1,i = z_i·P₂ - e_i·C1
-      const a1 = P2.mul(zi).sub(ct.c1.mul(ei));
+      const P2zi   = P2.mul(zi);
+      const c1ei   = ct.c1.mul(ei);
+      const a1     = P2zi.sub(c1ei);
+      P2zi.destroyWasm();
+      c1ei.destroyWasm();
       // a2,i = z_i·mpk - e_i·D_i
-      const a2 = mpk.mul(zi).sub(Di.mul(ei));
+      const mpkZi  = mpk.mul(zi);
+      const Diei   = Di.mul(ei);
+      const a2     = mpkZi.sub(Diei);
+      mpkZi.destroyWasm();
+      Diei.destroyWasm();
+      Di.destroyWasm();
       branches[i] = { a1, a2, e: ei, z: zi };
       eStored[i] = ei;
       zStored[i] = zi;
@@ -192,6 +219,7 @@ export function proveOR(
     z: zReal,
   };
 
+  P2.destroyWasm();
   return { branches };
 }
 
@@ -209,16 +237,33 @@ export function verifyOR(
   // 1. Each branch's DLEQ equations must hold with its own (a1,i, a2,i, e_i, z_i).
   //      z_i·P₂ = a1,i + e_i·C1
   //      z_i·mpk = a2,i + e_i·(C2 - m_i·P₂)
+  // Every intermediate G2 point is explicitly freed after use so they
+  // do not accumulate on the fixed 16 MB WASM heap across many calls.
   for (let i = 0; i < B1; i++) {
     const br = proof.branches[i]!;
-    const lhs1 = P2.mul(br.z);
-    const rhs1 = br.a1.add(ct.c1.mul(br.e));
-    if (!lhs1.equals(rhs1)) return false;
 
-    const Di = ct.c2.sub(P2.mul(modQ(stmt.candidates[i]!)));
-    const lhs2 = mpk.mul(br.z);
-    const rhs2 = br.a2.add(Di.mul(br.e));
-    if (!lhs2.equals(rhs2)) return false;
+    const lhs1   = P2.mul(br.z);
+    const c1e    = ct.c1.mul(br.e);
+    const rhs1   = br.a1.add(c1e);
+    c1e.destroyWasm();
+    const eq1    = lhs1.equals(rhs1);
+    lhs1.destroyWasm();
+    rhs1.destroyWasm();
+    if (!eq1) { P2.destroyWasm(); return false; }
+
+    const candMul = P2.mul(modQ(stmt.candidates[i]!));
+    const Di      = ct.c2.sub(candMul); // sub() frees candMul.neg() internally
+    candMul.destroyWasm();
+
+    const lhs2   = mpk.mul(br.z);
+    const DiMulE = Di.mul(br.e);
+    const rhs2   = br.a2.add(DiMulE);
+    Di.destroyWasm();
+    DiMulE.destroyWasm();
+    const eq2    = lhs2.equals(rhs2);
+    lhs2.destroyWasm();
+    rhs2.destroyWasm();
+    if (!eq2) { P2.destroyWasm(); return false; }
   }
 
   // 2. Recompute the aggregate challenge with identical transcript binding.
@@ -229,6 +274,8 @@ export function verifyOR(
   }
   const ePrime = t.challenge('or:e');
 
+  P2.destroyWasm();
+
   // 3. Σ e_i ≡ e' (mod q).
   let sum = 0n;
   for (const br of proof.branches) sum += br.e;
@@ -236,7 +283,9 @@ export function verifyOR(
 }
 
 function bindStatementOR(t: Transcript, stmt: ORStatement): void {
-  t.appendPoint('or:P2', G2Point.generator());
+  const P2 = G2Point.generator();
+  t.appendPoint('or:P2', P2);
+  P2.destroyWasm();
   t.appendPoint('or:mpk', stmt.mpk);
   t.appendPoint('or:C1', stmt.ct.c1);
   t.appendPoint('or:C2', stmt.ct.c2);
@@ -296,7 +345,10 @@ export function proveBudgetExact(
   commit: { w?: bigint } = {},
 ): BudgetProof {
   bindBudget(t, stmt, 'exact');
-  const proof = proveDLEQ(budgetDLEQInstance(stmt), { x: witness.rSum }, t, commit);
+  const dleqStmt = budgetDLEQInstance(stmt);
+  const proof    = proveDLEQ(dleqStmt, { x: witness.rSum }, t, commit);
+  dleqStmt.base1.destroyWasm();
+  dleqStmt.point2.destroyWasm();
   return { mode: 'exact', proof };
 }
 
@@ -306,7 +358,19 @@ export function verifyBudgetExact(
   t: Transcript,
 ): boolean {
   bindBudget(t, stmt, 'exact');
-  return verifyDLEQ(budgetDLEQInstance(stmt), proof, t);
+  // Inline the DLEQ instance so we can free P2 and D immediately after use.
+  const P2         = G2Point.generator();
+  const budgetMul  = P2.mul(modQ(stmt.budget));
+  const D          = stmt.ctSum.c2.sub(budgetMul); // sub() frees budgetMul.neg()
+  budgetMul.destroyWasm();
+  const dleqStmt: DLEQStatement = {
+    base1: P2, point1: stmt.ctSum.c1,
+    base2: stmt.mpk, point2: D,
+  };
+  const result = verifyDLEQ(dleqStmt, proof, t);
+  P2.destroyWasm();
+  D.destroyWasm();
+  return result;
 }
 
 /**
@@ -363,8 +427,10 @@ export function verifyBudget(
 }
 
 function budgetDLEQInstance(stmt: BudgetStatement): DLEQStatement {
-  const P2 = G2Point.generator();
-  const D = stmt.ctSum.c2.sub(P2.mul(modQ(stmt.budget)));
+  const P2     = G2Point.generator();
+  const budMul = P2.mul(modQ(stmt.budget));
+  const D      = stmt.ctSum.c2.sub(budMul); // sub() frees budMul.neg()
+  budMul.destroyWasm();
   return { base1: P2, point1: stmt.ctSum.c1, base2: stmt.mpk, point2: D };
 }
 

@@ -68,6 +68,15 @@ export interface BuildTeBallotArgs {
   choice: number;
 }
 
+export interface BuildTeWeightedBallotArgs {
+  voter: string;
+  proposalId: string; // 0x-prefixed bytes32
+  mpk: string; // 0x-prefixed compressed G2 (96 bytes)
+  config: BallotVerifyParams; // proposal.te_config — budget must equal WEIGHTED_BUDGET
+  /** Snapshot weighted choice: 1-based candidate index (as string) → weight. */
+  choice: Record<string, number>;
+}
+
 /**
  * Build the encrypted ballot envelope for a single-choice ballot.
  *
@@ -112,19 +121,111 @@ export async function buildTeBallotEnvelope(
   const votes: bigint[] = new Array(config.numCandidates).fill(0n);
   votes[choice - 1] = 1n;
 
-  const ballot = buildBallot({
-    mpk: mpkPoint,
-    electionId,
-    pseudonym,
-    sk,
-    vk: vkPoint,
-    votes,
-    params: config,
-    // Snapshot's outer EIP-712 envelope is the auth boundary, so the
-    // SDK's wrAttestation slot is unused. The sequencer's WR verifier
-    // is also a constant true. Send a zero-length blob.
-    wrAttestation: new Uint8Array(0)
+  let ballot;
+  try {
+    ballot = buildBallot({
+      mpk: mpkPoint,
+      electionId,
+      pseudonym,
+      sk,
+      vk: vkPoint,
+      votes,
+      params: config,
+      // Snapshot's outer EIP-712 envelope is the auth boundary, so the
+      // SDK's wrAttestation slot is unused. The sequencer's WR verifier
+      // is also a constant true. Send a zero-length blob.
+      wrAttestation: new Uint8Array(0)
+    });
+  } finally {
+    mpkPoint.destroyWasm();
+    vk.destroyWasm();
+  }
+
+  return {
+    electionId: toHex(ballot.electionId),
+    pseudonym: toHex(ballot.pseudonym),
+    vk: toHex(ballot.vk),
+    ciphertexts: ballot.ciphertexts.map(([c1, c2]) => ({
+      c1: toHex(c1),
+      c2: toHex(c2)
+    })),
+    zkProof: toHex(ballot.zkProof),
+    voterSignature: toHex(ballot.voterSignature),
+    wrAttestation: toHex(ballot.wrAttestation)
+  };
+}
+
+/**
+ * Build an encrypted ballot for a weighted-choice proposal.
+ *
+ * ``choice`` is the Snapshot weighted format: ``{ "1": 60, "2": 40 }`` where
+ * keys are 1-based candidate indices and values are arbitrary positive weights
+ * (not required to sum to any fixed number — they are normalised here).
+ *
+ * The weights are converted to integers summing exactly to ``config.budget``
+ * using the largest-remainder method so the SDK's ``Σvotes == budget`` check
+ * passes. The tally path in scores.ts divides recovered sums by budget to
+ * recover the VP-weighted result.
+ */
+export async function buildTeWeightedBallotEnvelope(
+  args: BuildTeWeightedBallotArgs
+): Promise<TeBallotEnvelope> {
+  const { voter, proposalId, mpk, config, choice } = args;
+  await ensureCurvesInit();
+
+  if (config.variant !== 'A' || config.mode !== 'exact') {
+    throw new Error(
+      `buildTeWeightedBallotEnvelope: only Variant A exact is supported; got ${JSON.stringify(config)}`
+    );
+  }
+
+  const totalWeight = Object.values(choice).reduce((a, b) => a + b, 0);
+  if (totalWeight <= 0) {
+    throw new Error('buildTeWeightedBallotEnvelope: choice weights sum to zero');
+  }
+
+  const budget = config.budget;
+
+  // Largest-remainder method: guarantees Σvotes == budget with minimal rounding error.
+  const exact = Array.from({ length: config.numCandidates }, (_, j) => {
+    const w = choice[String(j + 1)] ?? 0;
+    return (w / totalWeight) * budget;
   });
+  const floors = exact.map(Math.floor);
+  let remaining = budget - floors.reduce((a, b) => a + b, 0);
+  const order = exact
+    .map((v, i) => ({ frac: v - Math.floor(v), i }))
+    .sort((a, b) => b.frac - a.frac);
+  for (let k = 0; k < remaining; k++) floors[order[k].i]++;
+
+  const votes: bigint[] = floors.map(BigInt);
+
+  const electionId = arrayify(proposalId);
+  const pseudonym = pseudonymFor(voter, proposalId);
+  const mpkBytes = arrayify(mpk);
+
+  const { G2Point } = await import('@snapshot-labs/private-vote-sdk');
+  const mpkPoint = G2Point.fromBytes(mpkBytes);
+
+  const { sk, vk } = schnorrKeygen();
+  const vkPoint: G1Point = vk;
+
+  let ballot;
+  try {
+    ballot = buildBallot({
+      mpk: mpkPoint,
+      electionId,
+      pseudonym,
+      sk,
+      vk: vkPoint,
+      votes,
+      params: config,
+      wrAttestation: new Uint8Array(0)
+    });
+  } finally {
+    mpkPoint.destroyWasm();
+    vk.destroyWasm();
+  }
 
   return {
     electionId: toHex(ballot.electionId),

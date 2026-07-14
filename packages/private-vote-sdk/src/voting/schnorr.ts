@@ -37,7 +37,9 @@ export function schnorrKeygen(sk: bigint = randomScalar()): {
     // signature trivially verify. Spec assumes random sk, so reject.
     throw new Error('schnorrKeygen: sk must be non-zero mod Q');
   }
-  const vk = G1Point.generator().mul(reduced);
+  const P1 = G1Point.generator();
+  const vk = P1.mul(reduced);
+  P1.destroyWasm();
   return { sk: reduced, vk };
 }
 
@@ -47,9 +49,11 @@ export function schnorrSign(
   msg: Uint8Array,
   k: bigint = randomScalar(),
 ): SchnorrSig {
-  const R = G1Point.generator().mul(k);
-  const e = challenge(R, vk, msg);
-  const s = modQ(k + e * modQ(sk));
+  const P1 = G1Point.generator();
+  const R  = P1.mul(k);
+  P1.destroyWasm();
+  const e  = challenge(R, vk, msg);
+  const s  = modQ(k + e * modQ(sk));
   return { R, s };
 }
 
@@ -61,10 +65,17 @@ export function schnorrVerify(
   // Identity vk trivially satisfies `s·P₁ == R + e·O = R`, so any
   // (R = s·P₁, s) pair passes regardless of msg. Reject at the gate.
   if (vk.isIdentity()) return false;
-  const e = challenge(sig.R, vk, msg);
-  const lhs = G1Point.generator().mul(sig.s);
-  const rhs = sig.R.add(vk.mul(e));
-  return lhs.equals(rhs);
+  const e   = challenge(sig.R, vk, msg);
+  const P1  = G1Point.generator();
+  const lhs = P1.mul(sig.s);
+  P1.destroyWasm();
+  const vkE = vk.mul(e);
+  const rhs = sig.R.add(vkE);
+  vkE.destroyWasm();
+  const ok  = lhs.equals(rhs);
+  lhs.destroyWasm();
+  rhs.destroyWasm();
+  return ok;
 }
 
 // Re-export so the Fiat–Shamir DST is importable if callers want to mix it

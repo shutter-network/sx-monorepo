@@ -15,11 +15,9 @@ read from the environment so it works inside a compose network.
 Environment:
   KEYPER_URLS          Comma-separated keyper base URLs.
                        Default: http://keyper1:5001,http://keyper2:5002,http://keyper3:5003
-  KEYPER_PRIVATE_KEYS  Comma-separated keyper signing keys, in keyper-id order.
-                       Used only to derive the te_keyper_addresses allow-list so
-                       the hub accepts each keyper's DKG submission. If unset,
-                       deterministic dev keys (sha256("keyper-{i}")) are used.
   TE_THRESHOLD_T       Threshold degree t (need t+1 shares). Default: 1.
+  TE_WEIGHTED_BUDGET   Denominator for weighted vote splits (e.g. 100 = percentages,
+                       1000 = 0.1% granularity). Default: 100.
   POLL_INTERVAL_S      Seconds between DB polls. Default: 2.
   HUB_DB_HOST          MySQL host. Default: mysql
   HUB_DB_PORT          MySQL port. Default: 3306
@@ -29,26 +27,36 @@ Environment:
 """
 from __future__ import annotations
 
-import hashlib
 import json
+import logging
 import os
-import sys
 import time
 
 import pymysql
-from eth_account import Account
 
-from dkg_coordinator import run_dkg  # vendored in this image at /app/src
+from dkg_coordinator import (  # vendored in this image at /app/src
+    run_dkg,
+    fetch_members_from_status,
+    _keypers_from_urls,
+)
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s %(levelname)s [auto-dkg] %(message)s',
+    datefmt='%Y-%m-%dT%H:%M:%S',
+)
+log = logging.getLogger('auto-dkg')
 
 POLL_INTERVAL_S = float(os.environ.get("POLL_INTERVAL_S", "2"))
-MAX_FAILURES = 5
+# Retry budget and exponential backoff parameters.
+MAX_ATTEMPTS = 5
+BACKOFF_BASE_S = 10        # minimum delay between retries (floor)
+BACKOFF_CAP_S = 500        # maximum single delay (cap)
+LAST_ATTEMPT_MARGIN_S = 10 # fire the final retry at least this many seconds before start
 DEFAULT_T = int(os.environ.get("TE_THRESHOLD_T", "1"))
 DEFAULT_BUDGET = 1
+WEIGHTED_BUDGET = int(os.environ.get("TE_WEIGHTED_BUDGET", "100"))
 DEFAULT_MODE = "exact"
-
-
-def _default_keyper_key(i: int) -> str:
-    return "0x" + hashlib.sha256(f"keyper-{i}".encode()).hexdigest()
 
 
 def _keyper_urls() -> list[str]:
@@ -58,18 +66,6 @@ def _keyper_urls() -> list[str]:
     )
     return [u.strip().rstrip("/") for u in raw.split(",") if u.strip()]
 
-
-def _keyper_addresses(n: int) -> list[str]:
-    raw = os.environ.get("KEYPER_PRIVATE_KEYS", "").strip()
-    if raw:
-        keys = [k.strip() for k in raw.split(",") if k.strip()]
-    else:
-        keys = [_default_keyper_key(i) for i in range(1, n + 1)]
-    if len(keys) != n:
-        raise SystemExit(
-            f"KEYPER_PRIVATE_KEYS has {len(keys)} keys but KEYPER_URLS has {n} urls"
-        )
-    return [Account.from_key(k).address for k in keys]
 
 
 def _db_connect():
@@ -85,17 +81,78 @@ def _db_connect():
 
 
 KEYPER_URLS = _keyper_urls()
-KEYPER_ADDRS = _keyper_addresses(len(KEYPER_URLS))
 
 
-def _ensure_dkg(pid: str, choices: list) -> bool:
+def _mark_dkg_failed(pid: str) -> None:
+    """Write te_dkg_status='dkg_failed' so the poll query stops retrying."""
+    conn = _db_connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE proposals SET te_dkg_status='dkg_failed' WHERE id=%s",
+                (pid,)
+            )
+    finally:
+        conn.close()
+
+
+def _on_failure(
+    pid: str,
+    reason: str,
+    proposal_start: int,
+    attempt_count: dict[str, int],
+    next_retry_at: dict[str, float],
+) -> None:
+    """Record a DKG attempt failure. Backoff is proportional to the remaining
+    time before the proposal opens: retries are spaced evenly within that window
+    so the most urgent proposals always get the fastest retries. Marks the
+    proposal permanently failed in the DB after MAX_ATTEMPTS."""
+    attempt = attempt_count.get(pid, 0) + 1
+    attempt_count[pid] = attempt
+
+    if attempt >= MAX_ATTEMPTS:
+        log.error(
+            "op=dkg_permanently_failed proposal=%s attempts=%d reason=%s "
+            "-- set te_dkg_status=NULL in the DB to retry",
+            pid, attempt, reason,
+        )
+        _mark_dkg_failed(pid)
+        attempt_count.pop(pid, None)
+        next_retry_at.pop(pid, None)
+    else:
+        remaining_attempts = MAX_ATTEMPTS - attempt
+        time_until_start = max(0.0, proposal_start - time.time())
+        # Exponential geometric series: delays double each attempt and sum to
+        # exactly the usable budget (time left minus the last-attempt margin).
+        # d + 2d + 4d + ... + 2^(n-1)d = d * (2^n - 1) = budget
+        # => d = budget / (2^n - 1)
+        budget = max(0.0, time_until_start - LAST_ATTEMPT_MARGIN_S)
+        slots = (2 ** remaining_attempts) - 1
+        delay = min(
+            max(float(BACKOFF_BASE_S), budget / slots),
+            float(BACKOFF_CAP_S),
+        )
+        next_retry_at[pid] = time.time() + delay
+        log.warning(
+            "op=dkg_retry proposal=%s attempt=%d/%d delay_s=%.0f "
+            "time_until_start=%.0f reason=%s",
+            pid, attempt, MAX_ATTEMPTS, delay, time_until_start, reason,
+        )
+
+
+def _ensure_dkg(pid: str, choices: list, vote_type: str, end_time: int) -> bool:
     """Populate te_* config and run DKG for one proposal. Returns True on success."""
     n = len(KEYPER_URLS)
     t = DEFAULT_T
+    keypers = _keypers_from_urls(KEYPER_URLS)
+    keyper_addrs = fetch_members_from_status(keypers)
     num_candidates = len(choices)
+    # Weighted proposals encode proportional splits as integers out of WEIGHTED_BUDGET
+    # (e.g. 60+40=100); the tally path divides recovered sums by budget at the end.
+    budget = WEIGHTED_BUDGET if vote_type == "weighted" else DEFAULT_BUDGET
     te_config = {
         "numCandidates": num_candidates,
-        "budget": DEFAULT_BUDGET,
+        "budget": budget,
         "mode": DEFAULT_MODE,
         "variant": "A",
     }
@@ -116,7 +173,7 @@ def _ensure_dkg(pid: str, choices: list) -> bool:
                 (
                     t, n,
                     json.dumps(KEYPER_URLS),
-                    json.dumps(KEYPER_ADDRS),
+                    json.dumps(keyper_addrs),
                     json.dumps(te_config),
                     pid,
                 ),
@@ -124,13 +181,15 @@ def _ensure_dkg(pid: str, choices: list) -> bool:
     finally:
         conn.close()
 
-    print(f"[auto-dkg] running DKG for {pid} (n={n}, t={t}, candidates={num_candidates})")
+    log.info("op=dkg_start proposal=%s n=%d t=%d candidates=%d budget=%d vote_type=%s",
+             pid, n, t, num_candidates, budget, vote_type)
     run_dkg(
         keyper_urls=KEYPER_URLS,
         election_id=pid,
         election_address=pid,
         n=n, t=t,
-        verbose=False,
+        members=keyper_addrs,
+        proposal_end_time=end_time,
     )
 
     deadline = time.time() + 30
@@ -143,36 +202,40 @@ def _ensure_dkg(pid: str, choices: list) -> bool:
         finally:
             conn.close()
         if row and row[0]:
-            print(f"[auto-dkg] {pid} DKG complete - te_mpk set")
+            log.info("op=dkg_complete proposal=%s status=ok", pid)
             return True
         time.sleep(0.5)
 
-    print(f"[auto-dkg] {pid} timed out waiting for te_mpk", file=sys.stderr)
+    log.error("op=dkg_complete proposal=%s status=timeout", pid)
     return False
 
 
 def run_forever(poll_interval_s: float = POLL_INTERVAL_S) -> None:
-    print(
-        f"[auto-dkg] coordinator started "
-        f"(poll {poll_interval_s}s, keypers={KEYPER_URLS}, t={DEFAULT_T})"
-    )
-    failures: dict[str, int] = {}
+    log.info("coordinator started poll_interval=%.1fs keypers=%s t=%d",
+             poll_interval_s, KEYPER_URLS, DEFAULT_T)
+
+    # Per-proposal retry state (in-memory; resets on restart, which is fine
+    # since a restart is an intentional operator action that clears backoff).
+    attempt_count: dict[str, int] = {}
+    next_retry_at: dict[str, float] = {}
+
     while True:
         try:
             conn = _db_connect()
             try:
                 with conn.cursor() as cur:
                     cur.execute(
-                        "SELECT id, choices, te_mpk FROM proposals "
-                        "WHERE privacy='shutter-elgamal'"
+                        "SELECT id, choices, type, end, start FROM proposals "
+                        "WHERE privacy='shutter-elgamal' AND te_mpk IS NULL "
+                        "AND (te_dkg_status IS NULL OR te_dkg_status = '') "
+                        "ORDER BY start ASC"
                     )
                     rows = cur.fetchall()
             finally:
                 conn.close()
-            for pid, choices_json, te_mpk in rows:
-                if te_mpk is not None:
-                    continue
-                if failures.get(pid, 0) >= MAX_FAILURES:
+            for pid, choices_json, vote_type, end_time, start_time in rows:
+                # skip until backoff window expires.
+                if time.time() < next_retry_at.get(pid, 0):
                     continue
                 choices = (
                     json.loads(choices_json)
@@ -180,23 +243,20 @@ def run_forever(poll_interval_s: float = POLL_INTERVAL_S) -> None:
                     else choices_json
                 )
                 try:
-                    ok = _ensure_dkg(pid, choices)
-                    if not ok:
-                        failures[pid] = failures.get(pid, 0) + 1
+                    ok = _ensure_dkg(pid, choices, vote_type or "single-choice", end_time)
+                    if ok:
+                        attempt_count.pop(pid, None)
+                        next_retry_at.pop(pid, None)
+                    else:
+                        _on_failure(pid, "timeout", start_time, attempt_count, next_retry_at)
                 except Exception as e:  # noqa: BLE001
-                    failures[pid] = failures.get(pid, 0) + 1
-                    print(
-                        f"[auto-dkg] {pid} DKG failed "
-                        f"({failures[pid]}/{MAX_FAILURES}): {e}",
-                        file=sys.stderr,
-                    )
+                    _on_failure(pid, str(e), start_time, attempt_count, next_retry_at)
         except Exception as e:  # noqa: BLE001
-            print(f"[auto-dkg] poll error: {e}", file=sys.stderr)
+            log.error("poll_error err=%s", e)
         time.sleep(poll_interval_s)
-
 
 if __name__ == "__main__":
     try:
         run_forever()
     except KeyboardInterrupt:
-        print("\n[auto-dkg] stopped")
+        log.info("stopped")

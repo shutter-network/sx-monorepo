@@ -95,6 +95,14 @@ function getProposalState(
   proposal: ApiProposal
 ): ProposalState {
   if (proposal.state === 'closed') {
+    // Outcome is undefined until the tally worker sets scores_state='final'.
+    // Notably, shutter-elgamal proposals hold placeholder zero scores while
+    // keyper decryption shares are still pending; reading pass/fail off
+    // those zeros here would incorrectly flag the proposal as 'rejected'.
+    if (proposal.scores_state !== 'final') {
+      return 'closed';
+    }
+
     if (proposal.type !== 'basic') {
       return 'closed';
     }
@@ -468,6 +476,7 @@ function formatProposal(proposal: ApiProposal, networkId: NetworkID): Proposal {
     privacy: proposal.privacy || 'none',
     te_config: proposal.te_config ?? undefined,
     te_mpk: proposal.te_mpk ?? null,
+    te_dkg_status: proposal.te_dkg_status ?? null,
     te_committee_pks: proposal.te_committee_pks ?? undefined,
     te_threshold_t: proposal.te_threshold_t ?? null,
     te_threshold_n: proposal.te_threshold_n ?? null,

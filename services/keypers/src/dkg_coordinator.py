@@ -9,13 +9,15 @@ Flow (matches RUNNING.md):
 from __future__ import annotations
 
 import argparse
-import json
+import logging
 import sys
 import time
 from dataclasses import dataclass
 from typing import Any, Optional
 
 import requests
+
+log = logging.getLogger('dkg')
 
 
 class DKGCoordinatorError(RuntimeError):
@@ -60,11 +62,11 @@ def build_keyper_urls_map(keypers: list[Keyper]) -> dict[str, str]:
 def _post(url: str, path: str, payload: dict[str, Any], *, timeout: float) -> dict[str, Any]:
     r = requests.post(f"{url}{path}", json=payload, timeout=timeout)
     if r.status_code >= 400:
-        # Try to surface server error shape if present.
         try:
             body = r.json()
         except Exception:
             body = {"text": r.text}
+        log.error("http_error url=%s path=%s status=%d body=%s", url, path, r.status_code, body)
         raise DKGCoordinatorError(f"POST {path} failed on {url}: {r.status_code} {body}")
     try:
         return r.json()
@@ -82,7 +84,7 @@ def run_dkg(
     members: Optional[list[str]] = None,
     timeout: float = 60.0,
     sleep_between: float = 0.0,
-    verbose: bool = True,
+    proposal_end_time: Optional[int] = None,
 ) -> None:
     """
     Orchestrate DKG across keypers and publish the DKG result on-chain.
@@ -97,24 +99,12 @@ def run_dkg(
 
     keyper_urls_map = build_keyper_urls_map(keypers)
 
-    if verbose:
-        print(json.dumps(
-            {
-                "step": "config",
-                "n": n,
-                "t": t,
-                "election_id": election_id,
-                "election_address": election_address,
-                "keypers": [{"kid": kp.kid, "url": kp.url} for kp in keypers],
-                "members": members,
-            },
-            indent=2,
-        ))
+    log.info("op=dkg_start proposal=%s n=%d t=%d keypers=%s",
+             election_id, n, t, [kp.url for kp in keypers])
 
     # round1
     for kp in keypers:
-        if verbose:
-            print(f"[dkg] round1: keyper {kp.kid}")
+        log.info("op=dkg_round1 proposal=%s keyper=%d", election_id, kp.kid)
         _post(
             kp.url,
             "/dkg/round1",
@@ -126,32 +116,31 @@ def run_dkg(
 
     # distribute commitments
     for kp in keypers:
-        if verbose:
-            print(f"[dkg] distribute_commitments: keyper {kp.kid}")
+        log.info("op=dkg_distribute_commitments proposal=%s keyper=%d", election_id, kp.kid)
         _post(kp.url, "/dkg/distribute_commitments", {"keyper_urls": keyper_urls_map}, timeout=timeout)
         if sleep_between:
             time.sleep(sleep_between)
 
     # distribute shares
     for kp in keypers:
-        if verbose:
-            print(f"[dkg] distribute_shares: keyper {kp.kid}")
+        log.info("op=dkg_distribute_shares proposal=%s keyper=%d", election_id, kp.kid)
         _post(kp.url, "/dkg/distribute_shares", {"keyper_urls": keyper_urls_map}, timeout=timeout)
         if sleep_between:
             time.sleep(sleep_between)
 
     # round2
+    round2_payload: dict[str, Any] = {"election_id": election_id}
+    if proposal_end_time is not None:
+        round2_payload["proposal_end_time"] = proposal_end_time
     for kp in keypers:
-        if verbose:
-            print(f"[dkg] round2: keyper {kp.kid}")
-        _post(kp.url, "/dkg/round2", {"election_id": election_id}, timeout=timeout)
+        log.info("op=dkg_round2 proposal=%s keyper=%d", election_id, kp.kid)
+        _post(kp.url, "/dkg/round2", round2_payload, timeout=timeout)
         if sleep_between:
             time.sleep(sleep_between)
 
     # publish on chain
     for kp in keypers:
-        if verbose:
-            print(f"[dkg] publish_on_chain: keyper {kp.kid}")
+        log.info("op=dkg_publish proposal=%s keyper=%d", election_id, kp.kid)
         _post(
             kp.url,
             "/dkg/publish_on_chain",
@@ -161,11 +150,15 @@ def run_dkg(
         if sleep_between:
             time.sleep(sleep_between)
 
-    if verbose:
-        print("[dkg] done")
+    log.info("op=dkg_done proposal=%s", election_id)
 
 
 def main() -> None:
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s %(levelname)s [%(name)s] %(message)s',
+        datefmt='%Y-%m-%dT%H:%M:%S',
+    )
     p = argparse.ArgumentParser(description="DKG coordinator (keyper HTTP orchestrator)")
     p.add_argument("--keyper-urls", required=True, help="Comma-separated keyper base URLs")
     p.add_argument("--election-id", required=True, help="Opaque election id string for keypers (e.g. demo-election)")
@@ -174,7 +167,6 @@ def main() -> None:
     p.add_argument("--t", type=int, required=True, help="Threshold degree (need t+1 shares)")
     p.add_argument("--timeout", type=float, default=60.0, help="Per-request timeout seconds (default 60)")
     p.add_argument("--sleep-between", type=float, default=0.0, help="Sleep seconds between requests (default 0)")
-    p.add_argument("--quiet", action="store_true", help="Less output")
     args = p.parse_args()
 
     keyper_urls = [u.strip() for u in args.keyper_urls.split(",") if u.strip()]
@@ -186,7 +178,6 @@ def main() -> None:
         t=args.t,
         timeout=args.timeout,
         sleep_between=args.sleep_between,
-        verbose=not args.quiet,
     )
 
 
@@ -194,5 +185,5 @@ if __name__ == "__main__":
     try:
         main()
     except DKGCoordinatorError as e:
-        print(f"error: {e}", file=sys.stderr)
+        log.error("fatal err=%s", e)
         raise SystemExit(2)

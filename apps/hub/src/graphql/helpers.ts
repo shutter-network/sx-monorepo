@@ -495,6 +495,7 @@ export function formatProposal(proposal) {
   proposal.te_keyper_addresses = jsonParse(proposal.te_keyper_addresses, null);
   proposal.te_aggregate = jsonParse(proposal.te_aggregate, null);
   proposal.te_mpk = bytesToHex(proposal.te_mpk);
+  proposal.te_dkg_status = proposal.te_dkg_status || null;
   const rawFlagged = proposal.flagged;
   proposal.flagCode = rawFlagged;
   proposal.flagged = rawFlagged > 0;

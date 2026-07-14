@@ -77,6 +77,8 @@ CREATE TABLE proposals (
   te_keyper_urls JSON DEFAULT NULL,
   te_keyper_addresses JSON DEFAULT NULL,
   te_aggregate JSON DEFAULT NULL,
+  -- NULL = pending/ok; 'dkg_failed' = all attempts exhausted, needs operator intervention.
+  te_dkg_status VARCHAR(24) DEFAULT NULL,
   PRIMARY KEY (id),
   INDEX ipfs (ipfs),
   INDEX author (author),
