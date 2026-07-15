@@ -14,7 +14,6 @@
 #                           (not the key) with them once, out of band. No
 #                           per-keyper token exchange needed anymore -- see
 #                           docs/private-voting/keyper-token-bootstrap.md.
-#   HUB_RELAYER_PK          Hub relayer private key
 #   SEQ_RELAYER_PK          Sequencer relayer private key
 #   SEQ_AUTH_SECRET         Sequencer auth secret
 #
@@ -57,7 +56,6 @@ services:
       HUB_DATABASE_URL: mysql://root@mysql:3306/snapshot_hub
       SEQ_DATABASE_URL: mysql://root@mysql:3306/snapshot_hub
       SEQUENCER_URL: http://sequencer:3001
-      RELAYER_PK: ${HUB_RELAYER_PK}
       STAMP_URL: https://stamp.fyi
       SCORE_API_URL: https://score.snapshot.org
       SIDEKICK_URL: https://sh5.co

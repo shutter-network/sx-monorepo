@@ -13,7 +13,7 @@
 # the hub on :3000 and sequencer on :3001.
 #
 # Quick start:
-#   cp .env.example .env        # optional - sensible dev defaults are baked in
+#   cp .env.example .env        # then generate KEYPER_PRIVATE_KEY_1/2/3 and SEQ_RELAYER_PK
 #   mkdir -p mysql-data keyper-state/keyper1 keyper-state/keyper2 keyper-state/keyper3
 #   docker compose up --build
 #
@@ -60,8 +60,6 @@ services:
       HUB_DATABASE_URL: mysql://root@mysql:3306/snapshot_hub
       SEQ_DATABASE_URL: mysql://root@mysql:3306/snapshot_hub
       SEQUENCER_URL: http://sequencer:3001
-      # DEV ONLY — publicly-known key; set HUB_RELAYER_PK in .env for production.
-      RELAYER_PK: ${HUB_RELAYER_PK:-0x0123456789012345678901234567890123456789012345678901234567890123}
       STAMP_URL: https://stamp.fyi
       SCORE_API_URL: https://score.snapshot.org
       SIDEKICK_URL: https://sh5.co
@@ -92,8 +90,7 @@ services:
       DB_SSL: "false"
       HUB_DATABASE_URL: mysql://root@mysql:3306/snapshot_hub
       SEQ_DATABASE_URL: mysql://root@mysql:3306/snapshot_sequencer
-      # DEV ONLY — publicly-known key; set SEQ_RELAYER_PK in .env for production.
-      RELAYER_PK: ${SEQ_RELAYER_PK:-0x4d39b13c6ed0c1a3d9e8e5f3b1c2a8e7f6d5c4b3a2918273645566f7e8d9c0b1}
+      RELAYER_PK: ${SEQ_RELAYER_PK:-}
       DEFAULT_NETWORK: "11155111"
       SHUTTER_URL: ""
       SIDEKICK_URL: https://sh5.co
@@ -122,9 +119,7 @@ services:
     command: ["python", "/app/src/keyper.py", "--id", "1", "--port", "5001", "--host", "0.0.0.0"]
     environment:
       KEYPER_HUB_URL: http://hub:3000
-      # DEV ONLY — this default is a publicly-known key committed to the repo.
-      # Production deployments MUST set KEYPER_PRIVATE_KEY_1 in .env.
-      KEYPER_PRIVATE_KEY: ${KEYPER_PRIVATE_KEY_1:-0x4e057a764bb4fec72d8a09c7e04862cf293f87103459f216b41a885f36e27b6d}
+      KEYPER_PRIVATE_KEY: ${KEYPER_PRIVATE_KEY_1:-}
       KEYPER_DKG_RETENTION_TIME: "${KEYPER_DKG_RETENTION_TIME:-172800}"
       KEYPER_DKG_PRUNE_INTERVAL_S: "${KEYPER_DKG_PRUNE_INTERVAL_S:-3600}"
       # Multi-operator auth. Empty = single-operator dev mode (no auth).
@@ -150,8 +145,7 @@ services:
     command: ["python", "/app/src/keyper.py", "--id", "2", "--port", "5002", "--host", "0.0.0.0"]
     environment:
       KEYPER_HUB_URL: http://hub:3000
-      # DEV ONLY — publicly-known key; set KEYPER_PRIVATE_KEY_2 in .env for production.
-      KEYPER_PRIVATE_KEY: ${KEYPER_PRIVATE_KEY_2:-0x99f276d9a8045c01649f153f69b1c446a24aee8fd546a147fe5e29cc061edc88}
+      KEYPER_PRIVATE_KEY: ${KEYPER_PRIVATE_KEY_2:-}
       KEYPER_DKG_RETENTION_TIME: "${KEYPER_DKG_RETENTION_TIME:-172800}"
       KEYPER_DKG_PRUNE_INTERVAL_S: "${KEYPER_DKG_PRUNE_INTERVAL_S:-3600}"
       COORDINATOR_ADDRESS: "${COORDINATOR_ADDRESS:-}"
@@ -174,8 +168,7 @@ services:
     command: ["python", "/app/src/keyper.py", "--id", "3", "--port", "5003", "--host", "0.0.0.0"]
     environment:
       KEYPER_HUB_URL: http://hub:3000
-      # DEV ONLY — publicly-known key; set KEYPER_PRIVATE_KEY_3 in .env for production.
-      KEYPER_PRIVATE_KEY: ${KEYPER_PRIVATE_KEY_3:-0xfdf5c2f83276e56c374b54aaef3c0a3f989ad11d3f6a1faf29373e5e528ea94c}
+      KEYPER_PRIVATE_KEY: ${KEYPER_PRIVATE_KEY_3:-}
       KEYPER_DKG_RETENTION_TIME: "${KEYPER_DKG_RETENTION_TIME:-172800}"
       KEYPER_DKG_PRUNE_INTERVAL_S: "${KEYPER_DKG_PRUNE_INTERVAL_S:-3600}"
       COORDINATOR_ADDRESS: "${COORDINATOR_ADDRESS:-}"
