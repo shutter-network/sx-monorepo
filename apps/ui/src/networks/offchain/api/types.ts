@@ -148,6 +148,7 @@ export type ApiProposal = {
   plugins: Record<string, any>;
   flagged: boolean;
   flagCode: number;
+  app: string;
 };
 
 export type ApiVote = {
@@ -164,6 +165,7 @@ export type ApiVote = {
   vp: number;
   reason: string;
   created: number;
+  app: string;
 };
 
 export type ApiStrategy = {

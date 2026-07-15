@@ -27,7 +27,7 @@ setInterval(() => {
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-initMetrics(app);
+const { stop: stopMetrics } = initMetrics(app);
 refreshSpacesCache();
 
 app.disable('x-powered-by');
@@ -55,6 +55,7 @@ const gracefulShutdown = async (signal: string) => {
     log.info('Express server closed.');
 
     try {
+      stopMetrics();
       await closeDatabase();
       log.info('Graceful shutdown completed.');
       process.exit(0);
