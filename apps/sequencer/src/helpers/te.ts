@@ -381,7 +381,7 @@ export async function triggerKeypers(
 ): Promise<void> {
   await Promise.all(
     keyperUrls.map(async (url, i) => {
-      const target = url.replace(/\/$/, '') + '/decrypt/publish_on_chain';
+      const target = `${url.replace(/\/$/, '')}/decrypt/publish_on_chain`;
       const tok = keyperTokens[i];
       const headers: Record<string, string> = { 'content-type': 'application/json' };
       if (tok) headers['Authorization'] = `Bearer ${tok}`;
