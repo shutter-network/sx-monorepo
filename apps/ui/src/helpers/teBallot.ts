@@ -13,14 +13,14 @@
  * Curve init is lazy + idempotent: the first call resolves once the WASM
  * is loaded, every subsequent call returns the cached promise.
  */
-import { keccak256 } from '@ethersproject/keccak256';
 import { arrayify, hexlify } from '@ethersproject/bytes';
+import { keccak256 } from '@ethersproject/keccak256';
 import {
-  G1Point,
+  BallotVerifyParams,
   buildBallot,
+  G1Point,
   initCurves,
-  schnorrKeygen,
-  type BallotVerifyParams
+  schnorrKeygen
 } from '@snapshot-labs/private-vote-sdk';
 
 let curvesReady: Promise<void> | null = null;
@@ -94,12 +94,20 @@ export async function buildTeBallotEnvelope(
   const { voter, proposalId, mpk, config, choice } = args;
   await ensureCurvesInit();
 
-  if (config.variant !== 'A' || config.mode !== 'exact' || config.budget !== 1) {
+  if (
+    config.variant !== 'A' ||
+    config.mode !== 'exact' ||
+    config.budget !== 1
+  ) {
     throw new Error(
       `buildTeBallotEnvelope: only Variant A exact B=1 is supported; got ${JSON.stringify(config)}`
     );
   }
-  if (!Number.isInteger(choice) || choice < 1 || choice > config.numCandidates) {
+  if (
+    !Number.isInteger(choice) ||
+    choice < 1 ||
+    choice > config.numCandidates
+  ) {
     throw new Error(
       `buildTeBallotEnvelope: choice ${choice} out of [1, ${config.numCandidates}]`
     );
@@ -181,7 +189,9 @@ export async function buildTeWeightedBallotEnvelope(
 
   const totalWeight = Object.values(choice).reduce((a, b) => a + b, 0);
   if (totalWeight <= 0) {
-    throw new Error('buildTeWeightedBallotEnvelope: choice weights sum to zero');
+    throw new Error(
+      'buildTeWeightedBallotEnvelope: choice weights sum to zero'
+    );
   }
 
   const budget = config.budget;
@@ -192,7 +202,7 @@ export async function buildTeWeightedBallotEnvelope(
     return (w / totalWeight) * budget;
   });
   const floors = exact.map(Math.floor);
-  let remaining = budget - floors.reduce((a, b) => a + b, 0);
+  const remaining = budget - floors.reduce((a, b) => a + b, 0);
   const order = exact
     .map((v, i) => ({ frac: v - Math.floor(v), i }))
     .sort((a, b) => b.frac - a.frac);

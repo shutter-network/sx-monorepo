@@ -17,11 +17,13 @@ import { wideReduce } from './field';
 const encoder = new TextEncoder();
 
 export const DST_FIAT_SHAMIR = encoder.encode('SHUTTER-VOTE-FS-v1');
+/** @public */
 export const DST_HASH_TO_CURVE_G1 = encoder.encode(
-  'SHUTTER-VOTE-HASH-TO-G1-v1',
+  'SHUTTER-VOTE-HASH-TO-G1-v1'
 );
+/** @public */
 export const DST_HASH_TO_CURVE_G2 = encoder.encode(
-  'SHUTTER-VOTE-HASH-TO-G2-v1',
+  'SHUTTER-VOTE-HASH-TO-G2-v1'
 );
 
 function concatBytes(parts: Uint8Array[]): Uint8Array {
@@ -41,8 +43,14 @@ export function hashToScalar(
   ...parts: Uint8Array[]
 ): bigint {
   const preimage = concatBytes([domainSep, ...parts]);
-  const h1 = keccak256(concatBytes([new Uint8Array([0x00]), preimage]), 'bytes');
-  const h2 = keccak256(concatBytes([new Uint8Array([0x01]), preimage]), 'bytes');
+  const h1 = keccak256(
+    concatBytes([new Uint8Array([0x00]), preimage]),
+    'bytes'
+  );
+  const h2 = keccak256(
+    concatBytes([new Uint8Array([0x01]), preimage]),
+    'bytes'
+  );
   const wide = new Uint8Array(64);
   wide.set(h1, 0);
   wide.set(h2, 32);

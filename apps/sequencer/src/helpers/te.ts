@@ -20,22 +20,22 @@
  * mis-link their ballot to someone else's proposal).
  */
 
-import { keccak256 } from '@ethersproject/keccak256';
 import { arrayify } from '@ethersproject/bytes';
+import { keccak256 } from '@ethersproject/keccak256';
 import {
-  G2Point,
-  Transcript,
   addCt,
+  BallotInputs,
+  BallotVerifyParams,
+  Ciphertext,
   decodeDLEQ,
+  G2Point,
   initCurves,
+  PartialDecryption,
   recoverTally,
   scalarMulCt,
+  Transcript,
   verifyBallot,
-  type BallotInputs,
-  type BallotVerifyParams,
-  type Ciphertext,
-  type PartialDecryption,
-  type VerifyResult
+  VerifyResult
 } from '@snapshot-labs/private-vote-sdk';
 
 let curvesReady: Promise<void> | null = null;
@@ -109,8 +109,10 @@ export async function verifyTeBallot(
   // either a malformed client or someone trying to attribute a ballot to
   // a different proposal — reject before doing the (expensive) zk verify.
   const expected = expectedPseudonym(voter, proposal.id);
-  if (typeof envelope.pseudonym !== 'string' ||
-      envelope.pseudonym.toLowerCase() !== expected.toLowerCase()) {
+  if (
+    typeof envelope.pseudonym !== 'string' ||
+    envelope.pseudonym.toLowerCase() !== expected.toLowerCase()
+  ) {
     return { ok: false, reason: 'pseudonym_mismatch' };
   }
 
@@ -121,10 +123,13 @@ export async function verifyTeBallot(
       electionId: hexToBytes(envelope.electionId, 'electionId'),
       pseudonym: hexToBytes(envelope.pseudonym, 'pseudonym'),
       vk: hexToBytes(envelope.vk, 'vk'),
-      ciphertexts: (envelope.ciphertexts || []).map((c, i) => [
-        hexToBytes(c.c1, `ciphertexts[${i}].c1`),
-        hexToBytes(c.c2, `ciphertexts[${i}].c2`)
-      ] as [Uint8Array, Uint8Array]),
+      ciphertexts: (envelope.ciphertexts || []).map(
+        (c, i) =>
+          [
+            hexToBytes(c.c1, `ciphertexts[${i}].c1`),
+            hexToBytes(c.c2, `ciphertexts[${i}].c2`)
+          ] as [Uint8Array, Uint8Array]
+      ),
       zkProof: hexToBytes(envelope.zkProof, 'zkProof'),
       voterSignature: hexToBytes(envelope.voterSignature, 'voterSignature'),
       wrAttestation: hexToBytes(envelope.wrAttestation || '0x', 'wrAttestation')
@@ -198,7 +203,9 @@ export function aggregateBallots(
   const acc: (Ciphertext | null)[] = new Array(numCandidates).fill(null);
   for (const vote of votes) {
     const choiceJson =
-      typeof vote.choice === 'string' ? vote.choice : JSON.stringify(vote.choice);
+      typeof vote.choice === 'string'
+        ? vote.choice
+        : JSON.stringify(vote.choice);
     const cts = envelopeCiphertexts(choiceJson);
     if (cts.length !== numCandidates) {
       throw new Error(
@@ -208,7 +215,10 @@ export function aggregateBallots(
     const w = BigInt(Math.round(vote.vp));
     if (w < 0n) throw new Error('aggregateBallots: negative vp');
     if (w === 0n) {
-      for (const ct of cts) { ct.c1.destroyWasm(); ct.c2.destroyWasm(); }
+      for (const ct of cts) {
+        ct.c1.destroyWasm();
+        ct.c2.destroyWasm();
+      }
       continue;
     }
 
@@ -238,7 +248,9 @@ export function aggregateBallots(
 
   for (let j = 0; j < numCandidates; j++) {
     if (acc[j] === null) {
-      throw new Error(`aggregateBallots: no positive-weight votes for candidate ${j}`);
+      throw new Error(
+        `aggregateBallots: no positive-weight votes for candidate ${j}`
+      );
     }
   }
   return acc as Ciphertext[];
@@ -259,8 +271,8 @@ export function aggregateToJson(
     election_id: proposalId,
     num_candidates: ciphertexts.length,
     ciphertexts: ciphertexts.map(ct => ({
-      c1: '0x' + Buffer.from(ct.c1.toBytes()).toString('hex'),
-      c2: '0x' + Buffer.from(ct.c2.toBytes()).toString('hex')
+      c1: `0x${Buffer.from(ct.c1.toBytes()).toString('hex')}`,
+      c2: `0x${Buffer.from(ct.c2.toBytes()).toString('hex')}`
     }))
   };
 }
@@ -359,7 +371,7 @@ export async function triggerKeypers(
 ): Promise<void> {
   await Promise.all(
     keyperUrls.map(async url => {
-      const target = url.replace(/\/$/, '') + '/decrypt/publish_on_chain';
+      const target = `${url.replace(/\/$/, '')}/decrypt/publish_on_chain`;
       try {
         await fetch(target, {
           method: 'POST',

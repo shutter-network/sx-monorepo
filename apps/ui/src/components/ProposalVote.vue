@@ -1,11 +1,7 @@
 <script setup lang="ts">
 import networks from '@snapshot-labs/snapshot.js/src/networks.json';
 import { SUPPORTED_VOTING_TYPES } from '@/helpers/constants';
-import {
-  _t,
-  getChoiceText,
-  getEncryptedChoicePreview
-} from '@/helpers/utils';
+import { _t, getChoiceText, getEncryptedChoicePreview } from '@/helpers/utils';
 import { getNetwork, offchainNetworks } from '@/networks';
 import { Proposal as ProposalType } from '@/types';
 
@@ -173,10 +169,7 @@ const dkgInProgress = computed(
           :class="{ 'rotate-90': showBallotInfo }"
         />
       </button>
-      <div
-        v-if="showBallotInfo"
-        class="text-sm text-skin-text mt-1 pl-[22px]"
-      >
+      <div v-if="showBallotInfo" class="text-sm text-skin-text mt-1 pl-[22px]">
         Your choice was encrypted to this proposal's threshold key before it was
         sent. The server only ever stores the ciphertext above, never your
         selection, and it stays sealed until voting closes.
@@ -280,4 +273,3 @@ const dkgInProgress = computed(
   }
 }
 </style>
-

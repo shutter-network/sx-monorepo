@@ -1,9 +1,5 @@
 import { expect, test } from '@playwright/test';
-import { readFileSync } from 'node:fs';
-import { resolve, dirname } from 'node:path';
-import { fileURLToPath } from 'node:url';
-
-const __dirname = dirname(fileURLToPath(import.meta.url));
+import { readProposalId, SKIP_REASON } from './localFixtures';
 
 /**
  * Real end-to-end audit test: drives the actual proposal page UI in
@@ -20,14 +16,13 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
  * UI must run with VITE_LOCAL_HUB_URL=http://localhost:3000/graphql.
  */
 
-const PROPOSAL_ID = readFileSync(
-  resolve(__dirname, '..', '..', '.e2e-proposal-id'),
-  'ascii'
-).trim();
+const PROPOSAL_ID = readProposalId();
 const SPACE = 's-tn:e2e-private.eth';
 const URL_PATH = `/#/${SPACE}/proposal/${PROPOSAL_ID}`;
 
 test.describe('shutter-elgamal proposal page e2e', () => {
+  test.skip(!PROPOSAL_ID, SKIP_REASON);
+
   test('verify-tally panel recovers [1, 0] from local hub + keypers', async ({
     page
   }) => {
@@ -53,9 +48,9 @@ test.describe('shutter-elgamal proposal page e2e', () => {
     await expect(verifyBtn).toBeVisible();
     await verifyBtn.click();
 
-    await expect(
-      page.getByText('Tally matches published scores.')
-    ).toBeVisible({ timeout: 60_000 });
+    await expect(page.getByText('Tally matches published scores.')).toBeVisible(
+      { timeout: 60_000 }
+    );
 
     const ignored = (e: string) =>
       e.includes('Failed to load resource') ||

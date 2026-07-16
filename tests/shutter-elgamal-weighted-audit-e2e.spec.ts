@@ -1,9 +1,5 @@
 import { expect, test } from '@playwright/test';
-import { readFileSync } from 'node:fs';
-import { resolve, dirname } from 'node:path';
-import { fileURLToPath } from 'node:url';
-
-const __dirname = dirname(fileURLToPath(import.meta.url));
+import { readWeightedFixture, SKIP_REASON } from './localFixtures';
 
 /**
  * Real-browser audit test for the two production-gap features:
@@ -25,16 +21,18 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
  * UI must run with VITE_LOCAL_HUB_URL=http://localhost:3000/graphql.
  */
 
-const fixture = JSON.parse(
-  readFileSync(
-    resolve(__dirname, '..', '..', '.e2e-weighted-proposal.json'),
-    'utf8'
-  )
-) as { id: string; space: string; scores: number[]; ballots: number };
+const fixture = readWeightedFixture() ?? {
+  id: '',
+  space: '',
+  scores: [],
+  ballots: 0
+};
 
 const URL_PATH = `/#/s-tn:${fixture.space}/proposal/${fixture.id}`;
 
 test.describe('shutter-elgamal weighted audit (real browser)', () => {
+  test.skip(!fixture.id, SKIP_REASON);
+
   test('Verify tally confirms vp-weighted ballots + matching aggregate', async ({
     page
   }) => {
@@ -60,9 +58,9 @@ test.describe('shutter-elgamal weighted audit (real browser)', () => {
 
     // (A) Tally recovered from the public decryption shares matches the
     // published scores.
-    await expect(
-      page.getByText('Tally matches published scores.')
-    ).toBeVisible({ timeout: 60_000 });
+    await expect(page.getByText('Tally matches published scores.')).toBeVisible(
+      { timeout: 60_000 }
+    );
 
     // (A) Every encrypted ballot passed its zk proof and the recomputed
     // vp-weighted aggregate equals the keypers' decrypted aggregate.
@@ -117,9 +115,9 @@ test.describe('shutter-elgamal weighted audit (real browser)', () => {
     // Run the verification so the engine-room block (#1) appears.
     await expect(page.getByText('Permanent private tally')).toBeVisible();
     await page.getByRole('button', { name: 'Verify tally' }).click();
-    await expect(
-      page.getByText('Tally matches published scores.')
-    ).toBeVisible({ timeout: 60_000 });
+    await expect(page.getByText('Tally matches published scores.')).toBeVisible(
+      { timeout: 60_000 }
+    );
 
     // (#1) Progressive-disclosure toggle reveals the three stages.
     const toggle = page.getByText('Show cryptographic detail');

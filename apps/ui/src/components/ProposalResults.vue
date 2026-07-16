@@ -149,7 +149,11 @@ onMounted(() => {
 
 <template>
   <div
-    v-if="dkgFailed && withDetails && !['pending', 'active'].includes(props.proposal.state)"
+    v-if="
+      dkgFailed &&
+      withDetails &&
+      !['pending', 'active'].includes(props.proposal.state)
+    "
     class="border border-red-500/40 rounded-lg px-3 py-2.5"
   >
     <div class="flex items-center gap-2 text-red-500">
@@ -161,7 +165,10 @@ onMounted(() => {
       be cast and no results are available for this proposal.
     </div>
   </div>
-  <div v-else-if="isFinalizing && withDetails" class="border rounded-lg px-3 py-2.5">
+  <div
+    v-else-if="isFinalizing && withDetails"
+    class="border rounded-lg px-3 py-2.5"
+  >
     <div class="flex items-center gap-2 text-skin-link">
       <IH-exclamation-circle class="shrink-0" />
       Finalizing results

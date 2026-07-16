@@ -1,15 +1,15 @@
-import { beforeAll, describe, expect, it, vi } from 'vitest';
 import { G2Point, initCurves } from '@snapshot-labs/private-vote-sdk';
+import { beforeAll, describe, expect, it, vi } from 'vitest';
+import { pseudonymFor } from './teBallot';
 import {
-  type AuditPayload,
-  type AuditBallot,
-  type BallotsPayload,
+  AuditBallot,
+  AuditPayload,
+  BallotsPayload,
   fingerprintHex,
   shortHex,
   verifyBallots,
   verifyTally
 } from './teVerify';
-import { pseudonymFor } from './teBallot';
 
 // ---------------------------------------------------------------------------
 // Mock verifyBallot so fake ballot envelopes pass the ZK check in verifyBallots.
@@ -18,11 +18,12 @@ import { pseudonymFor } from './teBallot';
 // ---------------------------------------------------------------------------
 vi.mock('@snapshot-labs/private-vote-sdk', async importOriginal => {
   const mod =
+    // eslint-disable-next-line @typescript-eslint/consistent-type-imports
     await importOriginal<typeof import('@snapshot-labs/private-vote-sdk')>();
   return { ...mod, verifyBallot: vi.fn(() => ({ ok: true })) };
 });
 
-const PROPOSAL_ID = '0x' + '11'.repeat(32);
+const PROPOSAL_ID = `0x${'11'.repeat(32)}`;
 const BASE_CONFIG = {
   numCandidates: 3,
   budget: 1,
@@ -37,7 +38,7 @@ let G2_GEN_HEX = '';
 beforeAll(async () => {
   await initCurves();
   const gen = G2Point.generator();
-  G2_GEN_HEX = '0x' + Buffer.from(gen.toBytes()).toString('hex');
+  G2_GEN_HEX = `0x${Buffer.from(gen.toBytes()).toString('hex')}`;
   gen.destroyWasm();
 });
 
@@ -65,7 +66,7 @@ function makeAuditPayload(overrides: Partial<AuditPayload> = {}): AuditPayload {
     te_committee_pks: [G2_GEN_HEX],
     te_threshold_t: 0,
     te_threshold_n: 1,
-    te_keyper_addresses: ['0x' + '11'.repeat(20)],
+    te_keyper_addresses: [`0x${'11'.repeat(20)}`],
     aggregate: {
       election_id: PROPOSAL_ID,
       num_candidates: BASE_CONFIG.numCandidates,
@@ -84,22 +85,22 @@ function makeBallot(
   vp: number,
   numCandidates = BASE_CONFIG.numCandidates
 ): AuditBallot {
-  const voter = '0x' + index.toString(16).padStart(40, '0');
+  const voter = `0x${index.toString(16).padStart(40, '0')}`;
   const pseudonymBytes = pseudonymFor(voter, PROPOSAL_ID);
-  const pseudonym = '0x' + Buffer.from(pseudonymBytes).toString('hex');
+  const pseudonym = `0x${Buffer.from(pseudonymBytes).toString('hex')}`;
   return {
     voter,
     vp,
     choice: {
       electionId: PROPOSAL_ID,
       pseudonym,
-      vk: '0x' + '00'.repeat(48),
+      vk: `0x${'00'.repeat(48)}`,
       ciphertexts: Array.from({ length: numCandidates }, () => ({
         c1: G2_GEN_HEX,
         c2: G2_GEN_HEX
       })),
       zkProof: '0x',
-      voterSignature: '0x' + '00'.repeat(80)
+      voterSignature: `0x${'00'.repeat(80)}`
     }
   };
 }
@@ -133,7 +134,7 @@ describe('shortHex', () => {
   });
 
   it('truncates long hex with an ellipsis', () => {
-    const long = '0x' + 'ab'.repeat(30);
+    const long = `0x${'ab'.repeat(30)}`;
     const s = shortHex(long);
     expect(s).toContain('…');
     expect(s.length).toBeLessThan(long.length);
@@ -165,7 +166,7 @@ describe('verifyBallots: structural rejections', () => {
     const result = await verifyBallots(
       PROPOSAL_ID,
       makeBallotsPayload([
-        { voter: '0x' + '11'.repeat(20), vp: 1, choice: null }
+        { voter: `0x${'11'.repeat(20)}`, vp: 1, choice: null }
       ]),
       makeDummyAggregate()
     );
@@ -179,12 +180,12 @@ describe('verifyBallots: structural rejections', () => {
       PROPOSAL_ID,
       makeBallotsPayload([
         {
-          voter: '0x' + '11'.repeat(20),
+          voter: `0x${'11'.repeat(20)}`,
           vp: 1,
           choice: {
             electionId: PROPOSAL_ID,
-            pseudonym: '0x' + '00'.repeat(32), // wrong; does not match keccak(voter||proposalId)
-            vk: '0x' + '00'.repeat(48),
+            pseudonym: `0x${'00'.repeat(32)}`, // wrong; does not match keccak(voter||proposalId)
+            vk: `0x${'00'.repeat(48)}`,
             ciphertexts: Array.from(
               { length: BASE_CONFIG.numCandidates },
               () => ({
@@ -193,7 +194,7 @@ describe('verifyBallots: structural rejections', () => {
               })
             ),
             zkProof: '0x',
-            voterSignature: '0x' + '00'.repeat(80)
+            voterSignature: `0x${'00'.repeat(80)}`
           }
         }
       ]),
@@ -216,7 +217,7 @@ describe('verifyBallots: structural rejections', () => {
   it('counts total correctly across mixed pass/fail ballots', async () => {
     const ballots = [
       makeBallot(1, 1),
-      { voter: '0x' + 'ff'.repeat(20), vp: 1, choice: null }, // empty → failure
+      { voter: `0x${'ff'.repeat(20)}`, vp: 1, choice: null }, // empty → failure
       makeBallot(3, 2)
     ];
     const result = await verifyBallots(

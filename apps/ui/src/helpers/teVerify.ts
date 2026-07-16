@@ -15,17 +15,17 @@
 import { arrayify } from '@ethersproject/bytes';
 import { keccak256 } from '@ethersproject/keccak256';
 import {
+  addCt,
+  BallotInputs,
+  BallotVerifyParams,
+  Ciphertext,
+  decodeDLEQ,
   G2Point,
   PartialDecryption,
-  Transcript,
-  addCt,
-  decodeDLEQ,
   recoverTally,
   scalarMulCt,
-  verifyBallot,
-  type BallotInputs,
-  type BallotVerifyParams,
-  type Ciphertext
+  Transcript,
+  verifyBallot
 } from '@snapshot-labs/private-vote-sdk';
 import { ensureCurvesInit, pseudonymFor } from './teBallot';
 
@@ -47,7 +47,7 @@ function u16BE(n: number): Uint8Array {
  */
 export function fingerprintHex(parts: string[]): string {
   const joined = parts.map(p => p.replace(/^0x/, '')).join('');
-  const digest = keccak256('0x' + joined).replace(/^0x/, '');
+  const digest = keccak256(`0x${joined}`).replace(/^0x/, '');
   return `${digest.slice(0, 8)}…${digest.slice(-8)}`;
 }
 
@@ -159,10 +159,9 @@ export async function fetchBallotsPayload(
 
 function ctToHex(ct: Ciphertext): { c1: string; c2: string } {
   const toHex = (b: Uint8Array) =>
-    '0x' +
-    Array.from(b)
+    `0x${Array.from(b)
       .map(x => x.toString(16).padStart(2, '0'))
-      .join('');
+      .join('')}`;
   return { c1: toHex(ct.c1.toBytes()), c2: toHex(ct.c2.toBytes()) };
 }
 
@@ -215,11 +214,11 @@ export async function verifyBallots(
       }
 
       // (1) pseudonym binding.
-      const expectedPseudonym =
-        '0x' +
-        Array.from(pseudonymFor(b.voter, proposalId))
-          .map(x => x.toString(16).padStart(2, '0'))
-          .join('');
+      const expectedPseudonym = `0x${Array.from(
+        pseudonymFor(b.voter, proposalId)
+      )
+        .map(x => x.toString(16).padStart(2, '0'))
+        .join('')}`;
       if (
         typeof env.pseudonym !== 'string' ||
         env.pseudonym.toLowerCase() !== expectedPseudonym.toLowerCase()
@@ -249,7 +248,7 @@ export async function verifyBallots(
         };
         const result = verifyBallot(inputs, config, mpk, () => true);
         ok = result.ok;
-        reason = result.reason || 'invalid zk proof';
+        if (!result.ok) reason = result.reason || 'invalid zk proof';
       } catch (err: any) {
         ok = false;
         reason = `bad envelope: ${err?.message || err}`;

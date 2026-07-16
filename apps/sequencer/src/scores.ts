@@ -39,7 +39,7 @@ async function getProposal(id: string): Promise<any | undefined> {
   if (typeof proposal.te_aggregate === 'string')
     proposal.te_aggregate = JSON.parse(proposal.te_aggregate);
   if (proposal.te_mpk && Buffer.isBuffer(proposal.te_mpk))
-    proposal.te_mpk = '0x' + proposal.te_mpk.toString('hex');
+    proposal.te_mpk = `0x${proposal.te_mpk.toString('hex')}`;
   let proposalState = 'pending';
   const ts = parseInt((Date.now() / 1e3).toFixed());
   if (ts > proposal.start) proposalState = 'active';
@@ -160,10 +160,10 @@ export async function updateProposalAndVotes(
         'SELECT COUNT(*) AS n FROM votes WHERE proposal = ?',
         [proposal.id]
       );
-      await db.queryAsync('UPDATE proposals SET votes = ? WHERE id = ? LIMIT 1', [
-        n,
-        proposal.id
-      ]);
+      await db.queryAsync(
+        'UPDATE proposals SET votes = ? WHERE id = ? LIMIT 1',
+        [n, proposal.id]
+      );
       return true;
     }
     const finalised = await runShutterElgamalTally(proposal);
@@ -186,7 +186,9 @@ export async function updateProposalAndVotes(
     (proposal.votes > 20000 && proposal.scores_updated > ts - 300) ||
     pendingRequests[proposalId]
   ) {
-    log.info(`[scores] skipping recalculation space=${proposal.space} proposal=${proposalId} votes=${proposal.votes} scores_updated=${proposal.scores_updated}`);
+    log.info(
+      `[scores] skipping recalculation space=${proposal.space} proposal=${proposalId} votes=${proposal.votes} scores_updated=${proposal.scores_updated}`
+    );
     return false;
   }
   if (proposal.votes > 20000) pendingRequests[proposalId] = true;
@@ -289,7 +291,11 @@ async function runShutterElgamalTally(proposal: any): Promise<boolean> {
   const threshold: number = proposal.te_threshold_t;
   const keyperUrls: string[] = proposal.te_keyper_urls || [];
   const committeePks: string[] = proposal.te_committee_pks || [];
-  if (!proposal.te_mpk || keyperUrls.length === 0 || committeePks.length === 0) {
+  if (
+    !proposal.te_mpk ||
+    keyperUrls.length === 0 ||
+    committeePks.length === 0
+  ) {
     log.warn(`[te-tally] ${proposal.id} DKG not finalised`);
     return false;
   }

@@ -19,7 +19,6 @@
   "dependencies": {
     "@ethersproject/address": "^5.7.0",
     "@ethersproject/keccak256": "^5.7.0",
-    "@ethersproject/strings": "^5.7.0",
     "@ethersproject/wallet": "^5.7.0",
     "@graphql-tools/schema": "^10.0.0",
     "@snapshot-labs/keycard": "^0.5.1",

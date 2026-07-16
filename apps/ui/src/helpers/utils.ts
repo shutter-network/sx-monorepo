@@ -636,7 +636,7 @@ export function getEncryptedChoicePreview(choice: Choice): string {
     const ciphertexts = envelope.ciphertexts;
     if (Array.isArray(ciphertexts) && ciphertexts.length) {
       const first = ciphertexts[0];
-      hex = typeof first === 'string' ? first : (first?.c1 ?? first?.c2);
+      hex = typeof first === 'string' ? first : first?.c1 ?? first?.c2;
     }
     if (!hex && typeof envelope.vk === 'string') hex = envelope.vk;
   }

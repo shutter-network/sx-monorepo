@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue';
 import { fingerprintHex, shortHex } from '@/helpers/teVerify';
-import type { Proposal } from '@/types';
+import { Proposal } from '@/types';
 
 const props = defineProps<{ proposal: Proposal }>();
 

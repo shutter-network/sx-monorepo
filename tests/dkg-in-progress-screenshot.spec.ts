@@ -1,17 +1,15 @@
-import { test } from '@playwright/test';
-import { readFileSync, mkdirSync } from 'node:fs';
-import { resolve, dirname } from 'node:path';
+import { mkdirSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { test } from '@playwright/test';
+import { readWeightedFixture, SKIP_REASON } from './localFixtures';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const fixture = JSON.parse(
-  readFileSync(
-    resolve(__dirname, '..', '..', '.e2e-weighted-proposal.json'),
-    'utf8'
-  )
-) as { id: string; space: string };
+const fixture = readWeightedFixture() ?? { id: '', space: '' };
 const URL_PATH = `/#/s-tn:${fixture.space}/proposal/${fixture.id}`;
 const OUT = resolve(__dirname, '..', '..', '.engine-room-shots');
+
+test.skip(!fixture.id, SKIP_REASON);
 
 /**
  * Forces the DKG-in-progress state by rewriting the GraphQL proposal

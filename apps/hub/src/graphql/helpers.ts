@@ -22,9 +22,11 @@ export class PublicError extends Error {}
 // strings so the UI / SDK can decode them with Buffer.from(s.slice(2), 'hex').
 function bytesToHex(value: unknown): string | null {
   if (value === null || value === undefined) return null;
-  if (Buffer.isBuffer(value)) return '0x' + value.toString('hex');
-  if (value instanceof Uint8Array) return '0x' + Buffer.from(value).toString('hex');
-  if (typeof value === 'string') return value.startsWith('0x') ? value : '0x' + value;
+  if (Buffer.isBuffer(value)) return `0x${value.toString('hex')}`;
+  if (value instanceof Uint8Array)
+    return `0x${Buffer.from(value).toString('hex')}`;
+  if (typeof value === 'string')
+    return value.startsWith('0x') ? value : `0x${value}`;
   return null;
 }
 

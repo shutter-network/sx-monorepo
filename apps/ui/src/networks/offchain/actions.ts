@@ -301,7 +301,9 @@ export function createActions(
           typeof sdkChoice === 'object' &&
           !Array.isArray(sdkChoice)
         ) {
-          const { buildTeWeightedBallotEnvelope } = await import('@/helpers/teBallot');
+          const { buildTeWeightedBallotEnvelope } = await import(
+            '@/helpers/teBallot'
+          );
           sdkChoice = await buildTeWeightedBallotEnvelope({
             voter: account,
             proposalId: proposal.proposal_id as string,
@@ -310,9 +312,7 @@ export function createActions(
             choice: sdkChoice as Record<string, number>
           });
         } else {
-          throw new Error(
-            'shutter-elgamal does not support this vote type'
-          );
+          throw new Error('shutter-elgamal does not support this vote type');
         }
         voteReason = '';
       }

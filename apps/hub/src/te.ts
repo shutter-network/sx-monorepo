@@ -1,16 +1,17 @@
-import express from 'express';
-import { verifyMessage } from '@ethersproject/wallet';
+import { createHash } from 'node:crypto';
 import { getAddress } from '@ethersproject/address';
-import { capture } from '@snapshot-labs/snapshot-sentry';
 import { keccak256 } from '@ethersproject/keccak256';
+import { verifyMessage } from '@ethersproject/wallet';
 import {
   G2Point,
-  Transcript,
   initCurves,
+  Transcript,
   verifyDecryptionShare
 } from '@snapshot-labs/private-vote-sdk';
-import db from './helpers/mysql';
+import { capture } from '@snapshot-labs/snapshot-sentry';
+import express from 'express';
 import log from './helpers/log';
+import db from './helpers/mysql';
 import { sendError } from './helpers/utils';
 
 let curvesReady: Promise<void> | null = null;
@@ -48,8 +49,7 @@ function committeePksHash(committeePksHex: string[]): Buffer {
     parts.push(b);
   }
   // SHA-256 to mirror hub_client.py's _committee_pks_hash.
-  const crypto = require('crypto');
-  return crypto.createHash('sha256').update(Buffer.concat(parts)).digest();
+  return createHash('sha256').update(Buffer.concat(parts)).digest();
 }
 
 function teDkgPayloadHash(
@@ -85,9 +85,10 @@ function teSharePayloadHash(
   const eBuf = Buffer.alloc(32);
   const zBuf = Buffer.alloc(32);
   // Big-endian 32-byte uints, matching the python eth_utils.keccak source.
-  let eHex = eBig.toString(16).padStart(64, '0');
-  let zHex = zBig.toString(16).padStart(64, '0');
-  if (eHex.length > 64 || zHex.length > 64) throw new Error('scalar > 32 bytes');
+  const eHex = eBig.toString(16).padStart(64, '0');
+  const zHex = zBig.toString(16).padStart(64, '0');
+  if (eHex.length > 64 || zHex.length > 64)
+    throw new Error('scalar > 32 bytes');
   Buffer.from(eHex, 'hex').copy(eBuf);
   Buffer.from(zHex, 'hex').copy(zBuf);
   const buf = Buffer.concat([
@@ -184,7 +185,7 @@ router.post('/proposal/:id/te_dkg', async (req, res) => {
     let recovered: string;
     try {
       recovered = verifyMessage(payloadHash, signature);
-    } catch (err: any) {
+    } catch {
       return sendError(res, 'bad_signature', 401);
     }
     if (recovered !== normalizedKeyperAddress) {
@@ -295,7 +296,7 @@ router.get('/proposal/:id/te_decryption_shares', async (req, res) => {
       [proposalId]
     );
     return res.json({
-      te_mpk: '0x' + Buffer.from(proposal.te_mpk).toString('hex'),
+      te_mpk: `0x${Buffer.from(proposal.te_mpk).toString('hex')}`,
       te_config: parseJsonField<any>(proposal.te_config, null),
       te_committee_pks: parseJsonField<any>(proposal.te_committee_pks, []),
       te_threshold_t: Number(proposal.te_threshold_t),
@@ -308,9 +309,9 @@ router.get('/proposal/:id/te_decryption_shares', async (req, res) => {
       shares: (rows as any[]).map(r => ({
         keyper_index: Number(r.keyper_index),
         candidate: Number(r.candidate),
-        sigma: '0x' + r.sigma_hex.toLowerCase(),
-        proof_e: '0x' + r.proof_e_hex.toLowerCase(),
-        proof_z: '0x' + r.proof_z_hex.toLowerCase()
+        sigma: `0x${r.sigma_hex.toLowerCase()}`,
+        proof_e: `0x${r.proof_e_hex.toLowerCase()}`,
+        proof_z: `0x${r.proof_z_hex.toLowerCase()}`
       }))
     });
   } catch (err: any) {
@@ -347,7 +348,7 @@ router.get('/proposal/:id/te_ballots', async (req, res) => {
       [proposalId]
     );
     return res.json({
-      te_mpk: '0x' + Buffer.from(proposal.te_mpk).toString('hex'),
+      te_mpk: `0x${Buffer.from(proposal.te_mpk).toString('hex')}`,
       te_config: parseJsonField<any>(proposal.te_config, null),
       ballots: (rows as any[]).map(r => ({
         voter: r.voter,
@@ -420,8 +421,14 @@ router.post('/proposal/:id/te_decryption_share', async (req, res) => {
 
     let payloadHash: Buffer;
     try {
-      payloadHash = teSharePayloadHash(proposalId, candidate, sigma, proofE, proofZ);
-    } catch (err: any) {
+      payloadHash = teSharePayloadHash(
+        proposalId,
+        candidate,
+        sigma,
+        proofE,
+        proofZ
+      );
+    } catch {
       return sendError(res, 'bad_request', 400);
     }
     let recovered: string;
@@ -444,10 +451,17 @@ router.post('/proposal/:id/te_decryption_share', async (req, res) => {
       num_candidates: number;
       ciphertexts: Array<{ c1: string; c2: string }>;
     } | null>(proposal.te_aggregate, null);
-    if (!aggregate?.ciphertexts || candidate < 0 || candidate >= aggregate.ciphertexts.length) {
+    if (
+      !aggregate?.ciphertexts ||
+      candidate < 0 ||
+      candidate >= aggregate.ciphertexts.length
+    ) {
       return sendError(res, 'candidate_out_of_range', 400);
     }
-    const committeePksArr = parseJsonField<string[] | null>(proposal.te_committee_pks, null);
+    const committeePksArr = parseJsonField<string[] | null>(
+      proposal.te_committee_pks,
+      null
+    );
     if (!committeePksArr || keyperIndex > committeePksArr.length) {
       return sendError(res, 'committee_pks_not_configured', 503);
     }
@@ -461,8 +475,10 @@ router.post('/proposal/:id/te_decryption_share', async (req, res) => {
       ctC1 = G2Point.fromBytes(decodeHex(ctEntry.c1, 'ct.c1'));
       ctC2 = G2Point.fromBytes(decodeHex(ctEntry.c2, 'ct.c2'));
       sigmaPoint = G2Point.fromBytes(decodeHex(sigma, 'sigma'));
-      committeePK = G2Point.fromBytes(decodeHex(committeePksArr[keyperIndex - 1], 'committeePK'));
-    } catch (err: any) {
+      committeePK = G2Point.fromBytes(
+        decodeHex(committeePksArr[keyperIndex - 1], 'committeePK')
+      );
+    } catch {
       ctC1?.destroyWasm();
       ctC2?.destroyWasm();
       sigmaPoint?.destroyWasm();
@@ -482,7 +498,11 @@ router.post('/proposal/:id/te_decryption_share', async (req, res) => {
     try {
       dleqOk = verifyDecryptionShare(
         { c1: ctC1, c2: ctC2 },
-        { keyperIndex, sigma: sigmaPoint, proof: { e: BigInt(proofE), z: BigInt(proofZ) } },
+        {
+          keyperIndex,
+          sigma: sigmaPoint,
+          proof: { e: BigInt(proofE), z: BigInt(proofZ) }
+        },
         committeePK,
         dleqTranscript
       );
@@ -494,7 +514,9 @@ router.post('/proposal/:id/te_decryption_share', async (req, res) => {
     }
 
     if (!dleqOk) {
-      log.error(`[te_decryption_share] ${proposalId}: DLEQ proof invalid for keyper ${keyperIndex} candidate ${candidate}`);
+      log.error(
+        `[te_decryption_share] ${proposalId}: DLEQ proof invalid for keyper ${keyperIndex} candidate ${candidate}`
+      );
       return sendError(res, 'invalid_dleq_proof', 400);
     }
 

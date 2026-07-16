@@ -114,6 +114,7 @@ export interface BallotValidityProof {
  * chain via the DKG output. The SDK consumes these to verify decryption
  * shares; it never materialises them itself.
  */
+/** @public */
 export interface KeyperPublicShare {
   index: number; // 1-based evaluation point α_i used by the DKG
   mpk_k: G2Point; // = msk_k · P₂, i.e. the committee public key from DKGResult

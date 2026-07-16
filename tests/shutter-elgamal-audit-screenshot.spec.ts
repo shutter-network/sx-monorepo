@@ -1,14 +1,10 @@
 import { expect, test } from '@playwright/test';
-import { readFileSync } from 'node:fs';
-import { resolve, dirname } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { readProposalId, SKIP_REASON } from './localFixtures';
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const PROPOSAL_ID = readFileSync(
-  resolve(__dirname, '..', '..', '.e2e-proposal-id'),
-  'ascii'
-).trim();
+const PROPOSAL_ID = readProposalId();
 const URL_PATH = `/#/s-tn:e2e-private.eth/proposal/${PROPOSAL_ID}`;
+
+test.skip(!PROPOSAL_ID, SKIP_REASON);
 
 test('capture verify-tally panel screenshot', async ({ page }) => {
   test.setTimeout(120_000);
@@ -18,9 +14,9 @@ test('capture verify-tally panel screenshot', async ({ page }) => {
     page.getByRole('heading', { name: 'E2E Private Proposal' })
   ).toBeVisible({ timeout: 30_000 });
   await page.getByRole('button', { name: 'Verify tally' }).click();
-  await expect(
-    page.getByText('Tally matches published scores.')
-  ).toBeVisible({ timeout: 60_000 });
+  await expect(page.getByText('Tally matches published scores.')).toBeVisible({
+    timeout: 60_000
+  });
   await page.screenshot({
     path: 'evidence/proposal-verify-tally.png',
     fullPage: true

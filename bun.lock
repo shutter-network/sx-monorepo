@@ -172,7 +172,6 @@
       "dependencies": {
         "@ethersproject/address": "^5.7.0",
         "@ethersproject/keccak256": "^5.7.0",
-        "@ethersproject/strings": "^5.7.0",
         "@ethersproject/wallet": "^5.7.0",
         "@graphql-tools/schema": "^10.0.0",
         "@snapshot-labs/keycard": "^0.5.1",
@@ -277,7 +276,6 @@
         "@ethersproject/bytes": "^5.6.1",
         "@ethersproject/hash": "^5.5.0",
         "@ethersproject/keccak256": "^5.7.0",
-        "@ethersproject/providers": "^5.6.8",
         "@ethersproject/strings": "^5.7.0",
         "@ethersproject/wallet": "^5.6.2",
         "@shutter-network/shutter-crypto": "^1.0.0",
@@ -490,7 +488,6 @@
       "version": "0.1.1",
       "dependencies": {
         "browser-or-node": "^3.0.0",
-        "buffer": "^6.0.3",
         "viem": "^2.23.2",
       },
       "devDependencies": {

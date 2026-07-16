@@ -27,28 +27,20 @@
  * per sub-object. The version byte stays as the one compatibility hook.
  */
 
-import {
-  G1_BYTES,
-  G1Point,
-  G2_BYTES,
-  G2Point,
-} from '../crypto/curve';
-import {
-  SCALAR_BYTES,
-  scalarFromBytes,
-  scalarToBytes,
-} from '../crypto/field';
+import { G1_BYTES, G1Point, G2_BYTES, G2Point } from '../crypto/curve';
+import { SCALAR_BYTES, scalarFromBytes, scalarToBytes } from '../crypto/field';
 import type {
   BallotValidityProof,
   BudgetProof,
   DLEQProof,
   ORProof,
   ORProofBranch,
-  SchnorrSig,
+  SchnorrSig
 } from '../voting/types';
 
 // ---------- Wire constants ----------
 
+/** @public wire-format version byte */
 export const BVP_VERSION = 0x01;
 const VARIANT_A_BYTE = 0x41;
 const VARIANT_B_BYTE = 0x42;
@@ -57,6 +49,7 @@ const BUDGET_ATMOST = 0x01;
 
 const BRANCH_SIZE = 2 * G2_BYTES + 2 * SCALAR_BYTES; // 96+96+32+32 = 256
 const DLEQ_BYTES = 2 * SCALAR_BYTES; // 64
+/** @public */
 export const SCHNORR_BYTES = G1_BYTES + SCALAR_BYTES; // 48 + 32 = 80
 
 export interface DecodeParams {
@@ -68,7 +61,11 @@ export interface DecodeParams {
 
 // ---------- ORProof ----------
 
-function encodeBranch(br: ORProofBranch, out: Uint8Array, offset: number): number {
+function encodeBranch(
+  br: ORProofBranch,
+  out: Uint8Array,
+  offset: number
+): number {
   out.set(br.a1.toBytes(), offset);
   offset += G2_BYTES;
   out.set(br.a2.toBytes(), offset);
@@ -79,7 +76,10 @@ function encodeBranch(br: ORProofBranch, out: Uint8Array, offset: number): numbe
   return offset + SCALAR_BYTES;
 }
 
-function decodeBranch(buf: Uint8Array, offset: number): { br: ORProofBranch; next: number } {
+function decodeBranch(
+  buf: Uint8Array,
+  offset: number
+): { br: ORProofBranch; next: number } {
   const a1 = G2Point.fromBytes(buf.subarray(offset, offset + G2_BYTES));
   offset += G2_BYTES;
   const a2 = G2Point.fromBytes(buf.subarray(offset, offset + G2_BYTES));
@@ -102,7 +102,7 @@ function encodeOR(p: ORProof, out: Uint8Array, offset: number): number {
 function decodeOR(
   buf: Uint8Array,
   offset: number,
-  branchCount: number,
+  branchCount: number
 ): { proof: ORProof; next: number } {
   const branches: ORProofBranch[] = new Array(branchCount);
   for (let i = 0; i < branchCount; i++) {
@@ -124,11 +124,13 @@ export function encodeDLEQ(p: DLEQProof): Uint8Array {
 
 export function decodeDLEQ(b: Uint8Array): DLEQProof {
   if (b.length !== DLEQ_BYTES) {
-    throw new Error(`decodeDLEQ: expected ${DLEQ_BYTES} bytes, got ${b.length}`);
+    throw new Error(
+      `decodeDLEQ: expected ${DLEQ_BYTES} bytes, got ${b.length}`
+    );
   }
   return {
     e: scalarFromBytes(b.subarray(0, SCALAR_BYTES)),
-    z: scalarFromBytes(b.subarray(SCALAR_BYTES, DLEQ_BYTES)),
+    z: scalarFromBytes(b.subarray(SCALAR_BYTES, DLEQ_BYTES))
   };
 }
 
@@ -144,12 +146,12 @@ export function encodeSchnorr(sig: SchnorrSig): Uint8Array {
 export function decodeSchnorr(b: Uint8Array): SchnorrSig {
   if (b.length !== SCHNORR_BYTES) {
     throw new Error(
-      `decodeSchnorr: expected ${SCHNORR_BYTES} bytes, got ${b.length}`,
+      `decodeSchnorr: expected ${SCHNORR_BYTES} bytes, got ${b.length}`
     );
   }
   return {
     R: G1Point.fromBytes(b.subarray(0, G1_BYTES)),
-    s: scalarFromBytes(b.subarray(G1_BYTES, SCHNORR_BYTES)),
+    s: scalarFromBytes(b.subarray(G1_BYTES, SCHNORR_BYTES))
   };
 }
 
@@ -171,7 +173,9 @@ function outerCount(params: DecodeParams): number {
 
 export function encodeBallotValidityProof(p: BallotValidityProof): Uint8Array {
   if (p.version !== BVP_VERSION) {
-    throw new Error(`encodeBallotValidityProof: unsupported version ${p.version}`);
+    throw new Error(
+      `encodeBallotValidityProof: unsupported version ${p.version}`
+    );
   }
   if (p.variant !== 'A' && p.variant !== 'B') {
     throw new Error(`encodeBallotValidityProof: unknown variant ${p.variant}`);
@@ -184,7 +188,7 @@ export function encodeBallotValidityProof(p: BallotValidityProof): Uint8Array {
   for (let i = 0; i < nOuter; i++) {
     if (p.rangeOrBit[i]!.branches.length !== branchCount) {
       throw new Error(
-        `encodeBallotValidityProof: rangeOrBit[${i}].branches.length diverges (${p.rangeOrBit[i]!.branches.length} vs ${branchCount})`,
+        `encodeBallotValidityProof: rangeOrBit[${i}].branches.length diverges (${p.rangeOrBit[i]!.branches.length} vs ${branchCount})`
       );
     }
   }
@@ -223,7 +227,7 @@ export function encodeBallotValidityProof(p: BallotValidityProof): Uint8Array {
 
   if (offset !== total) {
     throw new Error(
-      `encodeBallotValidityProof: offset ${offset} != predicted total ${total}`,
+      `encodeBallotValidityProof: offset ${offset} != predicted total ${total}`
     );
   }
   return out;
@@ -231,26 +235,38 @@ export function encodeBallotValidityProof(p: BallotValidityProof): Uint8Array {
 
 export function decodeBallotValidityProof(
   buf: Uint8Array,
-  params: DecodeParams,
+  params: DecodeParams
 ): BallotValidityProof {
   if (params.variant === 'B' && (params.d === undefined || params.d <= 0)) {
-    throw new Error('decodeBallotValidityProof: Variant B requires a positive d');
+    throw new Error(
+      'decodeBallotValidityProof: Variant B requires a positive d'
+    );
   }
 
   let offset = 0;
-  if (buf.length < 4) throw new Error('decodeBallotValidityProof: buffer too short');
+  if (buf.length < 4)
+    throw new Error('decodeBallotValidityProof: buffer too short');
   const version = buf[offset++]!;
   if (version !== BVP_VERSION) {
-    throw new Error(`decodeBallotValidityProof: unsupported version ${version}`);
+    throw new Error(
+      `decodeBallotValidityProof: unsupported version ${version}`
+    );
   }
   const variantByte = buf[offset++]!;
-  const variant = variantByte === VARIANT_A_BYTE ? 'A' : variantByte === VARIANT_B_BYTE ? 'B' : null;
+  const variant =
+    variantByte === VARIANT_A_BYTE
+      ? 'A'
+      : variantByte === VARIANT_B_BYTE
+        ? 'B'
+        : null;
   if (variant === null) {
-    throw new Error(`decodeBallotValidityProof: unknown variant byte 0x${variantByte.toString(16)}`);
+    throw new Error(
+      `decodeBallotValidityProof: unknown variant byte 0x${variantByte.toString(16)}`
+    );
   }
   if (variant !== params.variant) {
     throw new Error(
-      `decodeBallotValidityProof: variant on wire (${variant}) differs from params (${params.variant})`,
+      `decodeBallotValidityProof: variant on wire (${variant}) differs from params (${params.variant})`
     );
   }
 
@@ -259,7 +275,7 @@ export function decodeBallotValidityProof(
   offset += 2;
   if (nOuter !== nOuterExpected) {
     throw new Error(
-      `decodeBallotValidityProof: n_outer on wire (${nOuter}) differs from expected (${nOuterExpected})`,
+      `decodeBallotValidityProof: n_outer on wire (${nOuter}) differs from expected (${nOuterExpected})`
     );
   }
 
@@ -270,7 +286,7 @@ export function decodeBallotValidityProof(
     offset += 2;
     if (bc !== branchCountExpected) {
       throw new Error(
-        `decodeBallotValidityProof: branch_count[${i}] on wire (${bc}) differs from expected (${branchCountExpected})`,
+        `decodeBallotValidityProof: branch_count[${i}] on wire (${bc}) differs from expected (${branchCountExpected})`
       );
     }
     branchCounts[i] = bc;
@@ -300,12 +316,14 @@ export function decodeBallotValidityProof(
     budget = { mode: 'atMost', proof };
     offset = next;
   } else {
-    throw new Error(`decodeBallotValidityProof: unknown budget tag 0x${budgetTag.toString(16)}`);
+    throw new Error(
+      `decodeBallotValidityProof: unknown budget tag 0x${budgetTag.toString(16)}`
+    );
   }
 
   if (offset !== buf.length) {
     throw new Error(
-      `decodeBallotValidityProof: ${buf.length - offset} trailing bytes after parse`,
+      `decodeBallotValidityProof: ${buf.length - offset} trailing bytes after parse`
     );
   }
 

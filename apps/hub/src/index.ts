@@ -6,13 +6,13 @@ import express from 'express';
 import api from './api';
 import eip4824 from './eip4824';
 import graphql from './graphql';
-import te from './te';
 import { checkKeycard } from './helpers/keycard';
 import log from './helpers/log';
 import initMetrics from './helpers/metrics';
 import { closeDatabase } from './helpers/mysql';
 import rateLimit from './helpers/rateLimit';
 import refreshSpacesCache from './helpers/spaces';
+import te from './te';
 import './helpers/strategies';
 
 /** Heartbeat — one log line every 30s. A missing tick = the process is

@@ -27,7 +27,9 @@ test.describe('shutter-elgamal smoke', () => {
 
     const resp = await page.goto('/');
     expect(resp?.status()).toBeLessThan(400);
-    await expect(page).toHaveTitle(/snapshot/i);
+    // App.vue replaces the static "Snapshot" title with the route name
+    // once Vue mounts, so accept either.
+    await expect(page).toHaveTitle(/snapshot|explore/i);
 
     // Allow a tick for async vue mount + module imports to settle.
     await page.waitForLoadState('networkidle');

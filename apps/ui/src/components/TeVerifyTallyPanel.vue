@@ -1,19 +1,19 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue';
 import {
+  AuditPayload,
+  BallotAuditResult,
+  BallotsPayload,
   buildVerificationBundle,
   fetchAuditPayload,
   fetchBallotsPayload,
   fingerprintHex,
   shortHex,
   verifyBallots,
-  verifyTally,
-  type AuditPayload,
-  type BallotAuditResult,
-  type BallotsPayload,
-  type VerifyResult
+  VerifyResult,
+  verifyTally
 } from '@/helpers/teVerify';
-import type { Proposal } from '@/types';
+import { Proposal } from '@/types';
 
 const props = defineProps<{
   proposal: Proposal;
@@ -197,8 +197,8 @@ function downloadBundle() {
         what the keypers decrypted.
       </li>
       <li>
-        Recompute the totals from the keypers' public decryption shares,
-        proving the scores were neither forged nor stuffed with invalid votes.
+        Recompute the totals from the keypers' public decryption shares, proving
+        the scores were neither forged nor stuffed with invalid votes.
       </li>
     </ol>
     <div class="flex flex-wrap items-center gap-2">
@@ -244,8 +244,7 @@ function downloadBundle() {
       v-if="status.kind === 'ok'"
       class="text-sm flex items-center gap-1"
       :class="
-        status.ballots.aggregateMatches &&
-        status.ballots.failures.length === 0
+        status.ballots.aggregateMatches && status.ballots.failures.length === 0
           ? 'text-skin-success'
           : 'text-skin-danger'
       "
@@ -266,8 +265,8 @@ function downloadBundle() {
       </span>
       <span v-else>
         {{ status.ballots.failures.length }} of
-        {{ status.ballots.total }} ballots failed verification
-        (e.g. {{ status.ballots.failures[0].reason }}).
+        {{ status.ballots.total }} ballots failed verification (e.g.
+        {{ status.ballots.failures[0].reason }}).
       </span>
     </div>
     <ul

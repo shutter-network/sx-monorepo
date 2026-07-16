@@ -12,8 +12,8 @@
  * documents the input vector so the Python side can reproduce them with
  * a one-liner if the vector ever changes.
  */
-import { keccak256 } from '@ethersproject/keccak256';
 import * as crypto from 'crypto';
+import { keccak256 } from '@ethersproject/keccak256';
 
 const DST_TE_DKG = Buffer.from('SX-TE-DKG-v1', 'utf8');
 const DST_TE_DECRYPT = Buffer.from('SX-TE-DECRYPT-v1', 'utf8');
@@ -82,11 +82,11 @@ describe('te payload hash (JS side, parity with services/keypers/src/hub_client.
      *       ["0x" + "01"*96, "0x" + "02"*96, "0x" + "03"*96],
      *   ).hex()
      */
-    const got = teDkgHash(
-      '0xdeadbeef',
-      '0x' + 'ab'.repeat(96),
-      ['0x' + '01'.repeat(96), '0x' + '02'.repeat(96), '0x' + '03'.repeat(96)]
-    );
+    const got = teDkgHash('0xdeadbeef', `0x${'ab'.repeat(96)}`, [
+      `0x${'01'.repeat(96)}`,
+      `0x${'02'.repeat(96)}`,
+      `0x${'03'.repeat(96)}`
+    ]);
     // Sanity: deterministic, 32 bytes, 0x-prefixed.
     expect(got).toMatch(/^0x[0-9a-f]{64}$/);
   });
@@ -95,7 +95,7 @@ describe('te payload hash (JS side, parity with services/keypers/src/hub_client.
     const got = teShareHash(
       '0xdeadbeef',
       0,
-      '0x' + 'cd'.repeat(96),
+      `0x${'cd'.repeat(96)}`,
       '12345678901234567890',
       '98765432109876543210'
     );

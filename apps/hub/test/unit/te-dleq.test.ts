@@ -9,16 +9,16 @@
  */
 import {
   G2Point,
-  Transcript,
   initCurves,
   partialDecrypt,
+  Transcript,
   verifyDecryptionShare
 } from '@snapshot-labs/private-vote-sdk';
 
 // Fixed scalar — small enough to be readable, non-zero.
 const MSK_K = 0xdeadbeefcafebaben;
 const KEYPER_INDEX = 1;
-const PROPOSAL_ID = '0x' + 'ab'.repeat(32); // 32-byte hex, as Snapshot proposal ids are
+const PROPOSAL_ID = `0x${'ab'.repeat(32)}`; // 32-byte hex, as Snapshot proposal ids are
 const CANDIDATE = 0;
 
 let mpkK: G2Point;
@@ -62,7 +62,9 @@ describe('DLEQ decryption share verification', () => {
   test('valid proof is accepted', () => {
     const share = partialDecrypt(
       { c1: C1, c2: C2 },
-      MSK_K, mpkK, KEYPER_INDEX,
+      MSK_K,
+      mpkK,
+      KEYPER_INDEX,
       makeTranscript(PROPOSAL_ID, CANDIDATE)
     );
 
@@ -80,13 +82,19 @@ describe('DLEQ decryption share verification', () => {
   test('corrupted proof.e is rejected', () => {
     const share = partialDecrypt(
       { c1: C1, c2: C2 },
-      MSK_K, mpkK, KEYPER_INDEX,
+      MSK_K,
+      mpkK,
+      KEYPER_INDEX,
       makeTranscript(PROPOSAL_ID, CANDIDATE)
     );
 
     const ok = verifyDecryptionShare(
       { c1: C1, c2: C2 },
-      { keyperIndex: KEYPER_INDEX, sigma: share.sigma, proof: { e: share.proof.e + 1n, z: share.proof.z } },
+      {
+        keyperIndex: KEYPER_INDEX,
+        sigma: share.sigma,
+        proof: { e: share.proof.e + 1n, z: share.proof.z }
+      },
       mpkK,
       makeTranscript(PROPOSAL_ID, CANDIDATE)
     );
@@ -98,13 +106,19 @@ describe('DLEQ decryption share verification', () => {
   test('corrupted proof.z is rejected', () => {
     const share = partialDecrypt(
       { c1: C1, c2: C2 },
-      MSK_K, mpkK, KEYPER_INDEX,
+      MSK_K,
+      mpkK,
+      KEYPER_INDEX,
       makeTranscript(PROPOSAL_ID, CANDIDATE)
     );
 
     const ok = verifyDecryptionShare(
       { c1: C1, c2: C2 },
-      { keyperIndex: KEYPER_INDEX, sigma: share.sigma, proof: { e: share.proof.e, z: share.proof.z + 1n } },
+      {
+        keyperIndex: KEYPER_INDEX,
+        sigma: share.sigma,
+        proof: { e: share.proof.e, z: share.proof.z + 1n }
+      },
       mpkK,
       makeTranscript(PROPOSAL_ID, CANDIDATE)
     );
@@ -116,7 +130,9 @@ describe('DLEQ decryption share verification', () => {
   test('wrong committee public key is rejected', () => {
     const share = partialDecrypt(
       { c1: C1, c2: C2 },
-      MSK_K, mpkK, KEYPER_INDEX,
+      MSK_K,
+      mpkK,
+      KEYPER_INDEX,
       makeTranscript(PROPOSAL_ID, CANDIDATE)
     );
 
@@ -139,7 +155,9 @@ describe('DLEQ decryption share verification', () => {
   test('wrong sigma is rejected', () => {
     const share = partialDecrypt(
       { c1: C1, c2: C2 },
-      MSK_K, mpkK, KEYPER_INDEX,
+      MSK_K,
+      mpkK,
+      KEYPER_INDEX,
       makeTranscript(PROPOSAL_ID, CANDIDATE)
     );
 
@@ -161,7 +179,9 @@ describe('DLEQ decryption share verification', () => {
     // Proof generated for candidate 0 must not verify under candidate 1 transcript.
     const share = partialDecrypt(
       { c1: C1, c2: C2 },
-      MSK_K, mpkK, KEYPER_INDEX,
+      MSK_K,
+      mpkK,
+      KEYPER_INDEX,
       makeTranscript(PROPOSAL_ID, CANDIDATE)
     );
 
@@ -180,7 +200,9 @@ describe('DLEQ decryption share verification', () => {
     // Proof bound to one election must not verify under a different election id.
     const share = partialDecrypt(
       { c1: C1, c2: C2 },
-      MSK_K, mpkK, KEYPER_INDEX,
+      MSK_K,
+      mpkK,
+      KEYPER_INDEX,
       makeTranscript(PROPOSAL_ID, CANDIDATE)
     );
 
@@ -188,7 +210,7 @@ describe('DLEQ decryption share verification', () => {
       { c1: C1, c2: C2 },
       { keyperIndex: KEYPER_INDEX, sigma: share.sigma, proof: share.proof },
       mpkK,
-      makeTranscript('0x' + 'cd'.repeat(32), CANDIDATE)
+      makeTranscript(`0x${'cd'.repeat(32)}`, CANDIDATE)
     );
 
     share.sigma.destroyWasm();
@@ -200,7 +222,9 @@ describe('DLEQ decryption share verification', () => {
     // BigInt(proofE) / BigInt(proofZ). Verify the round-trip is lossless.
     const share = partialDecrypt(
       { c1: C1, c2: C2 },
-      MSK_K, mpkK, KEYPER_INDEX,
+      MSK_K,
+      mpkK,
+      KEYPER_INDEX,
       makeTranscript(PROPOSAL_ID, CANDIDATE)
     );
 

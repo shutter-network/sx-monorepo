@@ -47,32 +47,32 @@ export function schnorrSign(
   sk: bigint,
   vk: G1Point,
   msg: Uint8Array,
-  k: bigint = randomScalar(),
+  k: bigint = randomScalar()
 ): SchnorrSig {
   const P1 = G1Point.generator();
-  const R  = P1.mul(k);
+  const R = P1.mul(k);
   P1.destroyWasm();
-  const e  = challenge(R, vk, msg);
-  const s  = modQ(k + e * modQ(sk));
+  const e = challenge(R, vk, msg);
+  const s = modQ(k + e * modQ(sk));
   return { R, s };
 }
 
 export function schnorrVerify(
   vk: G1Point,
   msg: Uint8Array,
-  sig: SchnorrSig,
+  sig: SchnorrSig
 ): boolean {
   // Identity vk trivially satisfies `s·P₁ == R + e·O = R`, so any
   // (R = s·P₁, s) pair passes regardless of msg. Reject at the gate.
   if (vk.isIdentity()) return false;
-  const e   = challenge(sig.R, vk, msg);
-  const P1  = G1Point.generator();
+  const e = challenge(sig.R, vk, msg);
+  const P1 = G1Point.generator();
   const lhs = P1.mul(sig.s);
   P1.destroyWasm();
   const vkE = vk.mul(e);
   const rhs = sig.R.add(vkE);
   vkE.destroyWasm();
-  const ok  = lhs.equals(rhs);
+  const ok = lhs.equals(rhs);
   lhs.destroyWasm();
   rhs.destroyWasm();
   return ok;
@@ -80,4 +80,5 @@ export function schnorrVerify(
 
 // Re-export so the Fiat–Shamir DST is importable if callers want to mix it
 // into their own transcript construction.
+/** @public */
 export { DST_FIAT_SHAMIR };
