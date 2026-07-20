@@ -22,6 +22,7 @@
 
 import { arrayify } from '@ethersproject/bytes';
 import { keccak256 } from '@ethersproject/keccak256';
+import log from './log';
 import {
   addCt,
   BallotInputs,
@@ -359,28 +360,47 @@ export function shareRowsToShares(
 }
 
 /**
- * Fire-and-forget keyper trigger. POSTs the proposal id to each keyper's
+ * Keyper trigger. POSTs the proposal id to each keyper's
  * ``/decrypt/publish_on_chain`` endpoint; the keyper pulls the aggregate
- * from the hub and POSTs back its share. We do not await the responses
- * because the hub-side share row is the success signal we actually care
- * about; this just nudges the keypers to run.
+ * from the hub and POSTs back its share. We don't act on the response
+ * content -- the hub-side share row is the success signal we actually
+ * care about, checked separately -- but every attempt and its outcome is
+ * logged for observability, since this is the one place we can see
+ * whether a keyper was even reached.
+ *
+ * ``keyperTokens[i]`` (if present) is the coordinator/API token for
+ * ``keyperUrls[i]`` -- read from ``proposals.te_keyper_tokens``, written by
+ * auto-dkg alongside ``te_keyper_urls``. No env var, no restart dependency:
+ * a keyper's token rotating never requires touching this process. See
+ * "Sequencer delivery" in docs/private-voting/keyper-token-bootstrap.md.
  */
 export async function triggerKeypers(
   proposalId: string,
-  keyperUrls: string[]
+  keyperUrls: string[],
+  keyperTokens: string[] = []
 ): Promise<void> {
   await Promise.all(
-    keyperUrls.map(async url => {
+    keyperUrls.map(async (url, i) => {
       const target = `${url.replace(/\/$/, '')}/decrypt/publish_on_chain`;
+      const tok = keyperTokens[i];
+      const headers: Record<string, string> = { 'content-type': 'application/json' };
+      if (tok) headers['Authorization'] = `Bearer ${tok}`;
+      log.info(`[te-decrypt] proposal=${proposalId} calling keyper ${target}`);
       try {
-        await fetch(target, {
+        const res = await fetch(target, {
           method: 'POST',
-          headers: { 'content-type': 'application/json' },
+          headers,
           body: JSON.stringify({ proposal_id: proposalId })
         });
-      } catch {
+        if (res.ok) {
+          log.info(`[te-decrypt] proposal=${proposalId} keyper ${target} responded status=${res.status}`);
+        } else {
+          log.warn(`[te-decrypt] proposal=${proposalId} keyper ${target} responded status=${res.status}`);
+        }
+      } catch (err: any) {
         // Swallow: the next tally tick re-triggers, and missing shares
         // remain visible via the share-row count gate.
+        log.warn(`[te-decrypt] proposal=${proposalId} keyper ${target} unreachable: ${err?.message || err}`);
       }
     })
   );

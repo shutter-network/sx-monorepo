@@ -36,6 +36,8 @@ async function getProposal(id: string): Promise<any | undefined> {
     proposal.te_committee_pks = JSON.parse(proposal.te_committee_pks);
   if (typeof proposal.te_keyper_urls === 'string')
     proposal.te_keyper_urls = JSON.parse(proposal.te_keyper_urls);
+  if (typeof proposal.te_keyper_tokens === 'string')
+    proposal.te_keyper_tokens = JSON.parse(proposal.te_keyper_tokens);
   if (typeof proposal.te_aggregate === 'string')
     proposal.te_aggregate = JSON.parse(proposal.te_aggregate);
   if (proposal.te_mpk && Buffer.isBuffer(proposal.te_mpk))
@@ -290,6 +292,10 @@ async function runShutterElgamalTally(proposal: any): Promise<boolean> {
   const numCandidates: number = proposal.te_config.numCandidates;
   const threshold: number = proposal.te_threshold_t;
   const keyperUrls: string[] = proposal.te_keyper_urls || [];
+  // Coordinator/API token per keyper, same order as keyperUrls -- written
+  // by auto-dkg alongside te_keyper_urls. See "Sequencer delivery" in
+  // docs/private-voting/keyper-token-bootstrap.md.
+  const keyperTokens: string[] = proposal.te_keyper_tokens || [];
   const committeePks: string[] = proposal.te_committee_pks || [];
   if (
     !proposal.te_mpk ||
@@ -348,7 +354,7 @@ async function runShutterElgamalTally(proposal: any): Promise<boolean> {
   // If a keyper is unreachable, the error is swallowed and the share-count
   // gate below decides whether t+1 shares are available from the others.
   // If not in this tick, the next one will trigger keypers again.
-  await triggerKeypers(proposal.id, keyperUrls);
+  await triggerKeypers(proposal.id, keyperUrls, keyperTokens);
 
   // Read shares. Each (keyper, candidate) row is one PartialDecryption.
   const shareRows = await db.queryAsync(

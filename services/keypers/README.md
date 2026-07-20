@@ -98,7 +98,7 @@ python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 
-python tests/test_dkg_persistence.py -v
+python tests/test_keyper_persistence.py -v
 ```
 
 ## Local dev
