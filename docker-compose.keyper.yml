@@ -10,7 +10,6 @@
 #   KEYPER_HUB_URL        Public URL of the hub (https://hub.example.com)
 #
 # Optional .env:
-#   KEYPER_ID             Keyper ID assigned by the hub operator (default: 1)
 #   KEYPER_PORT           Port to listen on (default: 5001)
 #   KEYPER_DKG_RETENTION_TIME   Seconds to keep DKG secrets after decrypt (default: 172800)
 #   KEYPER_DKG_PRUNE_INTERVAL_S Background prune interval in seconds (default: 3600)
@@ -43,8 +42,6 @@ services:
     command:
       - python
       - /app/src/keyper.py
-      - --id
-      - "${KEYPER_ID:-1}"
       - --port
       - "${KEYPER_PORT:-5001}"
       - --host

@@ -181,13 +181,13 @@ flowchart LR
         HC["docker-compose.hub.yml<br/>mysql + hub + sequencer + auto-dkg"]
     end
     subgraph "Keyper operator 1's droplet"
-        K1["docker-compose.keyper.yml<br/>keyper --id 1"]
+        K1["docker-compose.keyper.yml<br/>keyper"]
     end
     subgraph "Keyper operator 2's droplet"
-        K2["docker-compose.keyper.yml<br/>keyper --id 2"]
+        K2["docker-compose.keyper.yml<br/>keyper"]
     end
     subgraph "Keyper operator 3's droplet"
-        K3["docker-compose.keyper.yml<br/>keyper --id 3"]
+        K3["docker-compose.keyper.yml<br/>keyper"]
     end
     HC -- "KEYPER_URLS (public)" --> K1
     HC --> K2
@@ -206,20 +206,21 @@ still require manual, one-time, out-of-band coordination:
 
 | Who decides it | Value | Shared with |
 | --- | --- | --- |
-| Hub operator | `KEYPER_URLS` — the public URL for every keyper, in a fixed order | Each keyper operator gets told their own position in this list (their `KEYPER_ID`) |
+| Hub operator | `KEYPER_URLS` — the public URL for every keyper, in a fixed order | Not shared with keyper operators — they don't need to know their own position, only auto-dkg does |
 | Hub operator | `COORDINATOR_SIGNING_KEY` (generates it) → its address | The **address only** goes to every keyper operator, as `COORDINATOR_ADDRESS` |
 | Each keyper operator | `KEYPER_PRIVATE_KEY` (generates it) → its address | The **address** is learned by auto-dkg automatically via `GET /status` — never shared manually |
-| Each keyper operator | Their own public URL (`https://keyperN.orgN.example:PORT`) | Given to the hub operator, to go into `KEYPER_URLS` at the position matching their assigned `KEYPER_ID` |
+| Each keyper operator | Their own public URL (`https://keyperN.orgN.example:PORT`) | Given to the hub operator, to go into `KEYPER_URLS` wherever the hub operator chooses |
 
 Everything else in `.env.hub.example`/`.env.keyper.example` (relayer keys, thresholds, DKG
 retention, etc.) is single-party config with a sensible default — see the files themselves,
 their header comments list every variable and whether it's required or optional.
 
-`KEYPER_ID` matters more than it looks like it should — see
-["Why `KEYPER_ID` is not just a label"](./keyper-auto-dkg-flows.md#why-keyper_id-is-not-just-a-label)
-for the full reasoning; in short, it's not a label, it's the position in `KEYPER_URLS` the
-coordinator will address this keyper at, and it must match exactly what the hub operator
-assigned.
+A keyper's DKG index is assigned by auto-dkg itself, from its own `KEYPER_URLS` position, fresh for each proposal.
+`KEYPER_URLS`' order still matters on the hub-operator side (there's no independent registry
+to resolve it against — see
+["Why a keyper's DKG index is not a label, and not static config either"](./keyper-auto-dkg-flows.md#why-a-keypers-dkg-index-is-not-a-label-and-not-static-config-either)
+for the full reasoning), but it's the hub operator's own concern, not something a keyper
+operator needs to track or match.
 
 ### Setup order
 
@@ -249,17 +250,17 @@ own startup with no automatic retry if a keyper isn't up yet; see "Restart flows
    > keyper port is meant to be reachable from the internet, so this key pair is mandatory,
    > not optional.
 2. **Each keyper operator**: `cp .env.keyper.example .env`, fill in `KEYPER_PRIVATE_KEY`
-   (generate your own), `COORDINATOR_ADDRESS` (from step 1), `KEYPER_HUB_URL`, and the
-   `KEYPER_ID` the hub operator assigned you. `KEYPER_PORT` is entirely your own choice —
-   it's just what your service binds to locally. Then:
+   (generate your own), `COORDINATOR_ADDRESS` (from step 1), and `KEYPER_HUB_URL`.
+   `KEYPER_PORT` is entirely your own choice — it's just what your service binds to
+   locally. Then:
    ```sh
    mkdir -p keyper-state
    docker compose -f docker-compose.keyper.yml up -d --build
    ```
    Share your public URL with the hub operator once healthy.
 3. **Hub operator**: once every keyper operator has confirmed their service is up,
-   `cp .env.hub.example .env`, fill in `KEYPER_URLS` (in the order each `KEYPER_ID` was
-   assigned) plus the relayer/auth vars, then:
+   `cp .env.hub.example .env`, fill in `KEYPER_URLS` (any order you choose — it's the sole
+   declaration of committee membership) plus the relayer/auth vars, then:
    ```sh
    mkdir -p mysql-data
    docker compose -f docker-compose.hub.yml up -d --build
@@ -328,9 +329,9 @@ calls the hub lazily, when publishing DKG results or decryption shares, never at
    done
    ```
 2. Create one `.env.keyperN` per instance from the template, then edit each one's
-   `KEYPER_ID`, `KEYPER_PORT`, `KEYPER_PRIVATE_KEY`, `COORDINATOR_ADDRESS` (from step 1),
+   `KEYPER_PORT`, `KEYPER_PRIVATE_KEY`, `COORDINATOR_ADDRESS` (from step 1),
    `KEYPER_HUB_URL`, and `KEYPER_STATE_DIR_HOST` (this last one must differ per instance,
-   or the instances silently share encrypted state on disk):
+   or the instances silently share encrypted state on disk). auto-dkg assigns each keyper's DKG index itself, from its own `KEYPER_URLS` position:
    ```sh
    for n in 1 2 3; do
      cp .env.keyper.example .env.keyper$n
@@ -339,7 +340,6 @@ calls the hub lazily, when publishing DKG results or decryption shares, never at
    ```
    Edit each `.env.keyper$n`, e.g. for `n=1`:
    ```env
-   KEYPER_ID=1
    KEYPER_PORT=5001
    KEYPER_PRIVATE_KEY=<KEYPER_PRIVATE_KEY_1 from step 1>
    COORDINATOR_ADDRESS=<COORDINATOR_ADDRESS from step 1>
@@ -432,9 +432,9 @@ bun run dev
 cd services/keypers
 python -m venv .venv && source .venv/bin/activate   # once
 pip install -r requirements.txt                     # once
-python src/keyper.py --id 1 --port 5001 &
-python src/keyper.py --id 2 --port 5002 &
-python src/keyper.py --id 3 --port 5003 &
+python src/keyper.py --port 5001 &
+python src/keyper.py --port 5002 &
+python src/keyper.py --port 5003 &
 KEYPER_URLS=http://localhost:5001,http://localhost:5002,http://localhost:5003 \
   HUB_DB_HOST=127.0.0.1 python src/auto_dkg.py
 # ready when each keyper /status responds and auto-DKG prints "coordinator started"

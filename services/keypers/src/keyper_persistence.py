@@ -2,7 +2,9 @@
 
 Three separate files under KEYPER_STATE_DIR, all Fernet-encrypted with a key
 derived from the keyper's own signing key, none sharing a file with another:
-  - dkg_secrets.enc        per-proposal DKG combined shares (+ retention/pruning)
+  - dkg_secrets.enc        per-proposal DKG combined shares (+ the DKG index
+                           this keyper was assigned for that proposal, +
+                           retention/pruning)
   - encryption_key.enc     the X25519 keypair used to decrypt /auth/bootstrap
                            payloads -- persisted so the coordinator's cached
                            encryption_pubkey for this keyper never goes stale
@@ -29,9 +31,17 @@ from crypto.primitives import G2, point_multiply
 
 @dataclass
 class DkgEntry:
-    """Per-proposal DKG secret — mirrors the on-disk JSON row."""
+    """Per-proposal DKG secret — mirrors the on-disk JSON row.
+
+    ``keyper_id`` is the DKG index this keyper was assigned *for this
+    proposal* -- no longer a static, process-wide value (see keyper.py's
+    module docstring), so it must be looked up per-proposal here rather
+    than read from a single global field. ``None`` only for entries
+    persisted before this field existed (pre-migration on-disk state).
+    """
 
     combined_share: int
+    keyper_id: int | None = None
     expires_at: int | None = None
 
     @property
@@ -63,13 +73,17 @@ def _entry_from_raw(raw: dict) -> DkgEntry:
     share = int(raw["share"], 16)
     raw_expires = raw.get("expires_at")
     expires_at = int(raw_expires) if raw_expires is not None else None
-    return DkgEntry(share, expires_at=expires_at)
+    raw_kid = raw.get("keyper_id")
+    keyper_id = int(raw_kid) if raw_kid is not None else None
+    return DkgEntry(share, keyper_id=keyper_id, expires_at=expires_at)
 
 
 def save_dkg_secrets(fernet: Fernet, completed_dkgs: dict[str, DkgEntry]) -> None:
     data = {}
     for pid, entry in completed_dkgs.items():
         row: dict[str, float | str] = {"share": hex(entry.combined_share)}
+        if entry.keyper_id is not None:
+            row["keyper_id"] = entry.keyper_id
         if entry.expires_at is not None:
             row["expires_at"] = entry.expires_at
         data[pid] = row

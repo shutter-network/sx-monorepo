@@ -13,4 +13,4 @@ ENV PYTHONPATH=/app/src
 
 EXPOSE 5001
 
-CMD ["python", "/app/src/keyper.py", "--id", "1", "--port", "5001", "--host", "0.0.0.0"]
+CMD ["python", "/app/src/keyper.py", "--port", "5001", "--host", "0.0.0.0"]

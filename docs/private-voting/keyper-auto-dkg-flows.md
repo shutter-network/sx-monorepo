@@ -47,26 +47,37 @@ graph TD
 neither. Empty on either side = single-operator dev mode, `AUTH_REQUIRED = False`, no
 bearer-token checks anywhere.
 
-### Why `KEYPER_ID` is not just a label
+### Why a keyper's DKG index is not a label, and not static config either
 
-The coordinator assigns each keyper's id purely by position in `KEYPER_URLS`
-(`Keyper(kid=i+1, url=...)`, `dkg_coordinator.py`) — it never asks a keyper what its id is.
-That id is then a real cryptographic input, not metadata: it's the x-coordinate this
-keyper's Feldman-VSS share is evaluated at, the index `_members_addr(dealer_id)` looks up
-when verifying a P2P signature, and the `keyper_index` reported to the hub for Lagrange
-reconstruction during tally recovery. So a keyper's own `--id`/`KEYPER_ID` must equal
-whatever position the hub operator gave its URL in `KEYPER_URLS`.
+Auto-dkg assigns each keyper's id purely by position in *its own* `KEYPER_URLS` env var
+(`Keyper(kid=i+1, url=...)`, `dkg_coordinator.py`) — it never asks a keyper what its id is,
+and there is no independent registry to resolve against (see "Explicitly out of scope" in
+`docs/private-voting/keyper-id-removal-plan.md` for why `te_keyper_addresses` doesn't count
+— auto-dkg writes that itself, from the same `KEYPER_URLS` order). That id is then a real
+cryptographic input, not metadata: it's the x-coordinate this keyper's Feldman-VSS share is
+evaluated at, the index `_members_addr(dealer_id)` looks up when verifying a P2P signature,
+and the `keyper_index` reported to the hub for Lagrange reconstruction during tally recovery.
 
-Misconfiguring it — wrong value, or two keypers sharing one — always fails safe rather than
-silently corrupting anything: `/dkg/round1` checks `keyper_id != keyper_meta["id"]` on every
-call and rejects with a 400 identifying the exact mismatch, which aborts that ceremony
-immediately (no per-keyper isolation in `run_dkg()`'s round1 loop, so one bad id fails the
-whole ceremony, not just that keyper's part). Even without that check, a wrong id would
-independently fail P2P signature verification — a keyper's real key always signs as its
-*configured* `dealer_id`, and every recipient checks that signature against
-`members[dealer_id - 1]`; a wrong id means that lookup returns some other keyper's address,
-which can never match. Two independent layers, same failure mode either way: a loud,
-immediate, clearly-logged DKG failure — never a wrong or silently-accepted result.
+A keyper simply adopts whatever
+`kid` auto-dkg sends in each `/dkg/round1` call (`keyper_meta["id"] = kid`, unconditionally
+in the real deployment path — there's nothing pre-configured to check it against). Because
+auto-dkg's `KEYPER_URLS` order is the *only* declaration of committee membership, and it
+drives DKG for many proposals over one process's lifetime, the same keyper can legitimately
+get a different index across different proposals. So the index is **not** a single global —
+it's persisted per proposal, in `DkgEntry.keyper_id` alongside that proposal's `combined_share`
+(`keyper_persistence.py`), and read back from there (not from the live, mutable
+`keyper_meta["id"]`) by `/decrypt/publish_on_chain`, which runs long after other proposals'
+DKGs may have since reassigned that global.
+
+A test caller that already knows its index a priori can still pass an explicit `keyper_id` to
+`create_keyper_app()` — for that case only, `/dkg/round1` keeps a real mismatch check
+(`keyper_meta["id"] is not None and kid != keyper_meta["id"]`), which still fails loud and
+immediate on a genuine misconfiguration, same as before. A wrong id in the real deployment
+path (no explicit id configured) can no longer mismatch against a stale local value, but it
+still can't corrupt anything silently: P2P signature verification independently fails the
+same way it always did — a keyper's real key signs as whatever `dealer_id` it was just told,
+and every recipient checks that signature against `members[dealer_id - 1]`; a wrong id means
+that lookup returns some other keyper's address, which can never match.
 
 ---
 

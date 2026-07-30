@@ -21,7 +21,7 @@
 services:
   keyper1:
     build: .
-    command: ["python", "/app/src/keyper.py", "--id", "1", "--port", "5001", "--host", "0.0.0.0"]
+    command: ["python", "/app/src/keyper.py", "--port", "5001", "--host", "0.0.0.0"]
     environment:
       KEYPER_HUB_URL: ${KEYPER_HUB_URL:-http://host.docker.internal:3000}
       KEYPER_PRIVATE_KEY: ${KEYPER_PRIVATE_KEY_1:-}
@@ -31,7 +31,7 @@ services:
 
   keyper2:
     build: .
-    command: ["python", "/app/src/keyper.py", "--id", "2", "--port", "5002", "--host", "0.0.0.0"]
+    command: ["python", "/app/src/keyper.py", "--port", "5002", "--host", "0.0.0.0"]
     environment:
       KEYPER_HUB_URL: ${KEYPER_HUB_URL:-http://host.docker.internal:3000}
       KEYPER_PRIVATE_KEY: ${KEYPER_PRIVATE_KEY_2:-}
@@ -41,7 +41,7 @@ services:
 
   keyper3:
     build: .
-    command: ["python", "/app/src/keyper.py", "--id", "3", "--port", "5003", "--host", "0.0.0.0"]
+    command: ["python", "/app/src/keyper.py", "--port", "5003", "--host", "0.0.0.0"]
     environment:
       KEYPER_HUB_URL: ${KEYPER_HUB_URL:-http://host.docker.internal:3000}
       KEYPER_PRIVATE_KEY: ${KEYPER_PRIVATE_KEY_3:-}

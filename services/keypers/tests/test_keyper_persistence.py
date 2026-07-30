@@ -3,6 +3,7 @@ encryption keypair, and installed bearer tokens -- see keyper_persistence.py."""
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 import tempfile
@@ -26,6 +27,7 @@ from keyper_persistence import (
     prune_expired_dkg_secrets,
     save_bootstrap_tokens,
     save_dkg_secrets,
+    state_file,
 )
 
 
@@ -54,7 +56,47 @@ class DkgPersistenceTests(unittest.TestCase):
         load_dkg_secrets(self.fernet, loaded, self.logger)
         self.assertEqual(loaded["0xabc"].combined_share, 42)
         self.assertIsNone(loaded["0xabc"].expires_at)
+        self.assertIsNone(loaded["0xabc"].keyper_id)
         self.assertTrue(point_eq(loaded["0xabc"].public_key_share, point_multiply(G2, 42)))
+
+    def test_keyper_id_round_trip(self):
+        # keyper_id is per proposal, not a global -- see keyper.py's module
+        # docstring and docs/private-voting/keyper-id-removal-plan.md.
+        completed = {"0xabc": DkgEntry(42, keyper_id=2)}
+        save_dkg_secrets(self.fernet, completed)
+
+        loaded = {}
+        load_dkg_secrets(self.fernet, loaded, self.logger)
+        self.assertEqual(loaded["0xabc"].keyper_id, 2)
+
+    def test_two_proposals_keep_independent_keyper_ids(self):
+        # The same physical keyper can legitimately be assigned a different
+        # index in different proposals (auto-dkg's KEYPER_URLS is the sole
+        # source of ordering, and can change between DKG runs) -- each
+        # proposal's id must round-trip independently, never conflated.
+        completed = {
+            "0xproposal_a": DkgEntry(1, keyper_id=1),
+            "0xproposal_b": DkgEntry(2, keyper_id=3),
+        }
+        save_dkg_secrets(self.fernet, completed)
+
+        loaded = {}
+        load_dkg_secrets(self.fernet, loaded, self.logger)
+        self.assertEqual(loaded["0xproposal_a"].keyper_id, 1)
+        self.assertEqual(loaded["0xproposal_b"].keyper_id, 3)
+
+    def test_missing_keyper_id_defaults_to_none(self):
+        # Simulates an on-disk entry persisted before this field existed
+        # (pre-migration) -- must load cleanly with keyper_id=None, not
+        # raise, so an old volume doesn't crash a keyper on upgrade.
+        raw = {"0xabc": {"share": hex(42)}}
+        encrypted = self.fernet.encrypt(json.dumps(raw).encode())
+        state_file().write_bytes(encrypted)
+
+        loaded = {}
+        load_dkg_secrets(self.fernet, loaded, self.logger)
+        self.assertIsNone(loaded["0xabc"].keyper_id)
+        self.assertEqual(loaded["0xabc"].combined_share, 42)
 
     def test_expires_at_round_trip(self):
         expires_at = int(time.time()) + 3600

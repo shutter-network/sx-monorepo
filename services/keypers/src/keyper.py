@@ -9,9 +9,12 @@ Each keyper runs as an independent HTTP server and participates in:
 All operations use BLS12-381 G2.
 
 Usage:
-    python keyper.py --id 1 --port 5001
-    python keyper.py --id 2 --port 5002
-    python keyper.py --id 3 --port 5003
+    python keyper.py --port 5001
+
+There is no keyper index/ID to configure -- a keyper's DKG index is
+assigned by auto-dkg (from its own KEYPER_URLS position) fresh for each
+proposal's ceremony, at /dkg/round1 time, and persisted per-proposal so a
+restart doesn't need to relearn it for proposals it already served.
 """
 
 import argparse
@@ -141,7 +144,7 @@ def _derive_fernet(private_key_hex: str) -> Fernet:
     return Fernet(key)
 
 
-def create_keyper_app(keyper_id, *, hub_config=None, signing_key=None):
+def create_keyper_app(keyper_id=None, *, hub_config=None, signing_key=None):
     """Create a Flask app for a single keyper.
 
     ``hub_config`` is an optional dict ``{"hub_url": str, "private_key": str}``
@@ -152,8 +155,12 @@ def create_keyper_app(keyper_id, *, hub_config=None, signing_key=None):
     ``signing_key`` is the Ethereum private key used to sign P2P DKG
     messages (commitments, shares, reveals). If omitted but
     ``hub_config`` is provided, the hub key doubles as the signing key.
-    If neither is provided, a deterministic key is derived from
-    ``keyper_id`` so off-chain dev runs and tests still work.
+
+    ``keyper_id`` is optional and, for the real deployment path, normally
+    omitted entirely: a keyper's DKG index is not statically configured
+    -- it's assigned by auto-dkg (see module docstring) fresh for each
+    proposal, at /dkg/round1 time. Passing an explicit ``keyper_id``
+    remains supported for tests that already know their index a priori.
     """
     if signing_key is None:
         if hub_config is not None:
@@ -164,9 +171,9 @@ def create_keyper_app(keyper_id, *, hub_config=None, signing_key=None):
                 "or --private-key on the command line."
             )
     signing_address = Account.from_key(signing_key).address
-    logger = logging.getLogger(f'keyper.{keyper_id}')
+    logger = logging.getLogger(f'keyper.{signing_address[:10]}')
 
-    app = Flask(f"keyper_{keyper_id}")
+    app = Flask(f"keyper_{signing_address[:10]}")
     start_time = time.time()
     # Tracks when the most recent DKG round2 completed successfully.
     health_state = {"last_dkg_at": None}
@@ -256,6 +263,16 @@ def create_keyper_app(keyper_id, *, hub_config=None, signing_key=None):
     start_prune_loop(completed_dkgs, fernet, logger, dkg_lock)
     keyper_meta = {
         "id": keyper_id,
+        # True only when an explicit keyper_id was pinned at construction
+        # (tests that already know their index a priori). In the real
+        # deployment path (keyper_id=None) this stays False forever, so
+        # keyper_meta["id"] is free to change across DKG ceremonies --
+        # auto-dkg can legitimately assign this keyper a different index
+        # for a different proposal (see module docstring). Without this
+        # separate flag, /dkg/round1's mismatch check would wrongly reject
+        # the second proposal's round1 just because the *first* proposal's
+        # round1 already set keyper_meta["id"] to something else.
+        "id_pinned": keyper_id is not None,
         "hub_config": hub_config,
         "signing_key": signing_key,
         "signing_address": signing_address,
@@ -366,8 +383,20 @@ def create_keyper_app(keyper_id, *, hub_config=None, signing_key=None):
         election_id = data["election_id"]
         members = data.get("members", [])
 
-        if kid != keyper_meta["id"]:
+        # There is no statically-configured index to check against in the
+        # real deployment path (keyper_meta["id_pinned"] is False) -- this
+        # keyper simply adopts whatever index auto-dkg assigns each time,
+        # since it resolves each committee position from its own
+        # KEYPER_URLS, not from anything this keyper claims -- and that
+        # position can legitimately differ across proposals (see module
+        # docstring), so a *later* round1 changing keyper_meta["id"] from
+        # an *earlier* proposal's value is expected, not a conflict.
+        # Callers that *do* pin an explicit keyper_id up front (tests that
+        # already know their index a priori) keep a real mismatch check --
+        # a genuine misconfiguration there still fails loudly.
+        if keyper_meta["id_pinned"] and kid != keyper_meta["id"]:
             return jsonify({"error": f"Keyper ID mismatch: configured as {keyper_meta['id']}, received {kid}"}), 400
+        keyper_meta["id"] = kid
         if not isinstance(members, list) or len(members) != n:
             return jsonify({"error": f"members must be a list of {n} addresses, got {len(members)}"}), 400
 
@@ -655,7 +684,9 @@ def create_keyper_app(keyper_id, *, hub_config=None, signing_key=None):
             if proposal_end_time is not None:
                 expires_at = int(proposal_end_time) + int(retention_time())
             with dkg_lock:
-                completed_dkgs[dkg_meta["election_id"]] = DkgEntry(combined_share, expires_at=expires_at)
+                completed_dkgs[dkg_meta["election_id"]] = DkgEntry(
+                    combined_share, keyper_id=keyper_meta["id"], expires_at=expires_at,
+                )
                 save_dkg_secrets(fernet, completed_dkgs)
         # Snapshot what we just consumed so a subsequent on-chain publish
         # uses the identical commitment set.
@@ -771,6 +802,15 @@ def create_keyper_app(keyper_id, *, hub_config=None, signing_key=None):
             entry = completed_dkgs.get(proposal_id)
         if entry is None:
             return jsonify({"error": f"DKG not completed for proposal {proposal_id}"}), 400
+        if entry.keyper_id is None:
+            # Persisted before this field existed (pre-migration on-disk
+            # state) -- there's no safe value to fall back to, since this
+            # keyper's index is no longer a single global constant (see
+            # module docstring): a fresh DKG for this proposal is required.
+            return jsonify({
+                "error": f"No keyper_id on record for proposal {proposal_id} "
+                         "(pre-migration DKG entry); re-run DKG for this proposal",
+            }), 400
         msk_k, mpk_k = entry.combined_share, entry.public_key_share
 
         from hub_client import HubClient, HubClientError
@@ -805,7 +845,10 @@ def create_keyper_app(keyper_id, *, hub_config=None, signing_key=None):
         if len(ciphertexts) != num_candidates:
             return jsonify({"error": f"Aggregate length {len(ciphertexts)} != numCandidates {num_candidates}"}), 502
 
-        keyper_index = keyper_meta["id"]
+        # Per-proposal, not the mutable keyper_meta["id"] -- by the time
+        # this runs (well after votingEnd), other proposals' DKGs may have
+        # since reassigned that global to a different value.
+        keyper_index = entry.keyper_id
 
         logger.info("op=publish_decrypt proposal=%s candidates=%d", proposal_id, num_candidates)
         submitted = []
@@ -859,7 +902,6 @@ def main():
         datefmt='%Y-%m-%dT%H:%M:%S',
     )
     parser = argparse.ArgumentParser(description="Keyper server for threshold ElGamal voting")
-    parser.add_argument("--id", type=int, required=True, help="Keyper ID (1-indexed)")
     parser.add_argument("--port", type=int, required=True, help="Port to listen on")
     parser.add_argument("--host", default="127.0.0.1", help="Host to bind to")
     parser.add_argument("--hub-url", default=None,
@@ -884,12 +926,13 @@ def main():
 
     # Same key signs both the hub-bound submissions and the P2P DKG messages
     # so the recovered address matches the expected keyper-set entry.
-    app = create_keyper_app(args.id, hub_config=hub_config, signing_key=private_key)
-    startup_log = logging.getLogger(f'keyper.{args.id}')
+    app = create_keyper_app(hub_config=hub_config, signing_key=private_key)
+    signing_address = Account.from_key(private_key).address
+    startup_log = logging.getLogger(f'keyper.{signing_address[:10]}')
     startup_log.info("starting host=%s port=%d hub=%s address=%s",
                      args.host, args.port,
                      hub_url or "disabled",
-                     Account.from_key(private_key).address)
+                     signing_address)
     app.run(host=args.host, port=args.port, debug=False, use_reloader=False)
 
 
