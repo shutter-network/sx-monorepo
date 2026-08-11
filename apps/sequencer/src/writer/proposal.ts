@@ -12,6 +12,12 @@ import { getLimits, getSpaceType } from '../helpers/options';
 import { getProvider } from '../helpers/provider';
 import { validateSpaceSettings } from '../helpers/spaceValidation';
 import {
+  buildCommitteeSnapshot,
+  committeeColumns,
+  TeConfigError
+} from '../helpers/teCommittee';
+import { getEligibilityKey } from '../helpers/teEligibility';
+import {
   captureError,
   getQuorum,
   jsonParse,
@@ -167,6 +173,27 @@ export async function verify(body): Promise<any> {
     if (msg.payload.start - now < MIN_DKG_LEAD_TIME_S) {
       return Promise.reject(
         `shutter-elgamal proposals must start at least ${MIN_DKG_LEAD_TIME_S}s from now to allow DKG to complete`
+      );
+    }
+    // Build the committee snapshot now, purely to reject a misconfigured
+    // deployment while the author is still watching. `action` rebuilds it for
+    // the actual write. A committee that fails these checks produces a proposal
+    // whose key generation can never finish, which would otherwise surface
+    // minutes later as an unexplained terminal failure with no author feedback.
+    try {
+      buildCommitteeSnapshot({
+        eligibilityKey: await getEligibilityKey(),
+        votingStart: parseInt(msg.payload.start),
+        votingEnd: parseInt(msg.payload.end)
+      });
+    } catch (err: any) {
+      if (err instanceof TeConfigError) {
+        log.warn(`[writer] private voting misconfigured: ${err.message}`);
+        return Promise.reject(`private voting unavailable: ${err.message}`);
+      }
+      log.warn(`[writer] eligibility key unavailable: ${err?.message || err}`);
+      return Promise.reject(
+        'private voting unavailable: could not reach the eligibility service'
       );
     }
   }
@@ -356,6 +383,24 @@ export async function action(body, ipfs, receipt, id): Promise<void> {
     flagged: +containsFlaggedLinks(msg.payload.body),
     cb: CB.PENDING_SYNC
   };
+
+  // Freeze the threshold committee onto the row. This is the protocol's single
+  // config write — proposal creation *is* its registration event — so nothing
+  // downstream ever rewrites these columns. `verify` already proved the snapshot
+  // builds, so a throw here is a genuine fault and must abort the insert rather
+  // than leave a private proposal with no committee.
+  if (privacy === 'shutter-elgamal') {
+    Object.assign(
+      proposal,
+      committeeColumns(
+        buildCommitteeSnapshot({
+          eligibilityKey: await getEligibilityKey(),
+          votingStart: proposal.start,
+          votingEnd: proposal.end
+        })
+      )
+    );
+  }
 
   const query = `
     INSERT INTO proposals SET ?;

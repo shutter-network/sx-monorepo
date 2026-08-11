@@ -3,7 +3,18 @@ import { getProposal, getSpace } from '../helpers/actions';
 import log from '../helpers/log';
 import { containsFlaggedLinks } from '../helpers/moderation';
 import db from '../helpers/mysql';
+import {
+  buildCommitteeSnapshot,
+  committeeColumns,
+  TeConfigError
+} from '../helpers/teCommittee';
+import { getEligibilityKey } from '../helpers/teEligibility';
 import { jsonParse, validateChoices } from '../helpers/utils';
+
+const MIN_DKG_LEAD_TIME_S = parseInt(
+  process.env.MIN_DKG_LEAD_TIME_S || '180',
+  10
+);
 
 // We don't need most of the checks used https://github.com/snapshot-labs/snapshot-sequencer/blob/89992b49c96fedbbbe33b42041c9cbe5a82449dd/src/writer/proposal.ts#L62
 // because we assume that those checks were already done during the proposal creation
@@ -70,6 +81,22 @@ export async function verify(body): Promise<any> {
   });
   if (spaceUpdateError) return Promise.reject(spaceUpdateError);
 
+  // An update can turn a public proposal private, and this endpoint has no
+  // lead-time gate of its own. Without the check below, an author could create a
+  // proposal starting in ten seconds and then flip its privacy — bypassing the
+  // gate in writer/proposal.ts entirely and leaving a proposal whose key
+  // generation cannot possibly finish before voting opens.
+  const effectivePrivacy =
+    spacePrivacy !== 'any' ? spacePrivacy : proposalPrivacy ?? proposal.privacy;
+  if (effectivePrivacy === 'shutter-elgamal') {
+    const now = Math.floor(Date.now() / 1e3);
+    if (proposal.start - now < MIN_DKG_LEAD_TIME_S) {
+      return Promise.reject(
+        `shutter-elgamal proposals must start at least ${MIN_DKG_LEAD_TIME_S}s from now to allow DKG to complete`
+      );
+    }
+  }
+
   return Promise.resolve(proposal);
 }
 
@@ -79,6 +106,7 @@ export async function action(body, ipfs): Promise<void> {
   const metadata = msg.payload.metadata || {};
   const plugins = JSON.stringify(metadata.plugins || {});
   const spaceSettings = await getSpace(msg.space);
+  const existing = await getProposal(msg.space, msg.payload.proposal);
   let privacy = spaceSettings.voting?.privacy ?? 'any';
   if (privacy === 'any') {
     privacy = msg.payload.privacy ?? '';
@@ -101,6 +129,34 @@ export async function action(body, ipfs): Promise<void> {
     scores_by_strategy: JSON.stringify([]),
     flagged: +containsFlaggedLinks(msg.payload.body)
   };
+
+  // A proposal that only just became private has no committee snapshot, because
+  // creation took the public path. Write one now so it is not left in a state
+  // where the key ceremony has nothing to run against. An already-private
+  // proposal keeps the snapshot it was created with — the committee is frozen
+  // for its whole life, and re-deriving it here could silently swap the
+  // committee under a proposal mid-ceremony if env changed in between.
+  if (privacy === 'shutter-elgamal' && existing && !existing.te_geg_config) {
+    try {
+      Object.assign(
+        proposal,
+        committeeColumns(
+          buildCommitteeSnapshot({
+            eligibilityKey: await getEligibilityKey(),
+            votingStart: existing.start,
+            votingEnd: existing.end
+          })
+        )
+      );
+    } catch (err: any) {
+      const reason =
+        err instanceof TeConfigError
+          ? err.message
+          : 'could not reach the eligibility service';
+      log.warn(`[writer] private voting unavailable on update: ${reason}`);
+      return Promise.reject(`private voting unavailable: ${reason}`);
+    }
+  }
 
   const query = 'UPDATE proposals SET ? WHERE id = ? LIMIT 1';
   const params: any[] = [proposal, msg.payload.proposal];

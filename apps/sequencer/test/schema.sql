@@ -1,3 +1,17 @@
+-- ===========================================================================
+--  Test-only schema for the sequencer suite. Recreated from scratch by
+--  test/setupDb.ts on every run, so a change here needs no migration.
+--
+--  It carries its own copy of the proposals table, which must stay in step with
+--  apps/hub/src/helpers/schema.sql -- the sequencer writes proposals that the
+--  hub reads. The two have already drifted once: this copy was missing
+--  te_dkg_status and te_keyper_tokens while the hub had both, which means the
+--  suite was passing against a shape production did not have.
+--
+--  If you add a column to the hub schema, add it here too, and read the header
+--  of that file for why a change there does not reach a running database.
+-- ===========================================================================
+
 CREATE TABLE spaces (
   id VARCHAR(64) NOT NULL,
   name VARCHAR(64) NOT NULL,
@@ -79,6 +93,11 @@ CREATE TABLE proposals (
   te_keyper_urls JSON DEFAULT NULL,
   te_keyper_addresses JSON DEFAULT NULL,
   te_aggregate JSON DEFAULT NULL,
+  -- NULL = pending/ok; 'dkg_failed' = all attempts exhausted.
+  te_dkg_status VARCHAR(24) DEFAULT NULL,
+  -- Immutable committee + role snapshot written at proposal creation.
+  -- See apps/hub/src/helpers/schema.sql for the full rationale.
+  te_geg_config JSON DEFAULT NULL,
   PRIMARY KEY (id),
   INDEX ipfs (ipfs),
   INDEX author (author),
