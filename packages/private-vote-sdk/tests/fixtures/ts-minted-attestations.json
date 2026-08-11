@@ -1,0 +1,62 @@
+{
+  "description": "ATTESTATION_V1 credentials minted by the TypeScript implementation. geg's Python verify_attestation must accept every one.",
+  "eligibilityKey": "0xabb138f2c09ce722df49d9e89073fac7600fe9ab5b9ca86b496c460b2e6a0562ac1cd968f2437ba29c54a55886406425",
+  "cases": [
+    {
+      "name": "v1_weight1_nonce1",
+      "scheme": "ATTESTATION_V1",
+      "electionId": "0x1111111111111111111111111111111111111111111111111111111111111111",
+      "pseudonym": "0x2222222222222222222222222222222222222222222222222222222222222222",
+      "vk": "0xaca7e3849c1017504023ba22c3f2b1b9228336738d45c2024668b076c8501d6553fabc2b1ce0e402aa6ef2306588f500",
+      "weight": "1",
+      "nonce": "1",
+      "maxWeight": "10",
+      "signature": "0x897e31db085b9f8c02eff104c3194ec0b8349d1544ff2209a7bcaa3fc05a2ff2a9af45345c0c826e5736a98f18a61c0e289e97f8ed4d926aca59d67cd2d8666e934480083372d443c854577b439be52d",
+      "expected": {
+        "verify": true
+      }
+    },
+    {
+      "name": "v1_weight5_nonce1",
+      "scheme": "ATTESTATION_V1",
+      "electionId": "0x1111111111111111111111111111111111111111111111111111111111111111",
+      "pseudonym": "0x2222222222222222222222222222222222222222222222222222222222222222",
+      "vk": "0xaca7e3849c1017504023ba22c3f2b1b9228336738d45c2024668b076c8501d6553fabc2b1ce0e402aa6ef2306588f500",
+      "weight": "5",
+      "nonce": "1",
+      "maxWeight": "10",
+      "signature": "0x897e31db085b9f8c02eff104c3194ec0b8349d1544ff2209a7bcaa3fc05a2ff2a9af45345c0c826e5736a98f18a61c0e27d78094ed54067c4b19263c4be0d42cd0a833207bdfd53de38472eb630fc454",
+      "expected": {
+        "verify": true
+      }
+    },
+    {
+      "name": "v1_weight7_nonce42",
+      "scheme": "ATTESTATION_V1",
+      "electionId": "0x1111111111111111111111111111111111111111111111111111111111111111",
+      "pseudonym": "0x2222222222222222222222222222222222222222222222222222222222222222",
+      "vk": "0xaca7e3849c1017504023ba22c3f2b1b9228336738d45c2024668b076c8501d6553fabc2b1ce0e402aa6ef2306588f500",
+      "weight": "7",
+      "nonce": "42",
+      "maxWeight": "10",
+      "signature": "0x897e31db085b9f8c02eff104c3194ec0b8349d1544ff2209a7bcaa3fc05a2ff2a9af45345c0c826e5736a98f18a61c0e4ccf2df14589f8c0067bfda01784a844dfbc32cf7e8c154b402750751cf1fffc",
+      "expected": {
+        "verify": true
+      }
+    },
+    {
+      "name": "v1_large_weight_max_weight",
+      "scheme": "ATTESTATION_V1",
+      "electionId": "0x1111111111111111111111111111111111111111111111111111111111111111",
+      "pseudonym": "0x2222222222222222222222222222222222222222222222222222222222222222",
+      "vk": "0xaca7e3849c1017504023ba22c3f2b1b9228336738d45c2024668b076c8501d6553fabc2b1ce0e402aa6ef2306588f500",
+      "weight": "123456789",
+      "nonce": "1770000000",
+      "maxWeight": "9007199254740991",
+      "signature": "0x897e31db085b9f8c02eff104c3194ec0b8349d1544ff2209a7bcaa3fc05a2ff2a9af45345c0c826e5736a98f18a61c0e0cc978ae596540334ccee84e682ab00c80a1a6e7056234280c171e8ad6ac39f4",
+      "expected": {
+        "verify": true
+      }
+    }
+  ]
+}

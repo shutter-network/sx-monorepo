@@ -26,7 +26,7 @@ export const DST_HASH_TO_CURVE_G2 = encoder.encode(
   'SHUTTER-VOTE-HASH-TO-G2-v1'
 );
 
-function concatBytes(parts: Uint8Array[]): Uint8Array {
+export function concatBytes(parts: Uint8Array[]): Uint8Array {
   let total = 0;
   for (const p of parts) total += p.length;
   const out = new Uint8Array(total);

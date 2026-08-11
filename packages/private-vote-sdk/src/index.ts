@@ -17,40 +17,50 @@ export type {
   ORProof,
   BudgetProof,
   BallotValidityProof,
-  PartialDecryption,
+  PartialDecryption
 } from './voting/types';
 
 export { encrypt, addCt, scalarMulCt, sumCts } from './voting/encrypt';
 export { schnorrKeygen, schnorrSign, schnorrVerify } from './voting/schnorr';
 export { Transcript } from './voting/transcript';
 
+// Eligibility credentials. `ATTESTATION_V1` binds the voting-power weight into
+// a signed artifact so a weighted tally stays re-derivable from public reads.
+// Issuers call `signAttestation`; admission and auditors call
+// `verifyAttestation` (the normative check, incl. election binding + maxWeight).
+export {
+  ATTESTATION_LABEL,
+  attestationMessage,
+  legacyAttestationMessage,
+  signAttestation,
+  verifyAttestation,
+  verifyAttestationSig
+} from './voting/attestation';
+export type { Attestation, AttestationScheme } from './voting/attestation';
+
 // Voter-side proof construction. Verifiers use `verifyBallot` (below); the
 // bare `verifyDLEQ`/`verifyOR`/`verifyBudget*` primitives are internal.
-export {
-  proveOR,
-  proveBudgetExact,
-  proveBudgetAtMost,
-} from './voting/proofs';
+export { proveOR, proveBudgetExact, proveBudgetAtMost } from './voting/proofs';
 export type {
   ORStatement,
   ORWitness,
   ORCommitments,
   BudgetStatement,
   ExactBudgetWitness,
-  AtMostBudgetWitness,
+  AtMostBudgetWitness
 } from './voting/proofs';
 
 export {
   canonicalBallotMessage,
   seedBallotTranscript,
   rangeCandidates,
-  verifyBallot,
+  verifyBallot
 } from './voting/verify';
 export type {
   BallotInputs,
   BallotVerifyParams,
   VerifyResult,
-  WRAttestationVerifier,
+  WRAttestationVerifier
 } from './voting/verify';
 
 // High-level actor wrappers — collapse multi-step voter and tally
@@ -66,7 +76,7 @@ export {
   combineShares,
   recoverDiscreteLog,
   recoverDiscreteLogWithTable,
-  buildBabyStepTable,
+  buildBabyStepTable
 } from './voting/decrypt';
 export type { BabyStepTable } from './voting/decrypt';
 
@@ -76,5 +86,5 @@ export {
   encodeBallotValidityProof,
   encodeDLEQ,
   decodeDLEQ,
-  encodeSchnorr,
+  encodeSchnorr
 } from './contract/codec';

@@ -1,5 +1,5 @@
-import { G1Point, G2Point, Transcript, initCurves } from '../src';
-import { Q, modQ } from '../src/crypto/field';
+import { G1Point, G2Point, initCurves, Transcript } from '../src';
+import { modQ, Q } from '../src/crypto/field';
 
 beforeAll(async () => {
   await initCurves();
@@ -86,5 +86,59 @@ describe('Transcript', () => {
     expect(() => t.appendScalar('bad', Q)).toThrow(/out of range/);
     expect(() => t.appendScalar('bad', -1n)).toThrow(/out of range/);
     expect(() => t.appendScalar('ok', modQ(-1n))).not.toThrow();
+  });
+
+  // `preimage()` is what signature schemes bind (ATTESTATION_V1 signs
+  // keccak256 of it) rather than deriving a Fiat–Shamir challenge. Its exact
+  // layout is therefore an interop contract with the Python implementation;
+  // the geg attestation vectors are the cross-language lock, and these are the
+  // direct structural checks.
+  describe('preimage()', () => {
+    it('is the label followed by length-framed (tag, value) pairs', () => {
+      const t = new Transcript('AB');
+      t.append('xy', new Uint8Array([0xde, 0xad]));
+      expect(Buffer.from(t.preimage()).toString('hex')).toBe(
+        [
+          '4142', //           label "AB", raw, no length prefix
+          '00000002', //       u32BE len("xy")
+          '7879', //           "xy"
+          '00000002', //       u32BE len(value)
+          'dead' //            value
+        ].join('')
+      );
+    });
+
+    it('bare transcript preimage is just the label', () => {
+      expect(Buffer.from(new Transcript('L').preimage()).toString('hex')).toBe(
+        '4c'
+      );
+    });
+
+    it('appendScalar contributes a 32-byte big-endian value', () => {
+      const t = new Transcript('');
+      t.appendScalar('s', 1n);
+      expect(Buffer.from(t.preimage()).toString('hex')).toBe(
+        `00000001` + `73` + `00000020${'00'.repeat(31)}01`
+      );
+    });
+
+    it('is a pure read — calling it does not disturb challenges', () => {
+      const a = new Transcript('L');
+      const b = new Transcript('L');
+      a.append('x', new Uint8Array([7]));
+      b.append('x', new Uint8Array([7]));
+      // Read a's preimage twice before drawing; b never reads.
+      expect(Buffer.from(a.preimage())).toEqual(Buffer.from(a.preimage()));
+      expect(a.challenge('c')).toBe(b.challenge('c'));
+    });
+
+    it('grows by the folded challenge after challenge() (fold-back is visible)', () => {
+      const t = new Transcript('L');
+      const before = t.preimage().length;
+      t.challenge('c');
+      // challenge() folds `appendScalar(tag + ':chal', e)` back in:
+      // u32BE(len("c:chal")) + "c:chal" + u32BE(32) + 32 bytes
+      expect(t.preimage().length).toBe(before + 4 + 6 + 4 + 32);
+    });
   });
 });
