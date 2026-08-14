@@ -101,10 +101,17 @@ describe('election id translation', () => {
     }
   );
 
-  it('converts hub ids back to bare hex when listing', async () => {
+  // The contract is asymmetric: bare hex in path segments, `0x`-prefixed in every
+  // JSON byte field. The client's decoder rejects a missing prefix, so stripping it
+  // here would make it discard the entire list — and the coordinator would then see
+  // no elections rather than an error it could attribute. Regression-guarded because
+  // the earlier version of this test asserted the opposite and still passed.
+  it('leaves listed election ids 0x-prefixed for the response body', async () => {
     hubReplies({ electionIds: [PREFIXED, `0x${'ab'.repeat(32)}`] });
     const res = await request(app).get('/elections');
-    expect(res.body.electionIds).toEqual([BARE, 'ab'.repeat(32)]);
+    expect(res.body.electionIds).toEqual([PREFIXED, `0x${'ab'.repeat(32)}`]);
+    for (const id of res.body.electionIds)
+      expect(id.startsWith('0x')).toBe(true);
   });
 });
 
@@ -168,6 +175,107 @@ describe('reads', () => {
   });
 });
 
+describe('dkg write path', () => {
+  function hubAccepts204(): void {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      status: 204,
+      json: async () => {
+        throw new Error('204 has no body');
+      }
+    });
+  }
+
+  it('forwards a submission and answers 204', async () => {
+    hubAccepts204();
+    const res = await request(app)
+      .post(`/elections/${BARE}/dkg`)
+      .send({ pkElection: '0xaa', committeePKs: ['0xbb'], keyperSig: '0xcc' });
+    expect(res.status).toBe(204);
+    expect(lastUrl()).toBe(
+      `http://hub.test/api/proposal/${PREFIXED}/te_geg_dkg`
+    );
+  });
+
+  it('forwards exactly the three fields the port defines', async () => {
+    hubAccepts204();
+    await request(app)
+      .post(`/elections/${BARE}/dkg`)
+      .send({ pkElection: '0xaa', committeePKs: ['0xbb'], keyperSig: '0xcc' });
+    const body = JSON.parse(mockFetch.mock.calls[0][1].body);
+    // No keyperIndex: the hub recovers it from the signature, so a submission can
+    // only ever count for whoever actually signed it. Forwarding a claimed index
+    // would reintroduce exactly the impersonation this design removes.
+    expect(Object.keys(body).sort()).toEqual([
+      'committeePKs',
+      'keyperSig',
+      'pkElection'
+    ]);
+    expect(body).toEqual({
+      pkElection: '0xaa',
+      committeePKs: ['0xbb'],
+      keyperSig: '0xcc'
+    });
+  });
+
+  it('drops a claimed keyper index rather than passing it on', async () => {
+    hubAccepts204();
+    await request(app)
+      .post(`/elections/${BARE}/dkg`)
+      .send({
+        pkElection: '0xaa',
+        committeePKs: ['0xbb'],
+        keyperSig: '0xcc',
+        keyperIndex: 7
+      });
+    expect(
+      JSON.parse(mockFetch.mock.calls[0][1].body).keyperIndex
+    ).toBeUndefined();
+  });
+
+  it('uses POST, not GET', async () => {
+    hubAccepts204();
+    await request(app).post(`/elections/${BARE}/dkg`).send({});
+    expect(mockFetch.mock.calls[0][1].method).toBe('POST');
+  });
+
+  // Each of these drives different coordinator behaviour, so none may be collapsed:
+  // 403 means a misconfigured committee and should stop the ceremony, while 409 is
+  // a benign quorum race that is merely logged.
+  it.each([[403], [409], [400], [503]])(
+    'preserves hub write status %i',
+    async status => {
+      hubReplies({ error: 'nope' }, status);
+      const res = await request(app).post(`/elections/${BARE}/dkg`).send({});
+      expect(res.status).toBe(status);
+    }
+  );
+
+  it('rejects a malformed election id before calling the hub', async () => {
+    const res = await request(app).post('/elections/nope/dkg').send({});
+    expect(res.status).toBe(400);
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
+  it('surfaces an unreachable hub as 502 on writes too', async () => {
+    mockFetch.mockRejectedValueOnce(new Error('ECONNREFUSED'));
+    const res = await request(app).post(`/elections/${BARE}/dkg`).send({});
+    expect(res.status).toBe(502);
+  });
+
+  it('returns submissions under the key the protocol client reads', async () => {
+    const submissions = [
+      { electionId: PREFIXED, pkElection: '0xaa', committeePKs: ['0xbb'] }
+    ];
+    hubReplies({ submissions });
+    const res = await request(app).get(`/elections/${BARE}/dkg`);
+    expect(res.body).toEqual({ submissions });
+    expect(lastUrl()).toBe(
+      `http://hub.test/api/proposal/${PREFIXED}/te_geg_dkg`
+    );
+  });
+});
+
 describe('status pass-through', () => {
   // The client maps each of these onto a distinct error type, and its callers
   // branch on the type. Remapping any of them changes coordinator behaviour.
@@ -212,7 +320,6 @@ describe('unsupported writes', () => {
   });
 
   it.each([
-    `/elections/${BARE}/dkg`,
     `/elections/${BARE}/aggregate`,
     `/elections/${BARE}/shares`,
     `/elections/${BARE}/result`,

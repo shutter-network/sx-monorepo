@@ -9,6 +9,12 @@
  * Validation is strict rather than forgiving. A malformed id must become a clean
  * 400 here, because passing it through would surface as a confusing 404 from the
  * hub — or worse, match a different proposal.
+ *
+ * Note the asymmetry, which is easy to get backwards: only *path segments* use bare
+ * hex. Every byte field inside a JSON body — including an election id in a response
+ * — is `0x`-prefixed, because the client decodes those with a decoder that rejects a
+ * missing prefix outright. So responses pass ids through untouched; there is no
+ * reverse conversion.
  */
 
 export class BadElectionId extends Error {}
@@ -25,15 +31,4 @@ export function toProposalId(eid: string): string {
     );
   }
   return `0x${body.toLowerCase()}`;
-}
-
-/** The bare-hex form the protocol's client uses in paths and envelopes. */
-export function toElectionId(proposalId: string): string {
-  const body = proposalId.startsWith('0x') ? proposalId.slice(2) : proposalId;
-  if (!HEX32.test(body)) {
-    throw new BadElectionId(
-      `proposal id is not 32 bytes of hex: ${proposalId}`
-    );
-  }
-  return body.toLowerCase();
 }

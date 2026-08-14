@@ -23,8 +23,8 @@
 
 import cors from 'cors';
 import express, { Express, Request, Response } from 'express';
-import { BadElectionId, toElectionId, toProposalId } from './eid';
-import { HubError, hubGet } from './hub';
+import { BadElectionId, toProposalId } from './eid';
+import { HubError, hubGet, hubPost } from './hub';
 import log from './log';
 
 /** Writes the protocol defines but Snapshot has no equivalent for. */
@@ -47,7 +47,6 @@ const UNSUPPORTED: Array<{ path: string; reason: string }> = [
 
 /** Tally-artifact writes. Wired in a later phase; declared so the shape is visible. */
 const PENDING_WRITES = [
-  '/elections/:eid/dkg',
   '/elections/:eid/aggregate',
   '/elections/:eid/shares',
   '/elections/:eid/result',
@@ -115,7 +114,13 @@ export function buildApp(): Express {
       const { electionIds } = await hubGet<{ electionIds: string[] }>(
         '/api/te_geg_elections'
       );
-      res.json({ electionIds: electionIds.map(toElectionId) });
+      // Ids pass through unchanged, and the reason is worth stating because the
+      // contract is asymmetric: *path segments* carry bare hex, but every byte
+      // field in a JSON body is `0x`-prefixed. Stripping the prefix here — the
+      // obvious-looking move, given the paths — makes the client reject the whole
+      // list with "missing '0x' prefix", and the coordinator then sees no elections
+      // at all rather than an error it can attribute.
+      res.json({ electionIds });
     })
   );
 
@@ -128,6 +133,33 @@ export function buildApp(): Express {
           `/api/proposal/${id}/te_geg_election`
         )
       );
+    })
+  );
+
+  app.post(
+    '/elections/:eid/dkg',
+    handle(async (req, res) => {
+      const id = toProposalId(electionIdParam(req));
+      // Forwarded verbatim. The keyper index is deliberately absent from this
+      // payload — the hub recovers it from the signature, so a submission can only
+      // ever count for whoever actually signed it.
+      await hubPost(`/api/proposal/${id}/te_geg_dkg`, {
+        pkElection: req.body?.pkElection,
+        committeePKs: req.body?.committeePKs,
+        keyperSig: req.body?.keyperSig
+      });
+      res.status(204).end();
+    })
+  );
+
+  app.get(
+    '/elections/:eid/dkg',
+    handle(async (req, res) => {
+      const id = toProposalId(electionIdParam(req));
+      const { submissions } = await hubGet<{ submissions: unknown[] }>(
+        `/api/proposal/${id}/te_geg_dkg`
+      );
+      res.json({ submissions });
     })
   );
 
@@ -182,13 +214,50 @@ export function buildApp(): Express {
     app.post(path, (req, res) =>
       fail(res, 501, `${path} is not wired up in this deployment yet`)
     );
-    // GETs for these artifacts land here too until their storage exists, and a
-    // 501 is honest where an empty success would read as "no artifact yet" and
-    // send the coordinator into a retry loop against a route that cannot answer.
-    app.get(path, (req, res) =>
-      fail(res, 501, `${path} is not wired up in this deployment yet`)
-    );
   }
+
+  /**
+   * Reads for artifacts that have no storage yet, answered as genuinely absent.
+   *
+   * These must **not** be 501. Lifecycle state is derived from the facts the data
+   * layer reports, and "no result exists" is one of those facts — it is how the
+   * coordinator distinguishes an election still awaiting its key from one already
+   * complete. A 501 here is not a cautious answer, it is an unanswerable one: the
+   * coordinator cannot derive state at all and abandons every election, including
+   * the ones it should be driving.
+   *
+   * Reporting absence is also simply true. No aggregate or result artifact exists
+   * for any election in this deployment yet.
+   *
+   * The legacy `proposals.te_aggregate` column is deliberately not surfaced here.
+   * It holds a different artifact: a bare ciphertext sum with no admitted set, no
+   * exclusions and no total weight. Dressing it up as the protocol's aggregate
+   * would mean inventing the three fields it lacks, and those fields are exactly
+   * what makes the artifact re-checkable.
+   */
+  app.get(
+    '/elections/:eid/aggregate',
+    handle(async (req, res) => {
+      toProposalId(electionIdParam(req)); // validate the id even when the answer is fixed
+      res.json({ aggregate: null });
+    })
+  );
+
+  app.get(
+    '/elections/:eid/shares',
+    handle(async (req, res) => {
+      toProposalId(electionIdParam(req));
+      res.json({ shares: [] });
+    })
+  );
+
+  app.get(
+    '/elections/:eid/result',
+    handle(async (req, res) => {
+      toProposalId(electionIdParam(req));
+      res.json({ result: null });
+    })
+  );
 
   app.use((req, res) =>
     fail(res, 404, `no route for ${req.method} ${req.path}`)

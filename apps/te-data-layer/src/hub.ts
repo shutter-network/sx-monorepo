@@ -75,3 +75,53 @@ export async function hubGet<T>(path: string): Promise<T> {
   }
   return body as T;
 }
+
+/**
+ * POST to the hub, surfacing its status as-is.
+ *
+ * Status fidelity matters more on writes than on reads. The protocol's client maps
+ * 403 to an authorisation failure, 409 to an append-only violation and 422 to an
+ * out-of-window write, and the coordinator's retry policy differs for each: a 409
+ * from a quorum race is benign and logged, while a 403 means a misconfigured
+ * committee and should stop the ceremony. Collapsing them would make it retry what
+ * it should abandon.
+ *
+ * A 204 carries no body, which is what the port's write methods return.
+ */
+export async function hubPost<T>(
+  path: string,
+  payload: unknown
+): Promise<T | null> {
+  const url = `${hubBase()}${path}`;
+  let res;
+  try {
+    res = await fetch(url, {
+      method: 'POST',
+      timeout: TIMEOUT_MS,
+      headers: {
+        'content-type': 'application/json',
+        accept: 'application/json'
+      },
+      body: JSON.stringify(payload)
+    });
+  } catch (err: any) {
+    throw new HubError(`hub unreachable: ${err?.message || err}`, 502);
+  }
+
+  if (res.status === 204) return null;
+
+  let body: any = null;
+  try {
+    body = await res.json();
+  } catch {
+    if (res.ok) return null;
+  }
+
+  if (!res.ok) {
+    throw new HubError(
+      body?.error || body?.message || `hub responded ${res.status}`,
+      res.status
+    );
+  }
+  return body as T;
+}
