@@ -23,13 +23,14 @@
  * The hub is the only process that speaks the protocol's JSON (it already links
  * the crypto SDK), so it owns that mapping. Keeping wire-format knowledge in one
  * place is what stops an enum-value or key-name drift — which surfaces as every
- * read failing to decode — from being possible in two places at once.
- *
- * See docs/private-voting/geg-integration-plan.md §5.
+ * read failing to decode — from being possible in two places at once. The mapping
+ * itself is `apps/hub/src/helpers/gegConfig.ts`.
  */
 
 import { keccak256 } from '@ethersproject/keccak256';
 import { toUtf8Bytes } from '@ethersproject/strings';
+import fetch from 'node-fetch';
+import log from './log';
 
 /**
  * EIP-55 checksum an already-validated lowercase address.
@@ -62,7 +63,7 @@ export interface TeCommitteeSnapshot {
   /** Schema version of this snapshot, so a later shape change is detectable. */
   v: 1;
   keypers: TeKeyper[];
-  /** Reconstruction threshold: any `t + 1` keypers can decrypt. */
+  /** Quorum: the number of keypers that must act together (t of n). */
   thresholdT: number;
   /** Committee size. Always `keypers.length`; stored so reads need no derivation. */
   thresholdN: number;
@@ -84,46 +85,165 @@ export interface TeCommitteeSnapshot {
 
 export class TeConfigError extends Error {}
 
+/**
+ * Ballot-shape limits the protocol enforces on an election config.
+ *
+ * Every keyper and auditor verifies every ballot, and a ballot's cost is
+ * `numCandidates × (budget + 1)` proof branches at roughly 3 ms each. Above the
+ * protocol's ceiling a proposal registers cleanly and can then never be tallied,
+ * so it has to be refused at creation — the config is frozen at that moment and
+ * cannot be edited afterwards.
+ */
+const MAX_PROOF_BRANCHES = 2500;
+
+/**
+ * Reject a proposal whose ballots would be too expensive to verify.
+ *
+ * Called with the *effective* candidate count and budget: a weighted proposal
+ * uses `TE_WEIGHTED_BUDGET`, everything else uses 1. At budget 100 the ceiling
+ * allows 24 choices; at budget 1 it allows 1250.
+ */
+export function assertBallotShape(numCandidates: number, budget: number): void {
+  const branches = numCandidates * (budget + 1);
+  if (branches > MAX_PROOF_BRANCHES) {
+    throw new TeConfigError(
+      `${numCandidates} choices at budget ${budget} means ${branches} proof ` +
+        `branches per ballot, over the ${MAX_PROOF_BRANCHES} the protocol allows. ` +
+        `Every keyper and auditor verifies every ballot. Reduce the choices, or ` +
+        `lower TE_WEIGHTED_BUDGET (at budget ${budget} the limit is ` +
+        `${Math.floor(MAX_PROOF_BRANCHES / (budget + 1))} choices)`
+    );
+  }
+}
+
 const ADDRESS_RE = /^0x[0-9a-fA-F]{40}$/;
 const G1_KEY_RE = /^0x[0-9a-fA-F]{96}$/;
 
+/** One `TE_KEYPERS` entry: a keyper's URL, before its address is known. */
+export interface TeKeyperEntry {
+  url: string;
+}
+
 /**
- * Parse `TE_KEYPERS`: a comma-separated list of `address@url`.
+ * Parse `TE_KEYPERS`: a comma-separated list of keyper URLs, and nothing else.
  *
- * Addresses are configured explicitly and never discovered from a keyper's own
- * `/status` response. That is the whole point: discovery let a network attacker
- * substitute an address mid-ceremony and have the committee verify signatures
- * against it (flaw F4 in docs/private-voting/architecture.md). A configured list
- * is the authority.
+ * Addresses are deliberately not configurable here. Each keyper reports the key it
+ * will sign with at its own `/status`, and `resolveCommittee` reads it there — the
+ * same way the protocol's admin UI assembles a committee before registering an
+ * election. Accepting a second, hand-maintained copy of the same fact only creates
+ * somewhere for it to go stale.
  */
-export function parseKeypers(raw: string | undefined): TeKeyper[] {
+export function parseKeypers(raw: string | undefined): TeKeyperEntry[] {
   if (!raw?.trim()) return [];
   return raw
     .split(',')
     .map(entry => entry.trim())
     .filter(Boolean)
     .map(entry => {
-      const at = entry.indexOf('@');
-      if (at === -1) {
+      if (entry.includes('@')) {
         throw new TeConfigError(
-          `TE_KEYPERS entry "${entry}" must be "address@url"`
+          `TE_KEYPERS entry "${entry}" looks like "address@url"; it takes URLs only. ` +
+            `Each keyper's address is read from its /status.`
         );
       }
-      const address = entry.slice(0, at).trim();
-      const url = entry
-        .slice(at + 1)
-        .trim()
-        .replace(/\/+$/, '');
-      if (!ADDRESS_RE.test(address)) {
+      const url = entry.replace(/\/+$/, '');
+      if (!/^https?:\/\//i.test(url)) {
         throw new TeConfigError(
-          `TE_KEYPERS entry "${entry}" has a malformed address`
+          `TE_KEYPERS entry "${entry}" must be a http(s) URL`
         );
       }
-      if (!url) {
-        throw new TeConfigError(`TE_KEYPERS entry "${entry}" has an empty url`);
-      }
-      return { address: toChecksumAddress(address), url };
+      return { url };
     });
+}
+
+/**
+ * Turn configured keyper URLs into the committee that gets frozen onto a proposal.
+ *
+ * Each keyper's `/status` reports the signing address it will actually sign with,
+ * which is how the protocol's own admin UI assembles a committee before registering
+ * an election. What makes that safe is *when* it happens and what is checked, not
+ * the fetch itself:
+ *
+ *  - **Once per process.** The result is cached against the exact `TE_KEYPERS`
+ *    string, so a committee is resolved on the first private proposal after boot
+ *    and reused thereafter. Resolving on every creation would mean one unattended
+ *    lookup per proposal, each an opportunity to be answered by the wrong host.
+ *  - **Distinctness is enforced.** Two URLs reporting the same address is refused.
+ *    This is not tidiness: a committee that looks like 3 members but is 2 keys
+ *    makes `t = 2` satisfiable by one operator, which quietly voids the entire
+ *    threshold guarantee.
+ *  - **Unreachable is fatal.** The result is frozen onto the proposal and the DKG
+ *    needs every member, so guessing at an absent keyper only defers the failure to
+ *    `voting_start`, where it is terminal.
+ *
+ * Failures name the URL, because "the committee is wrong" with three endpoints and
+ * no attribution is the least actionable error this system can produce.
+ */
+const committeeCache = new Map<string, TeKeyper[]>();
+
+/** Visible for tests: forget any resolved committee. */
+export function clearCommitteeCache(): void {
+  committeeCache.clear();
+}
+
+export async function resolveCommittee(
+  entries: TeKeyperEntry[],
+  raw: string,
+  timeoutMs = 5000
+): Promise<TeKeyper[]> {
+  const cached = committeeCache.get(raw);
+  if (cached) return cached;
+
+  const resolved = await Promise.all(
+    entries.map(async entry => {
+      // Unreachable is fatal, and should be: the DKG needs *every* member, so a
+      // keyper that cannot be reached now would fail the ceremony anyway. Failing
+      // here tells the author immediately, instead of producing a proposal that
+      // dies at voting_start with no way back.
+      let reported: string;
+      try {
+        const res = await fetch(`${entry.url}/status`, {
+          timeout: timeoutMs
+        } as any);
+        if (!res.ok) {
+          throw new Error(`/status returned HTTP ${res.status}`);
+        }
+        const body: any = await res.json();
+        const hex = String(body?.address ?? '')
+          .toLowerCase()
+          .replace(/^0x/, '');
+        if (!/^[0-9a-f]{40}$/.test(hex)) {
+          throw new Error('/status did not return a valid address');
+        }
+        reported = toChecksumAddress(`0x${hex}`);
+      } catch (err: any) {
+        throw new TeConfigError(
+          `cannot resolve keyper at ${entry.url}: ${err?.message || err}. ` +
+            `Is it running and reachable from this container?`
+        );
+      }
+
+      return { address: reported, url: entry.url };
+    })
+  );
+
+  const byAddress = new Map<string, string>();
+  for (const k of resolved) {
+    const seen = byAddress.get(k.address.toLowerCase());
+    if (seen) {
+      throw new TeConfigError(
+        `${seen} and ${k.url} are the same keyper (${k.address}). ` +
+          `Each committee member must be a distinct key, or the threshold is not what it looks like.`
+      );
+    }
+    byAddress.set(k.address.toLowerCase(), k.url);
+  }
+
+  committeeCache.set(raw, resolved);
+  log.info(
+    `[te] committee resolved: ${resolved.map(k => `${k.address}@${k.url}`).join(', ')}`
+  );
+  return resolved;
 }
 
 export interface TeEnv {
@@ -180,37 +300,42 @@ function requireInt(
  * generation can never complete — which would otherwise surface minutes later
  * as an unexplained terminal failure.
  */
-export function buildCommitteeSnapshot(args: {
+export async function buildCommitteeSnapshot(args: {
   env?: TeEnv;
   eligibilityKey: string;
   votingStart: number;
   votingEnd: number;
-}): TeCommitteeSnapshot {
+}): Promise<TeCommitteeSnapshot> {
   const env = args.env ?? readTeEnv();
 
-  const keypers = parseKeypers(env.keypers);
-  if (keypers.length === 0) {
+  const entries = parseKeypers(env.keypers);
+  if (entries.length === 0) {
     throw new TeConfigError(
       'TE_KEYPERS is not configured; this deployment cannot host private proposals'
     );
   }
 
-  const seen = new Set<string>();
-  for (const k of keypers) {
-    const key = k.address.toLowerCase();
-    if (seen.has(key)) {
-      throw new TeConfigError(`TE_KEYPERS lists ${k.address} more than once`);
-    }
-    seen.add(key);
-  }
+  // Addresses come from each keyper's /status. Distinctness is enforced there,
+  // since it depends on the resolved values.
+  const keypers = await resolveCommittee(entries, env.keypers ?? '');
 
   const thresholdN = keypers.length;
-  const thresholdT = requireInt(env.thresholdT, 'TE_THRESHOLD_T', 1);
-  // t + 1 keypers must be able to decrypt, and t + 1 must be reachable, so
-  // 0 <= t < n. t = 0 is a degenerate single-keyper committee, still valid.
-  if (thresholdT < 0 || thresholdT >= thresholdN) {
+  const thresholdT = requireInt(env.thresholdT, 'TE_THRESHOLD_T', 2);
+  // `TE_THRESHOLD_T` is the **quorum**: the number of keypers that must act
+  // together, so a 2-of-3 committee is t = 2, n = 3.
+  if (thresholdT < 1 || thresholdT > thresholdN) {
     throw new TeConfigError(
-      `TE_THRESHOLD_T (${thresholdT}) must satisfy 0 <= t < n, with n = ${thresholdN}`
+      `TE_THRESHOLD_T (${thresholdT}) must satisfy 1 <= t <= n, with n = ${thresholdN} ` +
+        `(t is the quorum: t of n keypers act together)`
+    );
+  }
+
+  if (thresholdT * 2 <= thresholdN) {
+    throw new TeConfigError(
+      `TE_THRESHOLD_T (${thresholdT}) is not a majority of n = ${thresholdN} — ` +
+        `use t >= ${Math.floor(thresholdN / 2) + 1}. Two disjoint groups of ` +
+        `${thresholdT} fit in a committee of ${thresholdN}, so they could each ` +
+        `claim the same quorum`
     );
   }
 
@@ -261,6 +386,26 @@ export function buildCommitteeSnapshot(args: {
  * `te_keyper_addresses[keyper_index - 1]`. Never edit those to fix a
  * disagreement; regenerate them from the snapshot.
  */
+export function ballotParamsColumn(
+  choices: string[],
+  type: string | null | undefined,
+  env: TeEnv = readTeEnv()
+): { te_config: string } {
+  const weightedBudget = requireInt(
+    env.weightedBudget,
+    'TE_WEIGHTED_BUDGET',
+    100
+  );
+  return {
+    te_config: JSON.stringify({
+      numCandidates: choices.length,
+      budget: type === 'weighted' ? weightedBudget : 1,
+      mode: 'exact',
+      variant: 'A'
+    })
+  };
+}
+
 export function committeeColumns(snapshot: TeCommitteeSnapshot): {
   te_geg_config: string;
   te_threshold_t: number;

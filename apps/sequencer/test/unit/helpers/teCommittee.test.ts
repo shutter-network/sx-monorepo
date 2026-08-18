@@ -1,10 +1,27 @@
+import fetch from 'node-fetch';
 import {
   buildCommitteeSnapshot,
+  clearCommitteeCache,
   committeeColumns,
   parseKeypers,
+  resolveCommittee,
   TeConfigError,
   TeEnv
 } from '../../../src/helpers/teCommittee';
+
+jest.mock('node-fetch', () => jest.fn());
+const mockFetch = fetch as unknown as jest.Mock;
+
+/** Make every keyper URL report the address mapped to it. */
+function statusReturns(byUrl: Record<string, string | Error>) {
+  mockFetch.mockImplementation(async (target: string) => {
+    const url = String(target).replace(/\/status$/, '');
+    const value = byUrl[url];
+    if (value === undefined) throw new Error(`ECONNREFUSED ${url}`);
+    if (value instanceof Error) throw value;
+    return { ok: true, status: 200, json: async () => ({ address: value }) };
+  });
+}
 
 // A real 48-byte compressed G1 point, borrowed from the protocol's own
 // attestation vectors so the shape check is exercised against a genuine key.
@@ -20,8 +37,9 @@ const ADMIN = '0xD1220A0cf47c7B9Be7A2E6BA89F429762e7b9aDb';
 
 function env(overrides: Partial<TeEnv> = {}): TeEnv {
   return {
-    keypers: `${K1}@https://k1.example.com,${K2}@https://k2.example.com,${K3}@https://k3.example.com`,
-    thresholdT: '1',
+    keypers:
+      'https://k1.example.com,https://k2.example.com,https://k3.example.com',
+    thresholdT: '2',
     weightedBudget: '100',
     adminAddress: ADMIN,
     resultPublisherAddress: ADMIN,
@@ -39,61 +57,82 @@ function build(overrides: Partial<TeEnv> = {}) {
   });
 }
 
+beforeEach(() => {
+  clearCommitteeCache();
+  mockFetch.mockReset();
+  statusReturns({
+    'https://k1.example.com': K1,
+    'https://k2.example.com': K2,
+    'https://k3.example.com': K3,
+    'https://k.example.com': K1
+  });
+});
+
 describe('parseKeypers', () => {
-  it('parses address@url pairs and strips trailing slashes', () => {
+  it('parses urls and strips trailing slashes', async () => {
     expect(
-      parseKeypers(`${K1}@https://k1.example.com/,${K2}@https://k2.example.com`)
+      parseKeypers('https://k1.example.com/,https://k2.example.com')
     ).toEqual([
-      { address: K1, url: 'https://k1.example.com' },
-      { address: K2, url: 'https://k2.example.com' }
+      { url: 'https://k1.example.com' },
+      { url: 'https://k2.example.com' }
     ]);
   });
 
-  it('treats an unset or blank value as no committee', () => {
+  it('treats an unset or blank value as no committee', async () => {
     expect(parseKeypers(undefined)).toEqual([]);
     expect(parseKeypers('   ')).toEqual([]);
   });
 
-  it('tolerates whitespace and trailing separators', () => {
-    expect(parseKeypers(` ${K1}@https://k1.example.com , `)).toEqual([
-      { address: K1, url: 'https://k1.example.com' }
+  it('tolerates whitespace and trailing separators', async () => {
+    expect(parseKeypers(' https://k1.example.com , ')).toEqual([
+      { url: 'https://k1.example.com' }
     ]);
   });
 
-  // EIP-55 is hand-rolled here (the sequencer has no @ethersproject/address),
-  // so it is checked against the canonical vectors from the EIP itself. A wrong
-  // checksum would silently fail to match the hub's write-authorisation lookup.
+  // EIP-55 is hand-rolled here (the sequencer has no @ethersproject/address), so it
+  // is checked against the canonical vectors from the EIP itself. A wrong checksum
+  // silently fails to match the hub's write-authorisation lookup, which reads as
+  // "not a registered keyper" on every write the committee makes.
   it.each([
     ['0x5aaeb6053f3e94c9b9a09f33669435e7ef1beaed', K1],
     ['0xfb6916095ca1df60bb79ce92ce3ea74c37c5d359', K2],
-    ['0xdbf03b407c01e7cd3cbea99509d93f8dddc8c6fb', K3],
-    ['0xD1220A0CF47C7B9BE7A2E6BA89F429762E7B9ADB', ADMIN]
-  ])('EIP-55 checksums %s', (input, expected) => {
-    expect(parseKeypers(`${input}@https://k.example.com`)[0].address).toBe(
-      expected
+    ['0xdbf03b407c01e7cd3cbea99509d93f8dddc8c6fb', K3]
+  ])('checksums a resolved %s to EIP-55', async (reported, expected) => {
+    statusReturns({ 'https://k.example.com': reported });
+    const [k] = await resolveCommittee(
+      parseKeypers('https://k.example.com'),
+      `solo-${reported}`
+    );
+    expect(k.address).toBe(expected);
+  });
+
+  // The old format. Rejecting it by name beats a generic "must be a URL", because
+  // the value looks obviously correct to whoever wrote it.
+  it('rejects the old address@url form explicitly', async () => {
+    expect(() => parseKeypers(`${K1}@https://k1.example.com`)).toThrow(
+      /takes URLs only/
     );
   });
 
   it.each([
-    ['no url separator', `${K1}`],
-    ['malformed address', `0xnope@https://k.example.com`],
-    ['short address', `0x1234@https://k.example.com`],
-    ['empty url', `${K1}@`]
-  ])('rejects %s', (_label, raw) => {
+    ['a bare address', `${K1}`],
+    ['a host with no scheme', 'k1.example.com'],
+    ['an empty scheme', '://k1.example.com']
+  ])('rejects %s', async (_label, raw) => {
     expect(() => parseKeypers(raw)).toThrow(TeConfigError);
   });
 });
 
 describe('buildCommitteeSnapshot', () => {
-  it('freezes the committee, roles, window and budget', () => {
-    expect(build()).toEqual({
+  it('freezes the committee, roles, window and budget', async () => {
+    await expect(build()).resolves.toEqual({
       v: 1,
       keypers: [
         { address: K1, url: 'https://k1.example.com' },
         { address: K2, url: 'https://k2.example.com' },
         { address: K3, url: 'https://k3.example.com' }
       ],
-      thresholdT: 1,
+      thresholdT: 2,
       thresholdN: 3,
       eligibilityKey: ELIGIBILITY_KEY.toLowerCase(),
       resultPublisherAddress: ADMIN,
@@ -104,109 +143,214 @@ describe('buildCommitteeSnapshot', () => {
     });
   });
 
-  it('derives n from the committee rather than trusting a separate value', () => {
-    const snapshot = build({
-      keypers: `${K1}@https://k1.example.com,${K2}@https://k2.example.com`
+  it('derives n from the committee rather than trusting a separate value', async () => {
+    const snapshot = await build({
+      keypers: 'https://k1.example.com',
+      thresholdT: '1'
     });
-    expect(snapshot.thresholdN).toBe(2);
-    expect(snapshot.keypers).toHaveLength(2);
+    expect(snapshot.thresholdN).toBe(1);
+    expect(snapshot.keypers).toHaveLength(1);
   });
 
-  it('defaults the threshold and the weighted budget', () => {
-    const snapshot = build({
+  it('defaults the threshold and the weighted budget', async () => {
+    const snapshot = await build({
       thresholdT: undefined,
       weightedBudget: undefined
     });
-    expect(snapshot.thresholdT).toBe(1);
+    expect(snapshot.thresholdT).toBe(2);
     expect(snapshot.weightedBudget).toBe(100);
   });
 
-  it('accepts a single-keyper committee at t = 0', () => {
-    expect(
-      build({ keypers: `${K1}@https://k1.example.com`, thresholdT: '0' })
-    ).toMatchObject({ thresholdT: 0, thresholdN: 1 });
+  it('accepts a single-keyper committee at t = 1', async () => {
+    await expect(
+      build({ keypers: 'https://k1.example.com', thresholdT: '1' })
+    ).resolves.toMatchObject({ thresholdT: 1, thresholdN: 1 });
   });
 
   // Each of these produces a proposal whose key ceremony could never finish, so
   // they must fail at creation while the author can still see the error.
-  it('rejects t >= n, which no quorum could ever satisfy', () => {
-    expect(() => build({ thresholdT: '3' })).toThrow(/0 <= t < n/);
-    expect(() => build({ thresholdT: '4' })).toThrow(/0 <= t < n/);
+  it('rejects a quorum larger than the committee', async () => {
+    await expect(build({ thresholdT: '4' })).rejects.toThrow(/1 <= t <= n/);
+    await expect(build({ thresholdT: '9' })).rejects.toThrow(/1 <= t <= n/);
   });
 
-  it('rejects a negative threshold', () => {
-    expect(() => build({ thresholdT: '-1' })).toThrow(/0 <= t < n/);
+  it('rejects a quorum of zero or less', async () => {
+    await expect(build({ thresholdT: '0' })).rejects.toThrow(/1 <= t <= n/);
+    await expect(build({ thresholdT: '-1' })).rejects.toThrow(/1 <= t <= n/);
   });
 
-  it('rejects a duplicated keyper, which would inflate n past the real committee', () => {
-    expect(() =>
+  // A minority quorum decrypts fine but cannot decide agreement: two disjoint
+  // groups of one both "reach" a quorum of 1 in a committee of 3, so two
+  // different artifacts could each claim to be canonical.
+  it('rejects a quorum that is not a majority', async () => {
+    await expect(build({ thresholdT: '1' })).rejects.toThrow(/not a majority/);
+    await expect(
       build({
-        keypers: `${K1}@https://a.example.com,${K1.toLowerCase()}@https://b.example.com`
+        keypers:
+          'https://k1.example.com,https://k2.example.com,https://k3.example.com',
+        thresholdT: '1'
       })
-    ).toThrow(/more than once/);
+    ).rejects.toThrow(/use t >= 2/);
   });
 
-  it('rejects an unconfigured committee', () => {
-    expect(() => build({ keypers: undefined })).toThrow(/TE_KEYPERS/);
+  // Two URLs, one key: n looks like 2 but the committee is one operator, so a
+  // quorum of 2 is satisfiable alone. Caught on the resolved addresses.
+  it('rejects a duplicated keyper, which would inflate n past the real committee', async () => {
+    statusReturns({
+      'https://a.example.com': K1,
+      'https://b.example.com': K1
+    });
+    await expect(
+      build({
+        keypers: 'https://a.example.com,https://b.example.com'
+      })
+    ).rejects.toThrow(/same keyper/);
+  });
+
+  it('rejects an unconfigured committee', async () => {
+    await expect(build({ keypers: undefined })).rejects.toThrow(/TE_KEYPERS/);
   });
 
   it.each([
     ['TE_ADMIN_ADDRESS', { adminAddress: undefined }],
     ['TE_RESULT_PUBLISHER_ADDRESS', { resultPublisherAddress: undefined }]
-  ])('requires %s', (name, overrides) => {
-    expect(() => build(overrides as Partial<TeEnv>)).toThrow(name);
+  ])('requires %s', async (name, overrides) => {
+    await expect(build(overrides as Partial<TeEnv>)).rejects.toThrow(name);
   });
 
-  it('rejects a non-address role key', () => {
-    expect(() => build({ adminAddress: 'not-an-address' })).toThrow(
+  it('rejects a non-address role key', async () => {
+    await expect(build({ adminAddress: 'not-an-address' })).rejects.toThrow(
       /not an address/
     );
   });
 
-  it('rejects a non-integer threshold', () => {
-    expect(() => build({ thresholdT: '1.5' })).toThrow(/must be an integer/);
+  it('rejects a non-integer threshold', async () => {
+    await expect(build({ thresholdT: '1.5' })).rejects.toThrow(
+      /must be an integer/
+    );
   });
 
-  it('rejects a weighted budget below 1, which would make every split zero', () => {
-    expect(() => build({ weightedBudget: '0' })).toThrow(/>= 1/);
+  it('rejects a weighted budget below 1, which would make every split zero', async () => {
+    await expect(build({ weightedBudget: '0' })).rejects.toThrow(/>= 1/);
   });
 
-  it('rejects a malformed eligibility key', () => {
-    expect(() =>
+  it('rejects a malformed eligibility key', async () => {
+    await expect(
       buildCommitteeSnapshot({
         env: env(),
         eligibilityKey: '0xdeadbeef',
         ...window
       })
-    ).toThrow(/compressed G1/);
+    ).rejects.toThrow(/compressed G1/);
   });
 
-  it('rejects a window that ends before it starts', () => {
-    expect(() =>
+  it('rejects a window that ends before it starts', async () => {
+    await expect(
       buildCommitteeSnapshot({
         env: env(),
         eligibilityKey: ELIGIBILITY_KEY,
         votingStart: 200,
         votingEnd: 100
       })
-    ).toThrow(/must be after/);
-    expect(() =>
+    ).rejects.toThrow(/must be after/);
+    await expect(
       buildCommitteeSnapshot({
         env: env(),
         eligibilityKey: ELIGIBILITY_KEY,
         votingStart: 100,
         votingEnd: 100
       })
-    ).toThrow(/must be after/);
+    ).rejects.toThrow(/must be after/);
+  });
+});
+
+describe('resolveCommittee', () => {
+  const urls =
+    'https://k1.example.com,https://k2.example.com,https://k3.example.com';
+
+  it('reads each address from the keyper that will sign with it', async () => {
+    await expect(build({ keypers: urls })).resolves.toMatchObject({
+      keypers: [
+        { address: K1, url: 'https://k1.example.com' },
+        { address: K2, url: 'https://k2.example.com' },
+        { address: K3, url: 'https://k3.example.com' }
+      ]
+    });
+  });
+
+  // Resolving per proposal would mean one unattended lookup per creation, each a
+  // fresh chance to be answered by the wrong host. Once per process, then frozen.
+  it('resolves once and reuses the result', async () => {
+    await build({ keypers: urls });
+    const afterFirst = mockFetch.mock.calls.length;
+    await build({ keypers: urls });
+    expect(mockFetch.mock.calls.length).toBe(afterFirst);
+    expect(afterFirst).toBe(3);
+  });
+
+  it('re-resolves when the configured committee changes', async () => {
+    await build({ keypers: urls });
+    const afterFirst = mockFetch.mock.calls.length;
+    await build({
+      keypers: 'https://k1.example.com,https://k2.example.com',
+      thresholdT: '2'
+    });
+    expect(mockFetch.mock.calls.length).toBeGreaterThan(afterFirst);
+  });
+
+  it('names the keyper it could not reach', async () => {
+    statusReturns({
+      'https://k1.example.com': K1,
+      'https://k2.example.com': new Error('socket hang up'),
+      'https://k3.example.com': K3
+    });
+    await expect(build({ keypers: urls })).rejects.toThrow(
+      /cannot resolve keyper at https:\/\/k2\.example\.com/
+    );
+  });
+
+  it('rejects a keyper whose /status is not an address', async () => {
+    mockFetch.mockImplementation(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ address: 'nonsense' })
+    }));
+    await expect(build({ keypers: urls })).rejects.toThrow(/valid address/);
+  });
+
+  it('rejects a non-200 /status', async () => {
+    mockFetch.mockImplementation(async () => ({ ok: false, status: 503 }));
+    await expect(build({ keypers: urls })).rejects.toThrow(/HTTP 503/);
+  });
+
+  // Unreachable is fatal on purpose: the committee is frozen onto the proposal and
+  // the DKG needs every member, so accepting an absent keyper only moves the
+  // failure to voting_start, where it is terminal and the author can do nothing.
+  it('refuses to freeze a committee it cannot fully reach', async () => {
+    statusReturns({
+      'https://k2.example.com': K2,
+      'https://k3.example.com': K3
+    });
+    await expect(build({ keypers: urls })).rejects.toThrow(
+      /cannot resolve keyper at https:\/\/k1\.example\.com/
+    );
+  });
+
+  it('is exported for callers that want the addresses without a snapshot', async () => {
+    await expect(
+      resolveCommittee(parseKeypers(urls), urls)
+    ).resolves.toHaveLength(3);
   });
 });
 
 describe('committeeColumns', () => {
-  it('denormalises the committee for readers that already exist', () => {
-    const snapshot = build();
+  it('denormalises the committee for readers that already exist', async () => {
+    const snapshot = await build();
     const columns = committeeColumns(snapshot);
 
-    expect(columns.te_threshold_t).toBe(1);
+    // The quorum, denormalised for readers that predate te_geg_config: the UI's
+    // "2-of-3" label and the tally's share-count gate both read this column.
+    expect(columns.te_threshold_t).toBe(2);
     expect(columns.te_threshold_n).toBe(3);
     expect(JSON.parse(columns.te_keyper_urls)).toEqual([
       'https://k1.example.com',
@@ -220,8 +364,8 @@ describe('committeeColumns', () => {
     expect(JSON.parse(columns.te_geg_config)).toEqual(snapshot);
   });
 
-  it('keeps the denormalised arrays aligned with the snapshot order', () => {
-    const columns = committeeColumns(build());
+  it('keeps the denormalised arrays aligned with the snapshot order', async () => {
+    const columns = committeeColumns(await build());
     const addresses = JSON.parse(columns.te_keyper_addresses);
     const urls = JSON.parse(columns.te_keyper_urls);
     const snapshot = JSON.parse(columns.te_geg_config);

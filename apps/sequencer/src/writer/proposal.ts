@@ -12,8 +12,11 @@ import { getLimits, getSpaceType } from '../helpers/options';
 import { getProvider } from '../helpers/provider';
 import { validateSpaceSettings } from '../helpers/spaceValidation';
 import {
+  assertBallotShape,
+  ballotParamsColumn,
   buildCommitteeSnapshot,
   committeeColumns,
+  readTeEnv,
   TeConfigError
 } from '../helpers/teCommittee';
 import { getEligibilityKey } from '../helpers/teEligibility';
@@ -181,11 +184,20 @@ export async function verify(body): Promise<any> {
     // whose key generation can never finish, which would otherwise surface
     // minutes later as an unexplained terminal failure with no author feedback.
     try {
-      buildCommitteeSnapshot({
+      await buildCommitteeSnapshot({
         eligibilityKey: await getEligibilityKey(),
         votingStart: parseInt(msg.payload.start),
         votingEnd: parseInt(msg.payload.end)
       });
+      // The ballot's own shape is bounded too, and it depends on this proposal
+      // rather than on the deployment: a weighted proposal encodes one proof
+      // branch per (choice, budget step).
+      assertBallotShape(
+        msg.payload.choices.length,
+        msg.payload.type === 'weighted'
+          ? parseInt(readTeEnv().weightedBudget || '100', 10)
+          : 1
+      );
     } catch (err: any) {
       if (err instanceof TeConfigError) {
         log.warn(`[writer] private voting misconfigured: ${err.message}`);
@@ -393,12 +405,16 @@ export async function action(body, ipfs, receipt, id): Promise<void> {
     Object.assign(
       proposal,
       committeeColumns(
-        buildCommitteeSnapshot({
+        await buildCommitteeSnapshot({
           eligibilityKey: await getEligibilityKey(),
           votingStart: proposal.start,
           votingEnd: proposal.end
         })
-      )
+      ),
+      // Without this the proposal has a committee and a key but no ballot shape,
+      // so the browser refuses to build a ballot and ingest refuses to verify
+      // one — a proposal that looks ready and cannot be voted on.
+      ballotParamsColumn(msg.payload.choices, msg.payload.type)
     );
   }
 

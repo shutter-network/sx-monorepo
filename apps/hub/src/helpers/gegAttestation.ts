@@ -21,14 +21,98 @@
  * A replayed older ballot loses on nonce.
  */
 
+import { keccak256 } from '@ethersproject/keccak256';
 import {
+  encodeSchnorr,
   G1Point,
   initCurves,
   schnorrKeygen,
-  signAttestation
-} from '@snapshot-labs/private-vote-sdk';
+  schnorrSign
+} from '@shutter-network/urban-verified-crypto';
 
 export class GegAttestationError extends Error {}
+
+/**
+ * The signed message, built here rather than taken from the crypto package.
+ *
+ * **Temporary — delete this and import from the SDK once it is published.**
+ * `signAttestation`, `attestationMessage` and `verifyAttestation` have been
+ * implemented upstream in `@shutter-network/urban-verified-crypto`, but are not
+ * in a released version yet. When they are: bump the pin, drop everything down
+ * to `mintAttestation`, and import `signAttestation` instead. The tests in
+ * `test/unit/geg-attestation.test.ts` stay — they verify the credential, not the
+ * code path that produced it, so they are exactly what should prove the swap was
+ * inert.
+ *
+ * Until then, the construction lives here. The credential is signed over
+ * `keccak256` of a transcript byte-log: the label, then each field as
+ * `u32BE(len(tag)) ‖ tag ‖ u32BE(len(value)) ‖ value`, with the two integers as
+ * 32-byte big-endian scalars. The released package builds that same log
+ * internally for its proof transcripts but does not expose the raw bytes, and
+ * this is the one place that needs them — a signature over a whole transcript,
+ * rather than a Fiat–Shamir challenge drawn from one.
+ *
+ * Reproducing the framing here is what lets the crypto stay an unmodified
+ * published dependency rather than a fork carrying one extra method. It is pure
+ * byte concatenation, no curve arithmetic, and `test/unit/geg-attestation.test.ts`
+ * pins it against the protocol's own reference vectors — so a drift on either
+ * side fails the build rather than quietly minting credentials the keypers
+ * reject.
+ */
+const ATTESTATION_LABEL = 'SHUTTER-VOTE-ATTEST-v1';
+
+const textEncoder = new TextEncoder();
+
+function u32BE(n: number): Uint8Array {
+  const b = new Uint8Array(4);
+  new DataView(b.buffer).setUint32(0, n);
+  return b;
+}
+
+function concatBytes(parts: Uint8Array[]): Uint8Array {
+  const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
+  let offset = 0;
+  for (const part of parts) {
+    out.set(part, offset);
+    offset += part.length;
+  }
+  return out;
+}
+
+/** One length-prefixed transcript entry. */
+function field(tag: string, value: Uint8Array): Uint8Array {
+  const t = textEncoder.encode(tag);
+  return concatBytes([u32BE(t.length), t, u32BE(value.length), value]);
+}
+
+/** A scalar as the transcript encodes it: 32 bytes, big-endian. */
+function scalar32BE(value: bigint): Uint8Array {
+  const b = new Uint8Array(32);
+  let v = value;
+  for (let i = 31; i >= 0; i--) {
+    b[i] = Number(v & 0xffn);
+    v >>= 8n;
+  }
+  return b;
+}
+
+export function attestationMessage(
+  electionId: Uint8Array,
+  pseudonym: Uint8Array,
+  vk: Uint8Array,
+  weight: bigint,
+  nonce: bigint
+): Uint8Array {
+  const preimage = concatBytes([
+    textEncoder.encode(ATTESTATION_LABEL), // the label seeds the log unprefixed
+    field('attest:electionId', electionId),
+    field('attest:pseudonym', pseudonym),
+    field('attest:vk', vk),
+    field('attest:weight', scalar32BE(weight)),
+    field('attest:nonce', scalar32BE(nonce))
+  ]);
+  return new Uint8Array(Buffer.from(keccak256(preimage).slice(2), 'hex'));
+}
 
 const SK_RE = /^(0x)?[0-9a-fA-F]{64}$/;
 
@@ -130,12 +214,13 @@ export async function mintAttestation(args: MintArgs): Promise<string> {
     throw new GegAttestationError(`nonce must be >= 1 (got ${args.nonce})`);
   }
   const { sk, vk } = await getIssuer();
-  const signature = signAttestation(sk, vk, {
-    electionId: bytes(args.electionId, 'electionId', 32),
-    pseudonym: bytes(args.pseudonym, 'pseudonym', 32),
-    vk: bytes(args.vk, 'vk', 48),
-    weight: args.weight,
-    nonce: args.nonce
-  });
+  const message = attestationMessage(
+    bytes(args.electionId, 'electionId', 32),
+    bytes(args.pseudonym, 'pseudonym', 32),
+    bytes(args.vk, 'vk', 48),
+    args.weight,
+    args.nonce
+  );
+  const signature = encodeSchnorr(schnorrSign(sk, vk, message));
   return `0x${Buffer.from(signature).toString('hex')}`;
 }

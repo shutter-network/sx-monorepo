@@ -1,4 +1,4 @@
-import { G2Point, initCurves } from '@snapshot-labs/private-vote-sdk';
+import { G2Point, initCurves } from '@shutter-network/urban-verified-crypto';
 import { beforeAll, describe, expect, it } from 'vitest';
 import {
   buildTeBallotEnvelope,

@@ -2,7 +2,9 @@ import { Wallet } from '@ethersproject/wallet';
 
 const privateKey = process.env.RELAYER_PK;
 if (!privateKey) {
-  throw new Error('RELAYER_PK environment variable is required to sign relayer receipts');
+  throw new Error(
+    'RELAYER_PK environment variable is required to sign relayer receipts'
+  );
 }
 const wallet = new Wallet(privateKey);
 

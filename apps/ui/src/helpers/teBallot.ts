@@ -1,7 +1,7 @@
 /**
  * Threshold-ElGamal voter helper for the Snapshot UI.
  *
- * Wraps ``buildBallot`` from ``@snapshot-labs/private-vote-sdk`` so that
+ * Wraps ``buildBallot`` from ``@shutter-network/urban-verified-crypto`` so that
  * a Vue component only has to provide the user's choice index and the
  * proposal's TE configuration; the helper handles curve init, ephemeral
  * Schnorr key generation, pseudonym derivation, ballot construction and
@@ -21,7 +21,7 @@ import {
   G1Point,
   initCurves,
   schnorrKeygen
-} from '@snapshot-labs/private-vote-sdk';
+} from '@shutter-network/urban-verified-crypto';
 
 let curvesReady: Promise<void> | null = null;
 
@@ -119,7 +119,7 @@ export async function buildTeBallotEnvelope(
 
   // Lazy import to keep the SDK G2Point off the import path until the
   // user actually casts a private vote (most spaces won't).
-  const { G2Point } = await import('@snapshot-labs/private-vote-sdk');
+  const { G2Point } = await import('@shutter-network/urban-verified-crypto');
   const mpkPoint = G2Point.fromBytes(mpkBytes);
 
   const { sk, vk } = schnorrKeygen();
@@ -214,7 +214,7 @@ export async function buildTeWeightedBallotEnvelope(
   const pseudonym = pseudonymFor(voter, proposalId);
   const mpkBytes = arrayify(mpk);
 
-  const { G2Point } = await import('@snapshot-labs/private-vote-sdk');
+  const { G2Point } = await import('@shutter-network/urban-verified-crypto');
   const mpkPoint = G2Point.fromBytes(mpkBytes);
 
   const { sk, vk } = schnorrKeygen();

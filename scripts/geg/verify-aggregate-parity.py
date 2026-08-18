@@ -29,6 +29,8 @@ te_aggregate:
 
     python3 scripts/geg/verify-aggregate-parity.py <proposal-id> [geg-repo]
 
+    The geg checkout is required — pass it as the last argument or set GEG_REPO.
+
 Environment:
     TE_DATA_LAYER_URL   translator base url (default http://localhost:3002)
     HUB_URL             hub base url, for reading the stored aggregate
@@ -45,10 +47,29 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 REPO_ROOT = HERE.parents[1]
-DEFAULT_GEG = REPO_ROOT.parent / "Munich_Voting" / "generalised-el-gamal"
 
 TE_DATA_LAYER_URL = os.environ.get("TE_DATA_LAYER_URL", "http://localhost:3002")
 HUB_URL = os.environ.get("HUB_URL", "http://localhost:3000")
+
+
+def resolve_geg_repo(explicit: str | None) -> Path:
+    """The generalised-el-gamal checkout to run against.
+
+    Explicit argument first, then GEG_REPO. There is deliberately no default:
+    this is a cross-repo dev tool and the checkout lives wherever the person
+    running it put it. Guessing a sibling path only converts "you did not say
+    where geg is" into a confusing failure several steps later.
+    """
+    raw = explicit or os.environ.get("GEG_REPO")
+    if not raw:
+        print(
+            "FAIL: no generalised-el-gamal checkout given.\n"
+            "      pass its path as an argument, or set "
+            "GEG_REPO=/path/to/generalised-el-gamal",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+    return Path(raw).expanduser().resolve()
 
 
 def get_json(url: str):
@@ -159,9 +180,7 @@ def main() -> int:
         print(__doc__, file=sys.stderr)
         return 2
     proposal_id = sys.argv[1]
-    geg_repo = Path(
-        sys.argv[2] if len(sys.argv) > 2 else os.environ.get("GEG_REPO", DEFAULT_GEG)
-    ).resolve()
+    geg_repo = resolve_geg_repo(sys.argv[2] if len(sys.argv) > 2 else None)
 
     if os.environ.get("_GEG_REEXEC") != "1":
         venv_python = geg_repo / ".venv" / "bin" / "python"

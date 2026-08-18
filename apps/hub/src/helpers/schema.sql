@@ -113,12 +113,6 @@ CREATE TABLE proposals (
   te_threshold_n INT DEFAULT NULL,
   te_keyper_urls JSON DEFAULT NULL,
   te_keyper_addresses JSON DEFAULT NULL,
-  -- Coordinator/API bearer token per keyper, same order as te_keyper_urls.
-  -- Plaintext by design -- the hub DB is already the trust boundary
-  -- te_keyper_urls/te_keyper_addresses live inside. The sequencer reads
-  -- this alongside te_keyper_urls to authenticate /decrypt/publish_on_chain
-  -- calls.
-  te_keyper_tokens JSON DEFAULT NULL,
   te_aggregate JSON DEFAULT NULL,
   -- NULL = pending/ok; 'dkg_failed' = all attempts exhausted, needs operator intervention.
   te_dkg_status VARCHAR(24) DEFAULT NULL,
@@ -135,8 +129,13 @@ CREATE TABLE proposals (
   -- `choices` and `type` right up until `start`, which would leave a frozen copy
   -- stale. Deriving them is safe precisely because that same endpoint refuses
   -- edits once voting has opened, so they are constant for the whole voting
-  -- window. See docs/private-voting/geg-integration-plan.md §5.
+  -- window.
   te_geg_config JSON DEFAULT NULL,
+  -- Set by the coordinator when it gives up on a tally, cleared only by the
+  -- admin identity. The split is the point: the party that marks a stall cannot
+  -- clear it, so a coordinator restart can never quietly resurrect an election
+  -- that a human has not looked at.
+  te_tally_stalled TINYINT(1) NOT NULL DEFAULT 0,
   PRIMARY KEY (id),
   INDEX ipfs (ipfs),
   INDEX author (author),
@@ -223,18 +222,49 @@ CREATE TABLE te_dkg_submissions (
   INDEX idx_te_dkg_match (proposal_id, mpk_hex(64))
 );
 
--- auto-dkg's durable record of each keyper's bearer tokens -- so an
--- auto-dkg restart loads existing tokens instead of re-minting the whole
--- fleet. Plaintext by the same deliberate choice as proposals.te_keyper_tokens
--- (this DB is already the trust boundary those live inside). No rotation:
--- a row is only replaced when a keyper is new, or when an operator deletes
--- it to deliberately force a fresh mint (see scripts/rotate_keyper_token.py).
-CREATE TABLE keyper_bootstrap_tokens (
-  keyper_url VARCHAR(255) NOT NULL,
-  api_token VARCHAR(64) NOT NULL,
-  peer_token VARCHAR(64) NOT NULL,
-  updated BIGINT NOT NULL,
-  PRIMARY KEY (keyper_url)
+-- The published tally. Written once, by the result publisher named in the
+-- election's frozen config, and mirrored into proposals.scores by the sequencer.
+--
+-- totals_json holds the per-candidate integers as JSON *strings* rather than
+-- numbers: they are sums over weighted ballots and can exceed 2^53, where a
+-- JSON number stops being exact. They are also what the publisher's signature
+-- covers, so a rounded value here would not just display wrong, it would fail
+-- to verify.
+CREATE TABLE te_results (
+  proposal_id VARCHAR(66) NOT NULL PRIMARY KEY,
+  totals_json TEXT NOT NULL,
+  keyper_indices TEXT NOT NULL,
+  bsgs_bound VARCHAR(80) NOT NULL,
+  signature VARCHAR(200) NOT NULL,
+  posted_at BIGINT NOT NULL
+);
+
+-- Per-keyper aggregate submissions. The aggregate is committee-owned: each
+-- member derives it independently from the same ballots and the same config,
+-- and the one that a quorum submits *byte-identically* becomes canonical
+-- (promoted into proposals.te_aggregate). A single writer could otherwise
+-- isolate a ballot and nobody would be able to tell.
+--
+-- Unlike te_dkg_submissions this is deliberately NOT append-only: a keyper may
+-- overwrite its own row until the quorum finalises. The aggregate is a
+-- deterministic re-derivation, so a member that submitted a stale one must be
+-- able to re-converge with the rest — the coordinator explicitly asks the
+-- committee to re-derive when it sees submissions that do not agree. After the
+-- quorum, the row set is frozen and a change is a 409.
+--
+-- digest is stored alongside the JSON because it is what the quorum counts on
+-- (cheap and indexed), while the JSON is what an auditor reads to see exactly
+-- what each keyper claimed when a quorum *fails* to form.
+CREATE TABLE te_aggregate_submissions (
+  proposal_id VARCHAR(66) NOT NULL,
+  keyper_index INT NOT NULL,
+  keyper_address VARCHAR(42) NOT NULL,
+  aggregate_json MEDIUMTEXT NOT NULL,
+  digest VARCHAR(66) NOT NULL,
+  signature VARCHAR(200) NOT NULL,
+  posted_at BIGINT NOT NULL,
+  PRIMARY KEY (proposal_id, keyper_index),
+  INDEX idx_te_agg_match (proposal_id, digest)
 );
 
 CREATE TABLE follows (

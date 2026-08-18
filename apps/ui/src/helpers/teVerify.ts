@@ -24,7 +24,7 @@ import {
   recoverTally,
   scalarMulCt,
   Transcript
-} from '@snapshot-labs/private-vote-sdk';
+} from '@shutter-network/urban-verified-crypto';
 import { ensureCurvesInit } from './teBallot';
 
 const DECRYPT_TRANSCRIPT_LABEL = 'SHUTTER-VOTE-DECRYPT-v1';
@@ -106,9 +106,22 @@ export interface BallotsPayload {
 export interface BallotAggregateResult {
   /** Total ballots returned by the hub. */
   total: number;
+  /**
+   * Ballots that actually contributed weight. Below `total` when a ballot rounds
+   * to zero voting power, and zero for an election nobody voted in — which is a
+   * legitimate outcome, not a failed audit.
+   */
+  contributing: number;
   /** Recomputed vp-weighted aggregate equals the published aggregate. */
   aggregateMatches: boolean;
 }
+
+/**
+ * Compressed encoding of the G2 point at infinity: the compression and infinity
+ * bits set, then zeros. It is what a sum over no ciphertexts equals, and what the
+ * keypers publish for every candidate in an election with no admitted ballots.
+ */
+const IDENTITY_G2 = `0x${'c0'.padEnd(192, '0')}`;
 
 export interface VerifyResult {
   tallies: bigint[];
@@ -190,6 +203,7 @@ export async function aggregateBallots(
   }
   const numCandidates = expectedAggregate.num_candidates;
   const acc: (Ciphertext | null)[] = new Array(numCandidates).fill(null);
+  let contributing = 0;
 
   try {
     for (const b of payload.ballots) {
@@ -198,6 +212,7 @@ export async function aggregateBallots(
 
       const w = BigInt(Math.round(b.vp));
       if (w <= 0n) continue;
+      contributing++;
 
       const cts: Ciphertext[] = env.ciphertexts.map(c => ({
         c1: G2Point.fromBytes(arrayify(c.c1)),
@@ -226,12 +241,16 @@ export async function aggregateBallots(
     // Compare the recomputed aggregate to the published one byte-for-byte.
     let aggregateMatches = true;
     for (let j = 0; j < numCandidates; j++) {
-      if (acc[j] === null) {
-        aggregateMatches = false;
-        break;
-      }
-      const got = ctToHex(acc[j]!);
       const want = expectedAggregate.ciphertexts[j];
+      // Nothing accumulated for this candidate: the sum over an empty set is the
+      // identity, and that is exactly what the committee publishes. Treating the
+      // empty sum as a mismatch made every zero-turnout election report as
+      // tampered-with. Still a real check — a hub serving no ballots while
+      // publishing a non-empty aggregate fails here.
+      const got =
+        acc[j] === null
+          ? { c1: IDENTITY_G2, c2: IDENTITY_G2 }
+          : ctToHex(acc[j]!);
       if (
         got.c1.toLowerCase() !== want.c1.toLowerCase() ||
         got.c2.toLowerCase() !== want.c2.toLowerCase()
@@ -241,7 +260,11 @@ export async function aggregateBallots(
       }
     }
 
-    return { total: payload.ballots.length, aggregateMatches };
+    return {
+      total: payload.ballots.length,
+      contributing,
+      aggregateMatches
+    };
   } finally {
     for (const ct of acc) {
       if (ct !== null) {
@@ -310,14 +333,16 @@ export async function verifyTally(
       proof: decodeDLEQ(proofBytes)
     });
   }
+  // te_threshold_t is the quorum: the number of keypers required, not the number
+  // of faults tolerated.
   const thresholdMet = sharesPerCandidate.every(
-    arr => arr.length >= te_threshold_t + 1
+    arr => arr.length >= te_threshold_t
   );
 
   try {
     if (!thresholdMet) {
       throw new Error(
-        `not enough decryption shares per candidate (need t+1=${te_threshold_t + 1})`
+        `not enough decryption shares per candidate (need t=${te_threshold_t})`
       );
     }
 
@@ -338,7 +363,8 @@ export async function verifyTally(
     const tallies = recoverTally({
       ctSums,
       sharesPerCandidate,
-      threshold: te_threshold_t,
+      // SDK boundary: it takes the fault count and combines one more share.
+      threshold: te_threshold_t - 1,
       committeePKs,
       upperBound,
       transcriptFor: (j: number) => {

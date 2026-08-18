@@ -26,18 +26,32 @@
  *   - `duplicatePolicy` is the enum *value* `'last-wins'`, not a member name.
  *   - `protocolVersion` is the string `'SHUTTER-VOTE-v1'`, not a number.
  *   - `selfSubmitFee` is a decimal string, not a number (fees exceed 2^53).
- *
- * See docs/private-voting/geg-integration-plan.md §5.
  */
 
 /**
- * Weight ceiling offered to the protocol. Snapshot voting power is uncapped, and
- * capping it here would silently change governance outcomes, so this is set high
- * enough to never bind: it exists to satisfy the protocol's `1 <= weight <= max`
- * check, not to impose policy. 2^53-1 is the largest integer a JSON number can
- * carry losslessly, which is also the ceiling `Math.round(vp)` can produce.
+ * Ceiling the protocol puts on `budget × maxWeight`.
+ *
+ * The tally recovers each total by baby-step giant-step over a search space of
+ * `budget × Σ admitted weights`, holding a table of `sqrt(bound)` points — memory
+ * is the wall. The protocol refuses a config above this line, so it is not a
+ * preference we can opt out of.
  */
-export const MAX_WEIGHT = 9007199254740991;
+export const MAX_BUDGET_TIMES_WEIGHT = 1_000_000;
+
+/**
+ * The largest per-voter weight this budget allows.
+ *
+ * **This clamps governance outcomes, and it is not a free choice.** Snapshot
+ * voting power is uncapped; the protocol's ceiling is not. Voting power above the
+ * cap is counted *at* the cap rather than dropped, so a whale still votes, with
+ * less weight than it holds. Taking the largest value the protocol permits for
+ * the budget is the least restrictive reading available — a single-choice
+ * proposal (budget 1) allows 1e6, a weighted one at budget 100 allows 1e4 — but
+ * the deployment should decide this deliberately rather than inherit it.
+ */
+export function deriveMaxWeight(budget: number): number {
+  return Math.floor(MAX_BUDGET_TIMES_WEIGHT / budget);
+}
 
 export const PROTOCOL_VERSION = 'SHUTTER-VOTE-v1';
 
@@ -165,10 +179,15 @@ export function composeElectionConfig(args: {
     electionId: proposalId,
     ...params,
     weighted: true,
-    maxWeight: MAX_WEIGHT,
+    maxWeight: deriveMaxWeight(params.budget),
     duplicatePolicy: 'last-wins',
     votingStart: snapshot.votingStart,
     votingEnd: snapshot.votingEnd,
+    // `t` is the quorum — the number of keypers required, not the number of
+    // faults tolerated — and it means the same thing on both sides of this
+    // boundary, so it passes through unconverted. Keeping one meaning is the
+    // point: a compensating +1 here is exactly how the field came to mean two
+    // different things in the first place.
     threshold: { t: snapshot.thresholdT, n: snapshot.thresholdN },
     // The protocol calls a keyper's write-authorisation identity its signing
     // key; for this backend that is the member's Ethereum address.

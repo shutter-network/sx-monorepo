@@ -38,7 +38,7 @@ import {
   scalarMulCt,
   schnorrKeygen,
   verifyBallot
-} from '@snapshot-labs/private-vote-sdk';
+} from '@shutter-network/urban-verified-crypto';
 
 /** Matches the real proposal's shape: 3 candidates, weighted, budget 100. */
 const PARAMS = {
@@ -80,9 +80,10 @@ function pseudonymFor(voter: string, proposalId: string): string {
 async function main() {
   const mpkHex = process.argv[2];
   const outPath = process.argv[3];
+  const targetId = process.argv[4];
   if (!mpkHex || !outPath) {
     console.error(
-      'usage: bun run scripts/seed-mixed-vp-proposal.ts <mpk-hex> <out.json>'
+      'usage: bun run scripts/seed-mixed-vp-proposal.ts <mpk-hex> <out.json> [proposal-id]'
     );
     process.exit(2);
   }
@@ -91,7 +92,7 @@ async function main() {
 
   // A fixed synthetic id, so re-running replaces the same row instead of
   // accumulating proposals.
-  const proposalId = `0x${'5e'.repeat(32)}`;
+  const proposalId = targetId || `0x${'5e'.repeat(32)}`;
   const mpk = G2Point.fromBytes(
     new Uint8Array(Buffer.from(mpkHex.replace(/^0x/, ''), 'hex'))
   );

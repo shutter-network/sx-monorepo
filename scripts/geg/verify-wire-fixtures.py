@@ -3,8 +3,8 @@
 
 Two directions get proven separately.
 
-`packages/private-vote-sdk/tests/geg-parity.test.ts` covers TypeScript *verifying*
-geg's output, by replaying geg's canonical vector corpus. That runs in CI.
+`packages/geg-parity` covers TypeScript *verifying* geg's output, by replaying
+geg's canonical vector corpus against the pinned crypto build. That runs in CI.
 
 This script covers the reverse — geg *consuming* what sx emits — which is the
 direction that actually runs in production:
@@ -21,13 +21,13 @@ toolchain, so this is run by hand against a geg checkout whenever the wire-facin
 code or a fixture changes, and after bumping the pinned geg version.
 
     # 1. regenerate the fixtures
-    cd packages/private-vote-sdk
-    WRITE_ATTESTATION_FIXTURE=1 npx jest tests/voting.attestation.test.ts
-    cd ../../apps/hub
+    cd apps/hub
+    WRITE_ATTESTATION_FIXTURE=1 npx jest test/unit/geg-attestation.test.ts
     WRITE_GEG_CONFIG_FIXTURE=1 npx jest test/unit/geg-config.test.ts
 
     # 2. verify them with geg (from the repo root)
-    python3 scripts/geg/verify-wire-fixtures.py [path-to-geg-repo]
+    python3 scripts/geg/verify-wire-fixtures.py /path/to/generalised-el-gamal
+    # ...or: GEG_REPO=/path/to/generalised-el-gamal python3 scripts/geg/verify-wire-fixtures.py
 
 Exit code 0 means the two implementations agree. The fixtures are checked in, so
 the last recorded result is always inspectable.
@@ -43,24 +43,37 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 REPO_ROOT = HERE.parents[1]
 ATTESTATION_FIXTURE = (
-    REPO_ROOT
-    / "packages"
-    / "private-vote-sdk"
-    / "tests"
-    / "fixtures"
-    / "ts-minted-attestations.json"
+    REPO_ROOT / "apps" / "hub" / "test" / "fixtures" / "ts-minted-attestations.json"
 )
 CONFIG_FIXTURE = REPO_ROOT / "apps" / "hub" / "test" / "fixtures" / "geg-configs.json"
-# Sibling-checkout layout used in development; override with the argument or GEG_REPO.
-DEFAULT_GEG = REPO_ROOT.parent / "Munich_Voting" / "generalised-el-gamal"
 
 REGEN_HINT = (
     "      regenerate it with:\n"
-    "        cd packages/private-vote-sdk && \\\n"
-    "        WRITE_ATTESTATION_FIXTURE=1 npx jest tests/voting.attestation.test.ts\n"
+    "        cd apps/hub && \\\n"
+    "        WRITE_ATTESTATION_FIXTURE=1 npx jest test/unit/geg-attestation.test.ts\n"
     "        cd apps/hub && \\\n"
     "        WRITE_GEG_CONFIG_FIXTURE=1 npx jest test/unit/geg-config.test.ts"
 )
+
+
+def resolve_geg_repo(explicit: str | None) -> Path:
+    """The generalised-el-gamal checkout to run against.
+
+    Explicit argument first, then GEG_REPO. There is deliberately no default:
+    this is a cross-repo dev tool and the checkout lives wherever the person
+    running it put it. Guessing a sibling path only converts "you did not say
+    where geg is" into a confusing failure several steps later.
+    """
+    raw = explicit or os.environ.get("GEG_REPO")
+    if not raw:
+        print(
+            "FAIL: no generalised-el-gamal checkout given.\n"
+            "      pass its path as an argument, or set "
+            "GEG_REPO=/path/to/generalised-el-gamal",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+    return Path(raw).expanduser().resolve()
 
 
 def unhex(s: str) -> bytes:
@@ -145,9 +158,7 @@ def check_configs() -> tuple[int, int]:
 
 
 def main() -> int:
-    geg_repo = Path(
-        sys.argv[1] if len(sys.argv) > 1 else os.environ.get("GEG_REPO", DEFAULT_GEG)
-    ).resolve()
+    geg_repo = resolve_geg_repo(sys.argv[1] if len(sys.argv) > 1 else None)
     venv_python = geg_repo / ".venv" / "bin" / "python"
 
     missing = [p for p in (ATTESTATION_FIXTURE, CONFIG_FIXTURE) if not p.exists()]

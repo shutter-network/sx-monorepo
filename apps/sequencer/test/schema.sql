@@ -4,9 +4,9 @@
 --
 --  It carries its own copy of the proposals table, which must stay in step with
 --  apps/hub/src/helpers/schema.sql -- the sequencer writes proposals that the
---  hub reads. The two have already drifted once: this copy was missing
---  te_dkg_status and te_keyper_tokens while the hub had both, which means the
---  suite was passing against a shape production did not have.
+--  hub reads. The two have already drifted twice: this copy was missing
+--  te_dkg_status while the hub had it, and later te_tally_stalled, which means
+--  the suite was passing against a shape production did not have.
 --
 --  If you add a column to the hub schema, add it here too, and read the header
 --  of that file for why a change there does not reach a running database.
@@ -98,6 +98,9 @@ CREATE TABLE proposals (
   -- Immutable committee + role snapshot written at proposal creation.
   -- See apps/hub/src/helpers/schema.sql for the full rationale.
   te_geg_config JSON DEFAULT NULL,
+  -- Set by the coordinator when it abandons a tally; cleared by the admin.
+  -- NOT NULL because 0 means "not stalled", which is a fact, not an unknown.
+  te_tally_stalled TINYINT(1) NOT NULL DEFAULT 0,
   PRIMARY KEY (id),
   INDEX ipfs (ipfs),
   INDEX author (author),
@@ -316,4 +319,31 @@ CREATE TABLE messages (
   INDEX space (space),
   INDEX type (type),
   INDEX receipt (receipt)
+);
+
+--  Two more of the committee's artifacts. The sequencer does not write these -- the
+--  hub does -- but it DELETEs them when a proposal is deleted, so they must exist
+--  here or that path throws only in tests. te_dkg_submissions and
+--  te_decryption_shares are already declared above. Copied from
+--  apps/hub/src/helpers/schema.sql; keep them in step.
+
+CREATE TABLE te_aggregate_submissions (
+  proposal_id VARCHAR(66) NOT NULL,
+  keyper_index INT NOT NULL,
+  keyper_address VARCHAR(42) NOT NULL,
+  aggregate_json MEDIUMTEXT NOT NULL,
+  digest VARCHAR(66) NOT NULL,
+  signature VARCHAR(200) NOT NULL,
+  posted_at BIGINT NOT NULL,
+  PRIMARY KEY (proposal_id, keyper_index),
+  INDEX idx_te_agg_match (proposal_id, digest)
+);
+
+CREATE TABLE te_results (
+  proposal_id VARCHAR(66) NOT NULL PRIMARY KEY,
+  totals_json TEXT NOT NULL,
+  keyper_indices TEXT NOT NULL,
+  bsgs_bound VARCHAR(80) NOT NULL,
+  signature VARCHAR(200) NOT NULL,
+  posted_at BIGINT NOT NULL
 );

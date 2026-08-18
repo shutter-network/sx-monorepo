@@ -319,12 +319,345 @@ describe('unsupported writes', () => {
     expect(mockFetch).not.toHaveBeenCalled();
   });
 
+
+});
+
+describe('the /port read mount', () => {
+  // The keypers do not read the root surface. They are given a base URL and append
+  // `/port` themselves, matching the prefix the protocol's own `api` service mounts
+  // its read blueprint under — so this mount is what makes a keyper able to read
+  // Snapshot's data layer at all, and what keeps its reach limited to reads.
+  it('serves an election read identically to the root surface', async () => {
+    const record = {
+      config: { electionId: PREFIXED, numCandidates: 2 },
+      cancelled: false,
+      tallyStalled: false,
+      finalizedKey: null
+    };
+    hubReplies(record);
+    const viaPort = await request(app).get(`/port/elections/${BARE}`);
+    hubReplies(record);
+    const viaRoot = await request(app).get(`/elections/${BARE}`);
+
+    expect(viaPort.status).toBe(200);
+    expect(viaPort.body).toEqual(viaRoot.body);
+  });
+
+  it('translates election ids under the prefix too', async () => {
+    hubReplies({ submissions: [] });
+    await request(app).get(`/port/elections/${BARE}/dkg`);
+    expect(lastUrl()).toBe(
+      `http://hub.test/api/proposal/${PREFIXED}/te_geg_dkg`
+    );
+  });
+
+  it('forwards ballot pagination under the prefix', async () => {
+    hubReplies({ ballots: [] });
+    await request(app).get(`/port/elections/${BARE}/ballots?start=10&count=5`);
+    expect(lastUrl()).toContain('start=10');
+    expect(lastUrl()).toContain('count=5');
+  });
+
+  it('answers /capability, which the client probes before anything else', async () => {
+    const res = await request(app).get('/port/capability');
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ verifiabilityTier: 0 });
+  });
+
+  // The point of the split surface. A keyper relays its writes through the
+  // coordinator; if a write route answered here, that indirection — and the
+  // authorization that rides on it — would be optional rather than enforced.
   it.each([
-    `/elections/${BARE}/aggregate`,
-    `/elections/${BARE}/shares`,
-    `/elections/${BARE}/result`,
-    `/elections/${BARE}/tally-stalled`
-  ])('answers 501 for the not-yet-wired route %s', async path => {
-    expect((await request(app).post(path).send({})).status).toBe(501);
+    `/port/elections/${BARE}/dkg`,
+    `/port/elections/${BARE}/aggregate`,
+    `/port/elections/${BARE}/shares`,
+    `/port/elections/${BARE}/result`,
+    `/port/elections/${BARE}/tally-stalled`,
+    `/port/elections/${BARE}/ballots`
+  ])('does not route the write %s', async path => {
+    const res = await request(app).post(path).send({});
+    expect(res.status).toBe(404);
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+});
+
+describe('aggregate', () => {
+  // The committee-owned aggregate: each keyper derives it independently and the
+  // hub decides which one a quorum agreed on. The translator carries the
+  // envelope and the signature, and adds nothing — the keyper index is not in
+  // the payload because the hub recovers it from the signature.
+  it('forwards a submission and answers 204', async () => {
+    hubReplies({}, 204);
+    const body = {
+      aggregate: {
+        electionId: PREFIXED,
+        aggregates: [{ c1: '0xaa', c2: '0xbb' }],
+        admitted: [0],
+        exclusions: [],
+        totalAdmittedWeight: 1
+      },
+      keyperSig: '0xsig'
+    };
+    const res = await request(app)
+      .post(`/elections/${BARE}/aggregate`)
+      .send(body);
+
+    expect(res.status).toBe(204);
+    expect(lastUrl()).toBe(`http://hub.test/api/proposal/${PREFIXED}/te_aggregate`);
+    expect(JSON.parse(mockFetch.mock.calls[0][1].body)).toEqual(body);
+  });
+
+  it('drops anything the port does not define, including a claimed index', async () => {
+    hubReplies({}, 204);
+    await request(app)
+      .post(`/elections/${BARE}/aggregate`)
+      .send({ aggregate: { admitted: [] }, keyperSig: '0xsig', keyperIndex: 3 });
+    expect(JSON.parse(mockFetch.mock.calls[0][1].body)).toEqual({
+      aggregate: { admitted: [] },
+      keyperSig: '0xsig'
+    });
+  });
+
+  // 422 is the protocol's voting-window error and 409 its immutability error.
+  // Collapsing either into 400 or 500 changes what the coordinator does next.
+  it.each([
+    [422, 'aggregate submitted before voting_end'],
+    [409, 'aggregate already finalized (quorum reached)'],
+    [403, 'not_a_registered_keyper']
+  ])('passes hub status %s straight through', async (status, message) => {
+    hubReplies({ error: message }, status as number);
+    const res = await request(app)
+      .post(`/elections/${BARE}/aggregate`)
+      .send({ aggregate: {}, keyperSig: '0xsig' });
+    expect(res.status).toBe(status);
+  });
+
+  it('reads the canonical aggregate', async () => {
+    const aggregate = {
+      electionId: PREFIXED,
+      aggregates: [{ c1: '0xaa', c2: '0xbb' }],
+      admitted: [0, 1],
+      exclusions: [{ sequenceNumber: 2, reason: 'INVALID_PROOF' }],
+      totalAdmittedWeight: 3
+    };
+    hubReplies({ aggregate });
+    const res = await request(app).get(`/elections/${BARE}/aggregate`);
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ aggregate });
+    expect(lastUrl()).toBe(
+      `http://hub.test/api/proposal/${PREFIXED}/te_geg_aggregate`
+    );
+  });
+
+  // Absence is a fact the coordinator acts on: no quorum yet means keep asking
+  // the committee to derive. It must read as null, never as an error.
+  it('reports no quorum as null rather than as a failure', async () => {
+    hubReplies({ aggregate: null });
+    const res = await request(app).get(`/elections/${BARE}/aggregate`);
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ aggregate: null });
+  });
+
+  it('serves the aggregate on the keyper read mount too', async () => {
+    hubReplies({ aggregate: null });
+    expect((await request(app).get(`/port/elections/${BARE}/aggregate`)).status).toBe(200);
+  });
+
+  it('does not route the write under /port', async () => {
+    const res = await request(app)
+      .post(`/port/elections/${BARE}/aggregate`)
+      .send({ aggregate: {}, keyperSig: '0xsig' });
+    expect(res.status).toBe(404);
+  });
+});
+
+describe('decryption shares', () => {
+  it('forwards a submission and answers 204', async () => {
+    hubReplies({}, 204);
+    const body = {
+      share: {
+        electionId: PREFIXED,
+        keyperIndex: 2,
+        entries: [{ sigma: '0xaa', proof: '0xbb' }]
+      },
+      keyperSig: '0xsig'
+    };
+    const res = await request(app).post(`/elections/${BARE}/shares`).send(body);
+    expect(res.status).toBe(204);
+    expect(lastUrl()).toBe(
+      `http://hub.test/api/proposal/${PREFIXED}/te_geg_decryption_share`
+    );
+    expect(JSON.parse(mockFetch.mock.calls[0][1].body)).toEqual(body);
+  });
+
+  // A share before the committee agreed on what to decrypt is temporarily
+  // wrong, not permanently malformed — 422 tells the caller to retry.
+  it.each([
+    [422, 'decryption share submitted before a canonical aggregate exists'],
+    [409, 'keyper already submitted different shares'],
+    [403, 'not_a_registered_keyper']
+  ])('passes hub status %s straight through', async (status, message) => {
+    hubReplies({ error: message }, status as number);
+    const res = await request(app)
+      .post(`/elections/${BARE}/shares`)
+      .send({ share: { entries: [] }, keyperSig: '0xsig' });
+    expect(res.status).toBe(status);
+  });
+
+  it('reads the per-keyper envelopes', async () => {
+    const shares = [
+      {
+        electionId: PREFIXED,
+        keyperIndex: 1,
+        entries: [{ sigma: '0xaa', proof: '0xbb' }]
+      }
+    ];
+    hubReplies({ shares });
+    const res = await request(app).get(`/elections/${BARE}/shares`);
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ shares });
+    expect(lastUrl()).toBe(
+      `http://hub.test/api/proposal/${PREFIXED}/te_geg_decryption_shares`
+    );
+  });
+
+  it('reports no shares as an empty list, not an error', async () => {
+    hubReplies({ shares: [] });
+    const res = await request(app).get(`/elections/${BARE}/shares`);
+    expect(res.body).toEqual({ shares: [] });
+  });
+
+  it('does not route the write under /port', async () => {
+    expect(
+      (await request(app).post(`/port/elections/${BARE}/shares`).send({})).status
+    ).toBe(404);
+  });
+});
+
+describe('published result', () => {
+  const BIG = '9007199254740993'; // 2^53 + 1: rounds if it passes through a double
+
+  it('forwards the publisher signature and answers 204', async () => {
+    hubReplies({}, 204);
+    const res = await request(app)
+      .post(`/elections/${BARE}/result`)
+      .send({
+        result: {
+          electionId: PREFIXED,
+          totals: [1, 2],
+          keyperIndices: [1, 2],
+          bsgsBound: 10
+        },
+        resultPublisherSig: '0xsig'
+      });
+    expect(res.status).toBe(204);
+    expect(lastUrl()).toBe(`http://hub.test/api/proposal/${PREFIXED}/te_result`);
+  });
+
+  // The totals are what the publisher signed. Re-serialising them here would
+  // round anything above 2^53 and break a signature this service is not a party
+  // to, so the body has to reach the hub as the bytes that arrived.
+  it('forwards the body verbatim, keeping oversized totals exact', async () => {
+    hubReplies({}, 204);
+    const raw = `{"result":{"electionId":"${PREFIXED}","totals":[${BIG},1],"keyperIndices":[1,2],"bsgsBound":${BIG}},"resultPublisherSig":"0xsig"}`;
+    await request(app)
+      .post(`/elections/${BARE}/result`)
+      .set('content-type', 'application/json')
+      .send(raw);
+
+    expect(mockFetch.mock.calls[0][1].body).toContain(`"totals":[${BIG},1]`);
+    expect(mockFetch.mock.calls[0][1].body).not.toContain('9007199254740992');
+  });
+
+  it('reads a published result', async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      text: async () =>
+        `{"result":{"electionId":"${PREFIXED}","totals":[3,4],"keyperIndices":[1,2],"bsgsBound":7}}`
+    });
+    const res = await request(app).get(`/elections/${BARE}/result`);
+    expect(res.status).toBe(200);
+    expect(res.body.result.totals).toEqual([3, 4]);
+  });
+
+  it('keeps an oversized total exact on the way back out', async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      text: async () =>
+        `{"result":{"electionId":"${PREFIXED}","totals":[${BIG}],"keyperIndices":[1],"bsgsBound":${BIG}}}`
+    });
+    const res = await request(app).get(`/elections/${BARE}/result`);
+    expect(res.text).toContain(BIG);
+  });
+
+  it('reports an unpublished result as null', async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      text: async () => '{"result":null}'
+    });
+    const res = await request(app).get(`/elections/${BARE}/result`);
+    expect(res.body).toEqual({ result: null });
+  });
+
+  it('passes a 403 from the hub straight through', async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: false,
+      status: 403,
+      json: async () => ({ error: 'not_the_result_publisher' })
+    });
+    const res = await request(app)
+      .post(`/elections/${BARE}/result`)
+      .send({ result: {}, resultPublisherSig: '0xsig' });
+    expect(res.status).toBe(403);
+  });
+});
+
+describe('tally stall', () => {
+  it('forwards a stall with the publisher signature', async () => {
+    hubReplies({}, 204);
+    const res = await request(app)
+      .post(`/elections/${BARE}/tally-stalled`)
+      .send({ stalled: true, resultPublisherSig: '0xsig' });
+    expect(res.status).toBe(204);
+    expect(lastUrl()).toBe(
+      `http://hub.test/api/proposal/${PREFIXED}/te_tally_stalled`
+    );
+    expect(JSON.parse(mockFetch.mock.calls[0][1].body)).toEqual({
+      stalled: true,
+      resultPublisherSig: '0xsig',
+      adminSig: undefined
+    });
+  });
+
+  it('forwards a resume with the admin signature', async () => {
+    hubReplies({}, 204);
+    await request(app)
+      .post(`/elections/${BARE}/tally-stalled`)
+      .send({ stalled: false, adminSig: '0xadmin' });
+    expect(JSON.parse(mockFetch.mock.calls[0][1].body)).toMatchObject({
+      stalled: false,
+      adminSig: '0xadmin'
+    });
+  });
+
+  // Which key may sign which direction is the hub's decision; the translator
+  // must not decide it, or the split could be enforced in two places and drift.
+  it('passes a rejected direction straight through', async () => {
+    hubReplies({ error: 'not_the_admin' }, 403);
+    const res = await request(app)
+      .post(`/elections/${BARE}/tally-stalled`)
+      .send({ stalled: false, resultPublisherSig: '0xsig' });
+    expect(res.status).toBe(403);
+  });
+
+  it('does not route the write under /port', async () => {
+    expect(
+      (await request(app)
+        .post(`/port/elections/${BARE}/tally-stalled`)
+        .send({ stalled: true })).status
+    ).toBe(404);
   });
 });

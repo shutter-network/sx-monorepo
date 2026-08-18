@@ -125,3 +125,78 @@ export async function hubPost<T>(
   }
   return body as T;
 }
+
+/**
+ * POST a body the caller has already serialised, byte for byte.
+ *
+ * Used for the published tally. Its totals can exceed what a JSON number carries
+ * exactly, and they are covered by the publisher's signature — so re-parsing and
+ * re-serialising here would round them and break a signature this service is not
+ * even a party to. Forwarding the original text keeps this a translator rather
+ * than an editor.
+ */
+export async function hubPostRaw(
+  path: string,
+  rawBody: string | undefined
+): Promise<null> {
+  if (typeof rawBody !== 'string') {
+    throw new HubError('missing request body', 400);
+  }
+  const url = `${hubBase()}${path}`;
+  let res;
+  try {
+    res = await fetch(url, {
+      method: 'POST',
+      timeout: TIMEOUT_MS,
+      headers: {
+        'content-type': 'application/json',
+        accept: 'application/json'
+      },
+      body: rawBody
+    });
+  } catch (err: any) {
+    throw new HubError(`hub unreachable: ${err?.message || err}`, 502);
+  }
+
+  if (res.status === 204 || res.ok) return null;
+
+  let body: any = null;
+  try {
+    body = await res.json();
+  } catch {
+    /* fall through to the status-only error */
+  }
+  throw new HubError(
+    body?.error || body?.message || `hub responded ${res.status}`,
+    res.status
+  );
+}
+
+/** GET a response as text, for the same precision reason as `hubPostRaw`. */
+export async function hubGetRaw(path: string): Promise<string> {
+  const url = `${hubBase()}${path}`;
+  let res;
+  try {
+    res = await fetch(url, {
+      timeout: TIMEOUT_MS,
+      headers: { accept: 'application/json' }
+    });
+  } catch (err: any) {
+    throw new HubError(`hub unreachable: ${err?.message || err}`, 502);
+  }
+
+  const text = await res.text();
+  if (!res.ok) {
+    let body: any = null;
+    try {
+      body = JSON.parse(text);
+    } catch {
+      /* status-only error */
+    }
+    throw new HubError(
+      body?.error || body?.message || `hub responded ${res.status}`,
+      res.status
+    );
+  }
+  return text;
+}

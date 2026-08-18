@@ -1,11 +1,11 @@
+import { G2Point, initCurves } from '@shutter-network/urban-verified-crypto';
 import { beforeAll, describe, expect, it } from 'vitest';
-import { G2Point, initCurves } from '@snapshot-labs/private-vote-sdk';
 import { pseudonymFor } from './teBallot';
 import {
-  type AuditBallot,
-  type AuditPayload,
-  type BallotsPayload,
   aggregateBallots,
+  AuditBallot,
+  AuditPayload,
+  BallotsPayload,
   fingerprintHex,
   shortHex,
   verifyTally
@@ -155,8 +155,10 @@ describe('aggregateBallots: structural rejections', () => {
       makeDummyAggregate()
     );
     expect(result.total).toBe(1);
-    // Nothing was accumulated (the only ballot was skipped), so the
-    // recomputed aggregate (all-null) cannot match any published aggregate.
+    expect(result.contributing).toBe(0);
+    // Nothing was accumulated, so the recomputed aggregate is the empty sum —
+    // the identity. The dummy aggregate is not the identity, so this is a real
+    // mismatch rather than an artefact of having accumulated nothing.
     expect(result.aggregateMatches).toBe(false);
   });
 
@@ -180,6 +182,58 @@ describe('aggregateBallots: structural rejections', () => {
       makeDummyAggregate()
     );
     expect(result.total).toBe(3);
+  });
+
+  // The regression this guards: an election nobody voted in. The committee
+  // publishes the identity in every slot, and the client's sum over zero ballots
+  // is that same identity — so it must verify, not report as tampered-with. It
+  // read as a mismatch for as long as an empty accumulator was hardcoded to fail,
+  // which meant a legitimate zero-turnout result looked like an attack.
+  describe('an election with no votes', () => {
+    const IDENTITY = `0x${'c0'.padEnd(192, '0')}`;
+
+    function emptyAggregate(numCandidates = BASE_CONFIG.numCandidates) {
+      return {
+        election_id: PROPOSAL_ID,
+        num_candidates: numCandidates,
+        ciphertexts: Array.from({ length: numCandidates }, () => ({
+          c1: IDENTITY,
+          c2: IDENTITY
+        }))
+      };
+    }
+
+    it('verifies an empty aggregate against no ballots', async () => {
+      const result = await aggregateBallots(
+        makeBallotsPayload([]),
+        emptyAggregate()
+      );
+      expect(result.total).toBe(0);
+      expect(result.contributing).toBe(0);
+      expect(result.aggregateMatches).toBe(true);
+    });
+
+    // The reason the empty case still has to be *compared* rather than waved
+    // through: a hub could serve an empty ballot list under an aggregate that no
+    // empty list could produce. That is precisely a hub hiding ballots.
+    it('rejects a non-empty aggregate when no ballots were served', async () => {
+      const result = await aggregateBallots(
+        makeBallotsPayload([]),
+        makeDummyAggregate()
+      );
+      expect(result.contributing).toBe(0);
+      expect(result.aggregateMatches).toBe(false);
+    });
+
+    it('treats an all-dust election as empty, since no ballot carries weight', async () => {
+      const result = await aggregateBallots(
+        makeBallotsPayload([makeBallot(1, 0), makeBallot(2, 0)]),
+        emptyAggregate()
+      );
+      expect(result.total).toBe(2); // the ballots exist...
+      expect(result.contributing).toBe(0); // ...but none of them counted
+      expect(result.aggregateMatches).toBe(true);
+    });
   });
 
   it('matches when a single vp=1 ballot equals the published aggregate', async () => {

@@ -3,15 +3,6 @@ import { CB } from './constants';
 import log from './helpers/log';
 import db from './helpers/mysql';
 import { getDecryptionKey } from './helpers/shutter';
-import {
-  aggregateBallots,
-  aggregateToJson,
-  decodeCommitteePks,
-  ensureCurvesInit,
-  recoverTeTally,
-  shareRowsToShares,
-  triggerKeypers
-} from './helpers/te';
 import { hasStrategyOverride, sha256 } from './helpers/utils';
 
 const scoreAPIUrl = process.env.SCORE_API_URL || 'https://score.snapshot.org';
@@ -36,8 +27,6 @@ async function getProposal(id: string): Promise<any | undefined> {
     proposal.te_committee_pks = JSON.parse(proposal.te_committee_pks);
   if (typeof proposal.te_keyper_urls === 'string')
     proposal.te_keyper_urls = JSON.parse(proposal.te_keyper_urls);
-  if (typeof proposal.te_keyper_tokens === 'string')
-    proposal.te_keyper_tokens = JSON.parse(proposal.te_keyper_tokens);
   if (typeof proposal.te_aggregate === 'string')
     proposal.te_aggregate = JSON.parse(proposal.te_aggregate);
   if (proposal.te_mpk && Buffer.isBuffer(proposal.te_mpk))
@@ -285,138 +274,48 @@ export async function updateProposalAndVotes(
  * is the exact privacy property this mode preserves.
  */
 async function runShutterElgamalTally(proposal: any): Promise<boolean> {
-  if (!proposal.te_config) {
-    log.warn(`[te-tally] ${proposal.id} missing te_config`);
-    return false;
-  }
-  const numCandidates: number = proposal.te_config.numCandidates;
-  const threshold: number = proposal.te_threshold_t;
-  const keyperUrls: string[] = proposal.te_keyper_urls || [];
-  // Coordinator/API token per keyper, same order as keyperUrls -- written
-  // by auto-dkg alongside te_keyper_urls. See "Sequencer delivery" in
-  // docs/private-voting/keyper-token-bootstrap.md.
-  const keyperTokens: string[] = proposal.te_keyper_tokens || [];
-  const committeePks: string[] = proposal.te_committee_pks || [];
-  if (
-    !proposal.te_mpk ||
-    keyperUrls.length === 0 ||
-    committeePks.length === 0
-  ) {
-    log.warn(`[te-tally] ${proposal.id} DKG not finalised`);
-    return false;
-  }
-
-  // Pull every persisted ballot. Each row in ``votes.choice`` has been
-  // ``verifyBallot``-validated at write time (see helpers/te.ts), so we
-  // do not re-verify here; the homomorphic sum is over trusted inputs.
-  const rawVotes = await db.queryAsync(
-    'SELECT choice, vp FROM votes WHERE proposal = ? AND cb != ?',
-    [proposal.id, CB.PENDING_DELETE]
-  );
-  if (rawVotes.length === 0) {
-    // No votes: write empty tally and finalise. recoverTally would throw
-    // on zero candidates of zero ballots, so short-circuit.
-    const zeroScores = new Array(numCandidates).fill(0);
-    await updateProposalScores(
-      proposal,
-      {
-        scores_state: 'final',
-        scores: zeroScores,
-        scores_by_strategy: [],
-        scores_total: 0
-      },
-      0
-    );
-    return true;
-  }
-
-  let aggregate;
-  try {
-    // aggregateBallots uses the BLST curve layer; the ingest path inits it
-    // lazily, but the scheduler may aggregate in a process that has not yet
-    // verified a ballot, so make sure the curves are ready here too.
-    await ensureCurvesInit();
-    aggregate = aggregateBallots(numCandidates, rawVotes);
-  } catch (err: any) {
-    log.warn(`[te-tally] ${proposal.id} aggregate failed: ${err.message}`);
-    return false;
-  }
-  const aggregateJson = aggregateToJson(proposal.id, aggregate);
-  await db.queryAsync(
-    'UPDATE proposals SET te_aggregate = ? WHERE id = ? LIMIT 1',
-    [JSON.stringify(aggregateJson), proposal.id]
-  );
-
-  // Trigger keypers to compute and submit their decryption shares. This call
-  // blocks until all reachable keypers respond — the keyper handler is
-  // synchronous end-to-end, submitting shares to the hub before returning.
-  // By the time this resolves, all reachable keypers have already submitted.
-  // If a keyper is unreachable, the error is swallowed and the share-count
-  // gate below decides whether t+1 shares are available from the others.
-  // If not in this tick, the next one will trigger keypers again.
-  await triggerKeypers(proposal.id, keyperUrls, keyperTokens);
-
-  // Read shares. Each (keyper, candidate) row is one PartialDecryption.
-  const shareRows = await db.queryAsync(
-    'SELECT keyper_index, candidate, sigma, proof_e, proof_z FROM te_decryption_shares WHERE proposal_id = ?',
+  const rows = await db.queryAsync(
+    'SELECT totals_json FROM te_results WHERE proposal_id = ? LIMIT 1',
     [proposal.id]
   );
-  const { shares, warnings } = shareRowsToShares(shareRows, numCandidates);
-  for (const w of warnings) log.warn(`[te-tally] ${proposal.id} ${w}`);
+  if (!rows[0]) return false;
 
-  const need = threshold + 1;
-  for (let j = 0; j < numCandidates; j++) {
-    if (shares[j].length < need) {
-      log.info(
-        `[te-tally] ${proposal.id} candidate ${j} has ${shares[j].length}/${need} shares; waiting`
-      );
-      return false;
-    }
-  }
-
-  // For weighted proposals, each ballot encodes proportional weights that sum
-  // to budget (e.g. [60, 40] out of 100). The aggregate for candidate j is
-  // Σ(vp_i × votes_i[j]) = budget × Σ(vp_i × fraction_i_j), so the BSGS
-  // upper bound must be scaled by budget. For single-choice (budget=1) this
-  // is a no-op.
-  const budget = BigInt(proposal.te_config.budget ?? 1);
-  let totalVp = 0n;
-  for (const v of rawVotes) totalVp += BigInt(Math.round(v.vp));
-  const upperBound = totalVp > 0n ? budget * totalVp : 1n;
-
-  let scores: bigint[];
+  let totals: string[];
   try {
-    const committeePKs = decodeCommitteePks(committeePks);
-    scores = await recoverTeTally(
-      proposal.id,
-      aggregate,
-      shares,
-      threshold,
-      committeePKs,
-      upperBound
-    );
+    totals = JSON.parse(rows[0].totals_json);
   } catch (err: any) {
-    log.warn(`[te-tally] ${proposal.id} recover failed: ${err.message}`);
+    log.warn(`[te-tally] ${proposal.id} unreadable result: ${err.message}`);
     return false;
   }
 
-  // Divide by budget to recover the actual VP-weighted tally. For
-  // single-choice (budget=1) this divides by 1 — no change.
-  const budgetN = Number(budget);
-  const numericScores = scores.map(s => Number(s) / budgetN);
+  const budget = Number(proposal.te_config?.budget ?? 1);
+  // Totals are stored as decimal strings because they can exceed 2^53, where a
+  // JSON number stops being exact. `Number()` here is lossy at that scale and
+  // that is accepted: `scores` is a float column and the published figure is a
+  // presentation of the tally, not the artifact anyone verifies. The exact
+  // integers stay in te_results for an auditor.
+  const numericScores = totals.map(t => Number(t) / budget);
   const total = numericScores.reduce((a, b) => a + b, 0);
+
+  const [{ n }] = await db.queryAsync(
+    'SELECT COUNT(*) AS n FROM votes WHERE proposal = ?',
+    [proposal.id]
+  );
+
   await updateProposalScores(
     proposal,
     {
       scores_state: 'final',
       scores: numericScores,
+      // Deliberately empty: a per-strategy breakdown of a private tally would
+      // narrow each ballot down to the strategies that produced it.
       scores_by_strategy: [],
       scores_total: total
     },
-    rawVotes.length
+    n
   );
   log.info(
-    `[te-tally] ${proposal.id} finalised; scores=${JSON.stringify(numericScores)}`
+    `[te-tally] ${proposal.id} mirrored published result; scores=${JSON.stringify(numericScores)}`
   );
   return true;
 }

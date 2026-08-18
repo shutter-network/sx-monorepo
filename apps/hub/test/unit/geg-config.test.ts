@@ -20,8 +20,9 @@ import { join } from 'node:path';
 import {
   composeElectionConfig,
   deriveBallotParams,
+  deriveMaxWeight,
   GegConfigError,
-  MAX_WEIGHT,
+  MAX_BUDGET_TIMES_WEIGHT,
   parseCommitteeSnapshot,
   PROTOCOL_VERSION,
   TeCommitteeSnapshot
@@ -29,7 +30,7 @@ import {
 
 const VECTOR_PATH = join(
   __dirname,
-  '../../../../packages/private-vote-sdk/tests/vectors-geg/flow/full_election_level1.json'
+  '../../../../packages/geg-parity/vectors/flow/full_election_level1.json'
 );
 const referenceConfig = JSON.parse(readFileSync(VECTOR_PATH, 'utf8')).config;
 
@@ -51,7 +52,7 @@ const snapshot: TeCommitteeSnapshot = {
     },
     { address: '0xdbF03B407c01E7cD3CBea99509d93f8DDDC8C6FB', url: 'https://k3' }
   ],
-  thresholdT: 1,
+  thresholdT: 2,
   thresholdN: 3,
   eligibilityKey: ELIGIBILITY_KEY,
   resultPublisherAddress: '0xD1220A0cf47c7B9Be7A2E6BA89F429762e7b9aDb',
@@ -151,11 +152,12 @@ describe('composeElectionConfig', () => {
       mode: 'exact',
       variant: 'A',
       weighted: true,
-      maxWeight: MAX_WEIGHT,
+      maxWeight: 1_000_000,
       duplicatePolicy: 'last-wins',
       votingStart: 1_770_000_000,
       votingEnd: 1_770_086_400,
-      threshold: { t: 1, n: 3 },
+      // t is the quorum on both sides: two of three keypers act together.
+      threshold: { t: 2, n: 3 },
       keypers: [
         {
           signingKey: '0x5aaeb6053f3e94c9b9a09f33669435e7ef1beaed',
@@ -247,11 +249,30 @@ describe('composeElectionConfig', () => {
     expect(compose().gatewayKeys).toEqual([]);
   });
 
-  it('offers a weight ceiling high enough never to bind', () => {
-    // Snapshot voting power is uncapped; capping it would silently change
-    // outcomes, so the ceiling exists only to satisfy the protocol's range check.
-    expect(compose().maxWeight).toBe(Number.MAX_SAFE_INTEGER);
+  // The protocol refuses a config whose budget × maxWeight exceeds its recovery
+  // ceiling — the tally's baby-step table is the memory wall — so the weight cap
+  // is forced, and it is the budget that decides how tight it is.
+  it('takes the largest weight the budget allows', () => {
+    expect(compose().maxWeight).toBe(MAX_BUDGET_TIMES_WEIGHT);
+    expect(compose({ type: 'weighted' }).maxWeight).toBe(
+      MAX_BUDGET_TIMES_WEIGHT / 100
+    );
     expect(compose().weighted).toBe(true);
+  });
+
+  it('never advertises a config the protocol would refuse to decode', () => {
+    for (const type of ['single-choice', 'weighted']) {
+      const config = compose({ type });
+      expect(config.budget * config.maxWeight).toBeLessThanOrEqual(
+        MAX_BUDGET_TIMES_WEIGHT
+      );
+    }
+  });
+
+  it('derives the ceiling from the budget, not the other way round', () => {
+    expect(deriveMaxWeight(1)).toBe(1_000_000);
+    expect(deriveMaxWeight(100)).toBe(10_000);
+    expect(deriveMaxWeight(3)).toBe(333_333);
   });
 
   // A rotated eligibility key invalidates every credential on older proposals:
@@ -285,7 +306,7 @@ describe('composeElectionConfig', () => {
             snapshot: {
               ...snapshot,
               keypers: [snapshot.keypers[0]],
-              thresholdT: 0,
+              thresholdT: 1,
               thresholdN: 1
             }
           })

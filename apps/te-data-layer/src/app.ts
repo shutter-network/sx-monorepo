@@ -17,15 +17,31 @@
  *   the protocol expects a write Snapshot has no equivalent for, it answers 501
  *   rather than inventing behaviour — see the four routes at the bottom.
  *
- * Route inventory and the reasoning behind each mapping live in
- * docs/private-voting/geg-integration-plan.md §4.
+ * Each route below carries the reasoning for its own mapping, including the two
+ * that deliberately answer something other than what the caller asked for.
  */
 
 import cors from 'cors';
-import express, { Express, Request, Response } from 'express';
+import express, { Express, Request, Response, Router } from 'express';
 import { BadElectionId, toProposalId } from './eid';
-import { HubError, hubGet, hubPost } from './hub';
+import { HubError, hubGet, hubGetRaw, hubPost, hubPostRaw } from './hub';
 import log from './log';
+
+/**
+ * Where the read surface is mounted a second time, for the keypers.
+ *
+ * The protocol splits its two audiences by path. The coordinator gets the root
+ * surface — it reads *and* writes, being the sole writer to the data layer, since
+ * keypers relay their signed submissions through it. The keypers get a read-only
+ * mount, and they build its URL themselves: they are configured with a base URL and
+ * append this prefix (`services/keyper` → `resolve_read_url`), which is the same
+ * prefix the protocol's own `api` service uses. So the constant is theirs, not ours,
+ * and must not be renamed.
+ *
+ * Mounting reads here rather than pointing keypers at the root is what keeps that
+ * split real: a keyper cannot reach a write route at the surface it reads from.
+ */
+const PORT_READ_PREFIX = '/port';
 
 /** Writes the protocol defines but Snapshot has no equivalent for. */
 const UNSUPPORTED: Array<{ path: string; reason: string }> = [
@@ -43,14 +59,6 @@ const UNSUPPORTED: Array<{ path: string; reason: string }> = [
     reason:
       'ballots are submitted as signed Snapshot votes through the sequencer, not here'
   }
-];
-
-/** Tally-artifact writes. Wired in a later phase; declared so the shape is visible. */
-const PENDING_WRITES = [
-  '/elections/:eid/aggregate',
-  '/elections/:eid/shares',
-  '/elections/:eid/result',
-  '/elections/:eid/tally-stalled'
 ];
 
 function fail(res: Response, status: number, message: string): void {
@@ -90,7 +98,16 @@ function handle(
 export function buildApp(): Express {
   const app = express();
   app.disable('x-powered-by');
-  app.use(express.json({ limit: '20mb' }));
+  app.use(
+    express.json({
+      limit: '20mb',
+      verify: (req: any, _res, buf) => {
+        // Kept for the one payload whose numbers must not pass through a
+        // double: see the result routes below.
+        req.rawBody = buf.toString('utf8');
+      }
+    })
+  );
   // Reads are public by design: the protocol treats its data layer as trusted for
   // availability only, and every artifact it serves is independently verifiable.
   app.use(cors({ maxAge: 86400 }));
@@ -99,16 +116,21 @@ export function buildApp(): Express {
     res.json({ ok: true, uptimeS: Math.round(process.uptime()) });
   });
 
+  // Every read lives on this router, which is mounted twice: at the root for the
+  // coordinator, and under /port for the keypers. One definition, so the two
+  // audiences can never be served different answers.
+  const reads = Router();
+
   /**
    * Verifiability tier. Zero means the data layer offers availability only — it
    * can withhold or reorder, but every artifact is self-verifying, so it cannot
    * forge one. That is an accurate description of a Snapshot-backed deployment.
    */
-  app.get('/capability', (req, res) => {
+  reads.get('/capability', (req, res) => {
     res.json({ verifiabilityTier: 0 });
   });
 
-  app.get(
+  reads.get(
     '/elections',
     handle(async (req, res) => {
       const { electionIds } = await hubGet<{ electionIds: string[] }>(
@@ -124,7 +146,7 @@ export function buildApp(): Express {
     })
   );
 
-  app.get(
+  reads.get(
     '/elections/:eid',
     handle(async (req, res) => {
       const id = toProposalId(electionIdParam(req));
@@ -152,7 +174,63 @@ export function buildApp(): Express {
     })
   );
 
-  app.get(
+  app.post(
+    '/elections/:eid/aggregate',
+    handle(async (req, res) => {
+      const id = toProposalId(electionIdParam(req));
+      // Forwarded verbatim, keyper index included in neither: the hub recovers
+      // it from the signature over the whole artifact, so a submission can only
+      // ever count for whoever actually derived it.
+      await hubPost(`/api/proposal/${id}/te_aggregate`, {
+        aggregate: req.body?.aggregate,
+        keyperSig: req.body?.keyperSig
+      });
+      res.status(204).end();
+    })
+  );
+
+  app.post(
+    '/elections/:eid/shares',
+    handle(async (req, res) => {
+      const id = toProposalId(electionIdParam(req));
+      await hubPost(`/api/proposal/${id}/te_geg_decryption_share`, {
+        share: req.body?.share,
+        keyperSig: req.body?.keyperSig
+      });
+      res.status(204).end();
+    })
+  );
+
+  app.post(
+    '/elections/:eid/result',
+    handle(async (req, res) => {
+      const id = toProposalId(electionIdParam(req));
+      // Forwarded as raw text rather than re-serialised: a published tally's
+      // totals can exceed what a JSON number carries exactly, and they are what
+      // the publisher's signature covers. Re-encoding them through a double
+      // would round them and the signature would stop verifying.
+      await hubPostRaw(`/api/proposal/${id}/te_result`, (req as any).rawBody);
+      res.status(204).end();
+    })
+  );
+
+  app.post(
+    '/elections/:eid/tally-stalled',
+    handle(async (req, res) => {
+      const id = toProposalId(electionIdParam(req));
+      // One route, two authorities: the hub decides which key may sign which
+      // direction, so both signature fields are forwarded and neither is
+      // interpreted here.
+      await hubPost(`/api/proposal/${id}/te_tally_stalled`, {
+        stalled: req.body?.stalled,
+        resultPublisherSig: req.body?.resultPublisherSig,
+        adminSig: req.body?.adminSig
+      });
+      res.status(204).end();
+    })
+  );
+
+  reads.get(
     '/elections/:eid/dkg',
     handle(async (req, res) => {
       const id = toProposalId(electionIdParam(req));
@@ -163,7 +241,7 @@ export function buildApp(): Express {
     })
   );
 
-  app.get(
+  reads.get(
     '/elections/:eid/dkg/finalized',
     handle(async (req, res) => {
       const id = toProposalId(electionIdParam(req));
@@ -176,7 +254,7 @@ export function buildApp(): Express {
     })
   );
 
-  app.get(
+  reads.get(
     '/elections/:eid/ballots/count',
     handle(async (req, res) => {
       const id = toProposalId(electionIdParam(req));
@@ -187,7 +265,7 @@ export function buildApp(): Express {
     })
   );
 
-  app.get(
+  reads.get(
     '/elections/:eid/ballots',
     handle(async (req, res) => {
       const id = toProposalId(electionIdParam(req));
@@ -210,54 +288,57 @@ export function buildApp(): Express {
     app.post(path, (req, res) => fail(res, 501, reason));
   }
 
-  for (const path of PENDING_WRITES) {
-    app.post(path, (req, res) =>
-      fail(res, 501, `${path} is not wired up in this deployment yet`)
-    );
-  }
+  reads.get(
+    '/elections/:eid/aggregate',
+    handle(async (req, res) => {
+      const id = toProposalId(electionIdParam(req));
+      // `null` until a quorum of keypers submits the same artifact. That absence
+      // is a fact the coordinator acts on — it is how it knows to keep asking the
+      // committee to derive — so it must be reported, never 501'd.
+      const { aggregate } = await hubGet<{ aggregate: unknown }>(
+        `/api/proposal/${id}/te_geg_aggregate`
+      );
+      res.json({ aggregate: aggregate ?? null });
+    })
+  );
 
   /**
    * Reads for artifacts that have no storage yet, answered as genuinely absent.
    *
    * These must **not** be 501. Lifecycle state is derived from the facts the data
    * layer reports, and "no result exists" is one of those facts — it is how the
-   * coordinator distinguishes an election still awaiting its key from one already
+   * coordinator distinguishes an election still mid-tally from one already
    * complete. A 501 here is not a cautious answer, it is an unanswerable one: the
    * coordinator cannot derive state at all and abandons every election, including
    * the ones it should be driving.
-   *
-   * Reporting absence is also simply true. No aggregate or result artifact exists
-   * for any election in this deployment yet.
-   *
-   * The legacy `proposals.te_aggregate` column is deliberately not surfaced here.
-   * It holds a different artifact: a bare ciphertext sum with no admitted set, no
-   * exclusions and no total weight. Dressing it up as the protocol's aggregate
-   * would mean inventing the three fields it lacks, and those fields are exactly
-   * what makes the artifact re-checkable.
    */
-  app.get(
-    '/elections/:eid/aggregate',
-    handle(async (req, res) => {
-      toProposalId(electionIdParam(req)); // validate the id even when the answer is fixed
-      res.json({ aggregate: null });
-    })
-  );
-
-  app.get(
+  reads.get(
     '/elections/:eid/shares',
     handle(async (req, res) => {
-      toProposalId(electionIdParam(req));
-      res.json({ shares: [] });
+      const id = toProposalId(electionIdParam(req));
+      const { shares } = await hubGet<{ shares: unknown[] }>(
+        `/api/proposal/${id}/te_geg_decryption_shares`
+      );
+      res.json({ shares });
     })
   );
 
-  app.get(
+  reads.get(
     '/elections/:eid/result',
     handle(async (req, res) => {
-      toProposalId(electionIdParam(req));
-      res.json({ result: null });
+      const id = toProposalId(electionIdParam(req));
+      // Passed through as text for the same reason the write is: the hub
+      // composes exact decimals that must not round-trip through a double here.
+      res.type('application/json').send(
+        await hubGetRaw(`/api/proposal/${id}/te_result`)
+      );
     })
   );
+
+  // Mounted last, once every read is declared: at the root for the coordinator,
+  // and again under /port for the keypers.
+  app.use(reads);
+  app.use(PORT_READ_PREFIX, reads);
 
   app.use((req, res) =>
     fail(res, 404, `no route for ${req.method} ${req.path}`)

@@ -32,6 +32,29 @@ import { keccak256 } from '@ethersproject/keccak256';
 import { verifyMessage } from '@ethersproject/wallet';
 
 export const DKG_RESULT_DST = Buffer.from('GEG-DKG-RESULT-v1', 'utf8');
+export const AGGREGATE_DST = Buffer.from('GEG-AGGREGATE-v1', 'utf8');
+export const DECRYPT_SHARE_DST = Buffer.from('GEG-DECRYPT-SHARE-v1', 'utf8');
+export const RESULT_DST = Buffer.from('GEG-RESULT-v1', 'utf8');
+export const REQUEST_DST = Buffer.from('GEG-REQUEST-v1', 'utf8');
+
+/**
+ * Exclusion reasons as the digest encodes them: the protocol's **declaration
+ * order**, not the string.
+ *
+ * The wire envelope carries the name (`"INVALID_PROOF"`), the digest carries the
+ * index. Getting this table wrong produces a digest that differs from the
+ * keyper's for exactly the ballots that were excluded — so an election with no
+ * exclusions would verify fine and one with a single bad ballot would fail
+ * authorisation with no obvious link to the cause.
+ */
+export const EXCLUSION_CODES: Record<string, number> = {
+  INVALID_PROOF: 0,
+  INVALID_SIGNATURE: 1,
+  INVALID_ATTESTATION: 2,
+  DUPLICATE_PSEUDONYM: 3,
+  MALFORMED: 4,
+  OUT_OF_WINDOW: 5
+};
 
 export class GegDigestError extends Error {}
 
@@ -87,6 +110,256 @@ export function dkgResultDigest(args: {
     electionId,
     pkElection,
     encoded
+  ]);
+  return Buffer.from(keccak256(packed).slice(2), 'hex');
+}
+
+/** One `(c1, c2)` ciphertext pair of the aggregate, compressed G2 points. */
+export interface GegAggregateCiphertext {
+  c1: string;
+  c2: string;
+}
+
+/** A ballot the committee left out, and why. */
+export interface GegExclusion {
+  sequenceNumber: number;
+  reason: string;
+}
+
+/**
+ * The digest a keyper signs over its aggregate.
+ *
+ * One ABI encode of the whole nested tuple
+ * `((bytes,bytes)[], uint256[], (uint256,uint8)[], uint256)` — the ciphertext
+ * pairs, the admitted sequence numbers, the exclusions as `(sequenceNumber,
+ * reasonCode)`, and the total admitted weight — not four field-wise encodes.
+ *
+ * The admitted set is *part of what is signed*, which is the point of the
+ * committee-owned aggregate: two keypers that summed the same ciphertexts over a
+ * different set of ballots produce different digests and never reach a quorum.
+ */
+export function aggregateDigest(args: {
+  electionId: string;
+  aggregates: GegAggregateCiphertext[];
+  admitted: number[];
+  exclusions: GegExclusion[];
+  totalAdmittedWeight: number | string | bigint;
+}): Buffer {
+  const electionId = decodeSized(args.electionId, 'electionId', 32);
+  if (!Array.isArray(args.aggregates)) {
+    throw new GegDigestError('aggregates: expected an array');
+  }
+  if (!Array.isArray(args.admitted)) {
+    throw new GegDigestError('admitted: expected an array');
+  }
+  if (!Array.isArray(args.exclusions)) {
+    throw new GegDigestError('exclusions: expected an array');
+  }
+
+  const pairs = args.aggregates.map((ct, i) => [
+    decodeSized(ct?.c1, `aggregates[${i}].c1`, 96),
+    decodeSized(ct?.c2, `aggregates[${i}].c2`, 96)
+  ]);
+  const admitted = args.admitted.map((seq, i) => {
+    if (!Number.isInteger(seq) || seq < 0) {
+      throw new GegDigestError(`admitted[${i}]: expected a sequence number`);
+    }
+    return seq;
+  });
+  const exclusions = args.exclusions.map((x, i) => {
+    const code = EXCLUSION_CODES[x?.reason as string];
+    if (code === undefined) {
+      throw new GegDigestError(`exclusions[${i}].reason: unknown ${x?.reason}`);
+    }
+    if (!Number.isInteger(x?.sequenceNumber) || x.sequenceNumber < 0) {
+      throw new GegDigestError(
+        `exclusions[${i}].sequenceNumber: expected a sequence number`
+      );
+    }
+    return [x.sequenceNumber, code];
+  });
+
+  // As a decimal string, not a JS number: the ABI coder refuses a number at or
+  // above 2^53-1, and this field is a sum of weights — with the weight ceiling
+  // at 1e6 a large electorate reaches that range legitimately. A digest that
+  // throws for big elections and works for small ones is the worst shape of bug,
+  // so the value never becomes a float on the way in.
+  let totalAdmittedWeight: string;
+  try {
+    totalAdmittedWeight = BigInt(args.totalAdmittedWeight).toString();
+  } catch {
+    throw new GegDigestError(
+      `totalAdmittedWeight: expected an integer (got ${args.totalAdmittedWeight})`
+    );
+  }
+  if (totalAdmittedWeight.startsWith('-')) {
+    throw new GegDigestError('totalAdmittedWeight: must not be negative');
+  }
+
+  const encoded = Buffer.from(
+    defaultAbiCoder
+      .encode(
+        [
+          'tuple(tuple(bytes,bytes)[],uint256[],tuple(uint256,uint8)[],uint256)'
+        ],
+        [[pairs, admitted, exclusions, totalAdmittedWeight]]
+      )
+      .slice(2),
+    'hex'
+  );
+  const packed = Buffer.concat([AGGREGATE_DST, electionId, encoded]);
+  return Buffer.from(keccak256(packed).slice(2), 'hex');
+}
+
+/** One keyper's partial decryption of one candidate. */
+export interface GegShareEntry {
+  /** 96-byte compressed G2 point. */
+  sigma: string;
+  /** 64-byte DLEQ proof: `e ‖ z`, two 32-byte big-endian scalars. */
+  proof: string;
+}
+
+/**
+ * The digest a keyper signs over its decryption shares.
+ *
+ * **Two separate ABI encodes, concatenated** — the sigmas as `bytes[]`, then the
+ * proofs as `(uint256,uint256)[]` — not one encode of a pair. Encoding them
+ * together produces a different byte string (the outer tuple adds its own offset
+ * header) and therefore a digest no keyper will ever match.
+ *
+ * The proof arrives as 64 bytes on the wire and is split here into the two
+ * scalars the digest encodes, mirroring how the protocol unpacks it.
+ */
+export function decryptionShareDigest(args: {
+  electionId: string;
+  entries: GegShareEntry[];
+}): Buffer {
+  const electionId = decodeSized(args.electionId, 'electionId', 32);
+  if (!Array.isArray(args.entries) || args.entries.length === 0) {
+    throw new GegDigestError('entries: expected a non-empty array');
+  }
+
+  const sigmas = args.entries.map((e, i) =>
+    decodeSized(e?.sigma, `entries[${i}].sigma`, 96)
+  );
+  const proofs = args.entries.map((e, i) => {
+    const proof = decodeSized(e?.proof, `entries[${i}].proof`, 64);
+    return [
+      `0x${proof.subarray(0, 32).toString('hex')}`,
+      `0x${proof.subarray(32).toString('hex')}`
+    ];
+  });
+
+  const packed = Buffer.concat([
+    DECRYPT_SHARE_DST,
+    electionId,
+    Buffer.from(defaultAbiCoder.encode(['bytes[]'], [sigmas]).slice(2), 'hex'),
+    Buffer.from(
+      defaultAbiCoder.encode(['tuple(uint256,uint256)[]'], [proofs]).slice(2),
+      'hex'
+    )
+  ]);
+  return Buffer.from(keccak256(packed).slice(2), 'hex');
+}
+
+/**
+ * The digest the result publisher signs over a published result.
+ *
+ * Binds every field of the artifact: the per-candidate totals, the keyper
+ * indices credited with decrypting them, and the BSGS bound they were recovered
+ * under. That is a deliberate change upstream — the earlier form signed only the
+ * pair (operation, election), so a single captured signature authorised *any*
+ * totals for that election. Anyone replaying it could have published a different
+ * outcome for the same proposal.
+ *
+ * Totals go through `BigInt`: they are sums over weighted ballots and routinely
+ * exceed what a JS number carries losslessly.
+ */
+export function resultDigest(args: {
+  electionId: string;
+  totals: Array<number | string | bigint>;
+  keyperIndices: Array<number | string>;
+  bsgsBound: number | string | bigint;
+}): Buffer {
+  const electionId = decodeSized(args.electionId, 'electionId', 32);
+  if (!Array.isArray(args.totals) || args.totals.length === 0) {
+    throw new GegDigestError('totals: expected a non-empty array');
+  }
+  if (!Array.isArray(args.keyperIndices) || args.keyperIndices.length === 0) {
+    throw new GegDigestError('keyperIndices: expected a non-empty array');
+  }
+
+  const asUint = (value: unknown, label: string): string => {
+    let n: bigint;
+    try {
+      n = BigInt(value as any);
+    } catch {
+      throw new GegDigestError(`${label}: expected an integer (got ${value})`);
+    }
+    if (n < 0n) throw new GegDigestError(`${label}: must not be negative`);
+    return n.toString();
+  };
+
+  const encoded = Buffer.from(
+    defaultAbiCoder
+      .encode(
+        ['uint256[]', 'uint256[]', 'uint256'],
+        [
+          args.totals.map((t, i) => asUint(t, `totals[${i}]`)),
+          args.keyperIndices.map((k, i) => asUint(k, `keyperIndices[${i}]`)),
+          asUint(args.bsgsBound, 'bsgsBound')
+        ]
+      )
+      .slice(2),
+    'hex'
+  );
+  return Buffer.from(
+    keccak256(Buffer.concat([RESULT_DST, electionId, encoded])).slice(2),
+    'hex'
+  );
+}
+
+/**
+ * The digest an *operation* signature is taken over.
+ *
+ * Role-key writes — publishing a result, stalling a tally, resuming one — are
+ * authorised as a named operation rather than as a bare artifact, and the
+ * signature covers this wrapper, not the artifact digest directly. Getting that
+ * wrong is silent: ECDSA recovery over the wrong message still yields a valid,
+ * deterministic address, so it presents as "signed by a stranger" rather than
+ * as an encoding fault.
+ *
+ * Every field is length-framed (`u32BE(len) ‖ bytes`) under its own tag. The
+ * earlier form joined them with `|` and no framing, which made
+ * `("a", "b", "c|d")` and `("a", "b|c", "d")` share a signature — unreachable
+ * with fixed op names and 32-byte ids, but true by convention rather than by
+ * construction.
+ *
+ * `payload` is empty for operations fully described by (op, election): the stall
+ * and resume ops encode their direction in the op string itself. The result
+ * carries `resultDigest(...)`, so one signature cannot be re-paired with
+ * different totals.
+ */
+export function requestDigest(
+  op: string,
+  electionId: string,
+  payload: Buffer = Buffer.alloc(0)
+): Buffer {
+  const eid = decodeSized(electionId, 'electionId', 32);
+  const opBytes = Buffer.from(op, 'utf8');
+  const u32BE = (n: number) => {
+    const b = Buffer.alloc(4);
+    b.writeUInt32BE(n, 0);
+    return b;
+  };
+  const packed = Buffer.concat([
+    REQUEST_DST,
+    u32BE(opBytes.length),
+    opBytes,
+    u32BE(eid.length),
+    eid,
+    u32BE(payload.length),
+    payload
   ]);
   return Buffer.from(keccak256(packed).slice(2), 'hex');
 }

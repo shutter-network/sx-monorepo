@@ -4,6 +4,7 @@ import log from '../helpers/log';
 import { containsFlaggedLinks } from '../helpers/moderation';
 import db from '../helpers/mysql';
 import {
+  ballotParamsColumn,
   buildCommitteeSnapshot,
   committeeColumns,
   TeConfigError
@@ -88,7 +89,7 @@ export async function verify(body): Promise<any> {
   // generation cannot possibly finish before voting opens.
   const effectivePrivacy =
     spacePrivacy !== 'any' ? spacePrivacy : proposalPrivacy ?? proposal.privacy;
-  if (effectivePrivacy === 'shutter-elgamal') {
+  if (effectivePrivacy === 'shutter-elgamal' && !proposal.te_mpk) {
     const now = Math.floor(Date.now() / 1e3);
     if (proposal.start - now < MIN_DKG_LEAD_TIME_S) {
       return Promise.reject(
@@ -141,7 +142,7 @@ export async function action(body, ipfs): Promise<void> {
       Object.assign(
         proposal,
         committeeColumns(
-          buildCommitteeSnapshot({
+          await buildCommitteeSnapshot({
             eligibilityKey: await getEligibilityKey(),
             votingStart: existing.start,
             votingEnd: existing.end
@@ -156,6 +157,18 @@ export async function action(body, ipfs): Promise<void> {
       log.warn(`[writer] private voting unavailable on update: ${reason}`);
       return Promise.reject(`private voting unavailable: ${reason}`);
     }
+  }
+
+  // The ballot's shape follows `choices` and `type`, and both are editable here
+  // until voting opens — so the stored copy has to follow them. A stale one is
+  // not inert: `writer/vote.ts` verifies every incoming ballot against it, so a
+  // proposal edited after creation would reject the very ballots the browser
+  // builds from its own (correct) reading of the same fields.
+  if (privacy === 'shutter-elgamal') {
+    Object.assign(
+      proposal,
+      ballotParamsColumn(msg.payload.choices, msg.payload.type)
+    );
   }
 
   const query = 'UPDATE proposals SET ? WHERE id = ? LIMIT 1';

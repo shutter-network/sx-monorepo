@@ -32,7 +32,18 @@ const { stop: stopMetrics } = initMetrics(app);
 refreshSpacesCache();
 
 app.disable('x-powered-by');
-app.use(express.json({ limit: '20mb' }));
+// The raw body is kept because JSON.parse is lossy for integers above 2^53,
+// and one payload carries them: a published tally's totals are sums over
+// weighted ballots. Rounding them would break the signature check on a
+// perfectly valid result — see helpers/bigIntJson.ts.
+app.use(
+  express.json({
+    limit: '20mb',
+    verify: (req: any, _res, buf) => {
+      req.rawBody = buf.toString('utf8');
+    }
+  })
+);
 app.use(express.urlencoded({ limit: '20mb', extended: false }));
 app.use(cors({ maxAge: 86400 }));
 app.set('trust proxy', 1);

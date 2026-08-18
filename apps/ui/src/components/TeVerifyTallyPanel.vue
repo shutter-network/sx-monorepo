@@ -2,16 +2,16 @@
 import { computed, ref } from 'vue';
 import {
   aggregateBallots,
+  AuditPayload,
+  BallotAggregateResult,
+  BallotsPayload,
   buildVerificationBundle,
   fetchAuditPayload,
   fetchBallotsPayload,
   fingerprintHex,
   shortHex,
-  verifyTally,
-  type AuditPayload,
-  type BallotAggregateResult,
-  type BallotsPayload,
-  type VerifyResult
+  VerifyResult,
+  verifyTally
 } from '@/helpers/teVerify';
 import { Proposal } from '@/types';
 
@@ -236,15 +236,37 @@ function downloadBundle() {
     <div
       v-if="status.kind === 'ok'"
       class="text-sm flex items-center gap-1"
-      :class="status.ballots.aggregateMatches ? 'text-skin-success' : 'text-skin-danger'"
+      :class="
+        status.ballots.aggregateMatches
+          ? 'text-skin-success'
+          : 'text-skin-danger'
+      "
     >
       <IH-check-circle
         v-if="status.ballots.aggregateMatches"
         class="size-[16px] shrink-0"
       />
       <IH-x-circle v-else class="size-[16px] shrink-0" />
-      <span>
-        {{ status.ballots.total }} ballots aggregated; the recomputed total
+      <!-- An election nobody voted in is a legitimate outcome, and the committee
+           publishes an empty (identity) aggregate for it. Reporting that as a
+           recomputed "match" is technically true but reads as though something was
+           verified, so say plainly that there was nothing to verify. -->
+      <span
+        v-if="
+          status.ballots.contributing === 0 && status.ballots.aggregateMatches
+        "
+      >
+        No votes were cast; the published aggregate is empty, as expected.
+      </span>
+      <!-- No ballots, yet a non-empty aggregate: the hub is serving a ballot list
+           that cannot produce what was published. This is the case the empty-set
+           comparison exists to catch, so it must not read as reassurance. -->
+      <span v-else-if="status.ballots.contributing === 0">
+        No votes were cast, but the published aggregate is NOT empty.
+      </span>
+      <span v-else>
+        {{ status.ballots.contributing }} ballots aggregated; the recomputed
+        total
         {{ status.ballots.aggregateMatches ? 'matches' : 'does NOT match' }}
         the one the keypers decrypted.
       </span>
@@ -327,7 +349,7 @@ function downloadBundle() {
           </div>
           <div class="text-xs text-skin-text mt-1">
             Only the combined total is decrypted, and only when at least
-            {{ status.audit.te_threshold_t + 1 }} of
+            {{ status.audit.te_threshold_t }} of
             {{ status.audit.te_threshold_n }} keypers cooperate. Each keyper's
             decryption share carries a DLEQ (Chaum–Pedersen) proof that it was
             computed with the same secret key it committed to at setup; the
@@ -340,7 +362,7 @@ function downloadBundle() {
           <div class="text-xs mt-1 flex justify-between">
             <span class="text-skin-text">Threshold</span>
             <span class="font-mono">
-              {{ status.audit.te_threshold_t + 1 }}-of-{{
+              {{ status.audit.te_threshold_t }}-of-{{
                 status.audit.te_threshold_n
               }}
             </span>

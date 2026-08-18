@@ -1,30 +1,40 @@
-# Permanent private voting - full backend stack.
+# Private voting runs on the generalised-el-gamal protocol stack, which lives in
+# its own repository and is started separately — this file provides the Snapshot
+# half: the hub, the sequencer, and the translator that serves Snapshot's state
+# over the protocol's data-layer contract.
 #
-# Brings up everything a Snapshot operator needs to run threshold-ElGamal
-# private voting locally or on a server:
+#   1. this stack:      docker compose up -d
+#   2. the coordinator: docker compose -f deploy/docker-compose.coordinator.yml \
+#                         --env-file deploy/.env.coordinator up -d      (geg repo)
+#   3. each keyper:     docker compose -p keyperN -f deploy/docker-compose.keyper.yml \
+#                         --env-file deploy/.env.keyperN up -d          (geg repo)
 #
-#   mysql       snapshot_hub + snapshot_sequencer databases (schema auto-loaded)
-#   hub         GraphQL + REST API, collects DKG results            :3000
-#   sequencer   vote ingestion + tally worker                       :3001
-#   keyper1..3  threshold committee (Feldman VSS DKG + decryption)   :5001-5003
-#   auto-dkg    watches for new private proposals and runs DKG
+# Who points where:
+#   coordinator → GEG_DATA_LAYER_URL → te-data-layer root   reads + writes; sole writer
+#   keyper      → GEG_API_URL        → te-data-layer /port  reads only; appends /port
+#   keyper      → COORDINATOR_URL    → coordinator :8400    keyper writes relay here
+#   sequencer   → TE_KEYPERS         → each keyper's URL, frozen into the proposal
 #
-# The UI is run separately on the host (apps/ui, `bun run dev`) and points at
-# the hub on :3000 and sequencer on :3001.
+# The keyper URLs in TE_KEYPERS are dialled by the coordinator, so they must be
+# addresses reachable from *its* host — public URLs in a real deployment, and
+# host.docker.internal:810N when everything runs on one machine.
+#
+# Required .env on this machine:
+#   SEQ_RELAYER_PK          Sequencer relayer private key
+#   SEQ_AUTH_SECRET         Sequencer auth secret
+#
+# Required for private voting (all four unset = public voting only, and every
+# private path stays dormant):
+#   TE_ELIGIBILITY_PRIVATE_KEY   the hub's credential-issuing key
+#   TE_KEYPERS                   one URL per committee member (addresses are
+#                                read from each keyper's /status, not configured)
+#   TE_RESULT_PUBLISHER_ADDRESS  the coordinator's address
+#   TE_ADMIN_ADDRESS             operator wallet that can clear a stalled tally
 #
 # Quick start:
-#   cp .env.example .env        # then generate KEYPER_PRIVATE_KEY_1/2/3 and SEQ_RELAYER_PK
-#   mkdir -p mysql-data keyper-state/keyper1 keyper-state/keyper2 keyper-state/keyper3
-#   docker compose up --build
-#
-# State directories on the host (bind-mounted, gitignored):
-#   mysql-data/        MySQL data dir. The MySQL image entrypoint starts as root, chowns the
-#                      directory to the mysql user (UID 999) internally, then re-execs as mysql —
-#                      so no manual chown is needed on Linux or Mac.
-#   keyper-state/      Fernet-encrypted DKG secrets per keyper (see services/keypers/README.md).
-#
-# Then create a permanent-private proposal from the UI; auto-dkg generates its
-# threshold key within a few seconds and the proposal becomes votable.
+#   cp .env.example .env
+#   mkdir -p mysql-data
+#   docker compose -f docker-compose.yml up -d
 
 services:
   mysql:
@@ -59,12 +69,20 @@ services:
       DB_SSL: "false"
       HUB_DATABASE_URL: mysql://root@mysql:3306/snapshot_hub
       SEQ_DATABASE_URL: mysql://root@mysql:3306/snapshot_hub
-      SEQUENCER_URL: http://sequencer:3001
+      # The hub only ever 307-redirects to this, and the party following the
+      # redirect is the *browser* — /api/scores/:id is what the UI calls to finalise
+      # a closed proposal's scores. So it must be an address the browser can
+      # resolve: `http://sequencer:3001` is container-internal, and a browser
+      # following it fails DNS, which the UI swallows and the proposal sits on
+      # "Finalizing results" forever. Override for a real deployment.
+      SEQUENCER_URL: "${SEQUENCER_PUBLIC_URL:-http://localhost:${SEQ_PORT:-3001}}"
       STAMP_URL: https://stamp.fyi
       SCORE_API_URL: https://score.snapshot.org
       SIDEKICK_URL: https://sh5.co
       KEYCARD_URL: ""
       RATE_LIMIT_DATABASE_URL: ""
+      TE_ELIGIBILITY_PRIVATE_KEY: "${TE_ELIGIBILITY_PRIVATE_KEY:-}"
+      TE_ADMIN_ADDRESS: "${TE_ADMIN_ADDRESS:-}"
     ports:
       - "${HUB_PORT:-3000}:3000"
     depends_on:
@@ -98,10 +116,27 @@ services:
       SCHNAPS_API_URL: https://schnaps.snapshot.box
       BROVIDER_URL: https://rpc.snapshot.org
       OVERLORD_URL: https://overlord.snapshot.box
-      # DEV ONLY — publicly-known secret; set SEQ_AUTH_SECRET in .env for production.
-      AUTH_SECRET: ${SEQ_AUTH_SECRET:-1dfd84a695705665668c260222ded178d1f1d62d251d7bee8148428dac6d0487}
-      WALLETCONNECT_PROJECT_ID: ${WALLETCONNECT_PROJECT_ID:-e6454bd61aba40b786e866a69bd4c5c6}
+      AUTH_SECRET: ${SEQ_AUTH_SECRET}
+      WALLETCONNECT_PROJECT_ID: ${WALLETCONNECT_PROJECT_ID}
       LAST_CB: "1"
+      # Read at proposal creation to freeze the hub's eligibility public key, keeping
+      # the hub's private half the single source of truth.
+      HUB_URL: http://hub:3000
+      # The committee, frozen onto each private proposal as it is created. Addresses
+      # are configured explicitly and never discovered from a keyper's own /status —
+      # discovery let a network attacker substitute an address mid-ceremony.
+      TE_KEYPERS: "${TE_KEYPERS:-}"
+      # The quorum: t of n keypers act together. Must be a majority (2t > n),
+      # so a committee of 3 needs 2.
+      TE_THRESHOLD_T: "${TE_THRESHOLD_T:-2}"
+      # Denominator for weighted vote splits: 100 means percentages.
+      TE_WEIGHTED_BUDGET: "${TE_WEIGHTED_BUDGET:-100}"
+      TE_ADMIN_ADDRESS: "${TE_ADMIN_ADDRESS:-}"
+      # The coordinator's address: it signs the published result, and the hub accepts
+      # a result from no other key.
+      TE_RESULT_PUBLISHER_ADDRESS: "${TE_RESULT_PUBLISHER_ADDRESS:-}"
+      # A private proposal must open at least this far ahead, or the key ceremony
+      # cannot finish and the proposal is terminally failed when voting opens.
       MIN_DKG_LEAD_TIME_S: "${MIN_DKG_LEAD_TIME_S:-180}"
     ports:
       - "${SEQ_PORT:-3001}:3001"
@@ -112,111 +147,26 @@ services:
         condition: service_started
     restart: unless-stopped
 
-  keyper1:
-    build:
-      context: ./services/keypers
-    image: sx-keypers:local
-    command: ["python", "/app/src/keyper.py", "--port", "5001", "--host", "0.0.0.0"]
+  te-data-layer:
+    image: sx-backend:local
+    command: ["bun", "run", "apps/te-data-layer/src/index.ts"]
     environment:
-      KEYPER_HUB_URL: http://hub:3000
-      KEYPER_PRIVATE_KEY: ${KEYPER_PRIVATE_KEY_1:-}
-      KEYPER_DKG_RETENTION_TIME: "${KEYPER_DKG_RETENTION_TIME:-172800}"
-      KEYPER_DKG_PRUNE_INTERVAL_S: "${KEYPER_DKG_PRUNE_INTERVAL_S:-3600}"
-      # Multi-operator auth. Empty = single-operator dev mode (no auth).
-      # Bearer tokens are no longer set here directly -- auto-dkg mints and
-      # pushes them at runtime via POST /auth/bootstrap. COORDINATOR_ADDRESS
-      # must be set together with auto-dkg's COORDINATOR_SIGNING_KEY (set
-      # both or neither -- see keyper-token-bootstrap.md, "Identities").
-      COORDINATOR_ADDRESS: "${COORDINATOR_ADDRESS:-}"
-    volumes:
-      - ./keyper-state/keyper1:/keyper-state
+      PORT: "3002"
+      HUB_URL: http://hub:3000
+    ports:
+      # Published because the coordinator and the keypers are separate stacks, on
+      # separate hosts in a real deployment and separate compose projects locally.
+      - "${TE_DATA_LAYER_PORT:-3002}:3002"
     depends_on:
       hub:
         condition: service_started
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5001/health')"]
+      test:
+        - CMD
+        - bun
+        - -e
+        - "const r = await fetch('http://localhost:3002/health'); process.exit(r.ok ? 0 : 1)"
       interval: 5s
       timeout: 5s
       retries: 20
     restart: unless-stopped
-
-  keyper2:
-    image: sx-keypers:local
-    command: ["python", "/app/src/keyper.py", "--port", "5002", "--host", "0.0.0.0"]
-    environment:
-      KEYPER_HUB_URL: http://hub:3000
-      KEYPER_PRIVATE_KEY: ${KEYPER_PRIVATE_KEY_2:-}
-      KEYPER_DKG_RETENTION_TIME: "${KEYPER_DKG_RETENTION_TIME:-172800}"
-      KEYPER_DKG_PRUNE_INTERVAL_S: "${KEYPER_DKG_PRUNE_INTERVAL_S:-3600}"
-      COORDINATOR_ADDRESS: "${COORDINATOR_ADDRESS:-}"
-    volumes:
-      - ./keyper-state/keyper2:/keyper-state
-    depends_on:
-      hub:
-        condition: service_started
-      keyper1:
-        condition: service_started
-    healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5002/health')"]
-      interval: 5s
-      timeout: 5s
-      retries: 20
-    restart: unless-stopped
-
-  keyper3:
-    image: sx-keypers:local
-    command: ["python", "/app/src/keyper.py", "--port", "5003", "--host", "0.0.0.0"]
-    environment:
-      KEYPER_HUB_URL: http://hub:3000
-      KEYPER_PRIVATE_KEY: ${KEYPER_PRIVATE_KEY_3:-}
-      KEYPER_DKG_RETENTION_TIME: "${KEYPER_DKG_RETENTION_TIME:-172800}"
-      KEYPER_DKG_PRUNE_INTERVAL_S: "${KEYPER_DKG_PRUNE_INTERVAL_S:-3600}"
-      COORDINATOR_ADDRESS: "${COORDINATOR_ADDRESS:-}"
-    volumes:
-      - ./keyper-state/keyper3:/keyper-state
-    depends_on:
-      hub:
-        condition: service_started
-      keyper1:
-        condition: service_started
-    healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5003/health')"]
-      interval: 5s
-      timeout: 5s
-      retries: 20
-    restart: unless-stopped
-
-  auto-dkg:
-    image: sx-keypers:local
-    command: ["python", "/app/src/auto_dkg.py"]
-    environment:
-      KEYPER_URLS: http://keyper1:5001,http://keyper2:5002,http://keyper3:5003
-      # Coordinator's own signing key -- mints and pushes bearer tokens to
-      # every keyper once, at startup, via /auth/bootstrap (no ongoing
-      # rotation). Empty = single-operator dev mode (no bootstrap runs,
-      # keypers enforce no auth). Must be set together with
-      # COORDINATOR_ADDRESS on every keyper, or a keyper configured with
-      # COORDINATOR_ADDRESS but never bootstrapped is locked out
-      # permanently -- see keyper-token-bootstrap.md, "Identities".
-      COORDINATOR_SIGNING_KEY: "${COORDINATOR_SIGNING_KEY:-}"
-      TE_THRESHOLD_T: "1"
-      TE_WEIGHTED_BUDGET: "${TE_WEIGHTED_BUDGET:-100}"
-      POLL_INTERVAL_S: "2"
-      HUB_DB_HOST: mysql
-      HUB_DB_PORT: "3306"
-      HUB_DB_USER: root
-      HUB_DB_PASSWORD: ""
-      HUB_DB_NAME: snapshot_hub
-    depends_on:
-      mysql:
-        condition: service_healthy
-      hub:
-        condition: service_started
-      keyper1:
-        condition: service_healthy
-      keyper2:
-        condition: service_healthy
-      keyper3:
-        condition: service_healthy
-    restart: unless-stopped
-
