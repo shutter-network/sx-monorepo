@@ -27,7 +27,8 @@ import {
   G1Point,
   initCurves,
   schnorrKeygen,
-  schnorrSign
+  schnorrSign,
+  schnorrVerify
 } from '@shutter-network/urban-verified-crypto';
 
 export class GegAttestationError extends Error {}
@@ -223,4 +224,69 @@ export async function mintAttestation(args: MintArgs): Promise<string> {
   );
   const signature = encodeSchnorr(schnorrSign(sk, vk, message));
   return `0x${Buffer.from(signature).toString('hex')}`;
+}
+
+/**
+ * Verify a credential this process just minted, before the vote is stored.
+ *
+ * Not paranoia about our own signature — the same rule as the dust floor and the
+ * voting-window boundary: **do not accept what the committee will drop.** If
+ * minting is wrong (bad framing, wrong key, an encoding slip) the ballot is
+ * otherwise valid, so it would be accepted, stored, and shown to the voter as
+ * cast, then excluded at tally as `INVALID_ATTESTATION`. Accepted at one end and
+ * discarded at the other, with the voter believing they voted. Checking here
+ * turns that into an immediate rejection.
+ *
+ * Both halves are checked because both are what `verify_attestation` checks on
+ * the committee side: the signature, and `1 <= weight <= maxWeight`. A signature
+ * that verifies at an out-of-range weight is still an `INVALID_ATTESTATION`
+ * exclusion.
+ *
+ * This exists here rather than coming from the SDK because the SDK's released
+ * surface has no attestation verifier — see the note on `attestationMessage`.
+ * It shares that function's framing, so the reference vectors that pin the
+ * framing pin this too.
+ */
+export async function verifyAttestation(
+  args: MintArgs & { signature: string; maxWeight: bigint }
+): Promise<boolean> {
+  if (args.weight < 1n || args.weight > args.maxWeight) return false;
+  if (args.nonce < 1n) return false;
+
+  const { vk: issuerVk } = await getIssuer();
+  let message: Uint8Array;
+  let sig: Uint8Array;
+  try {
+    message = attestationMessage(
+      bytes(args.electionId, 'electionId', 32),
+      bytes(args.pseudonym, 'pseudonym', 32),
+      bytes(args.vk, 'vk', 48),
+      args.weight,
+      args.nonce
+    );
+    sig = bytes(args.signature, 'signature', 80);
+  } catch {
+    return false;
+  }
+
+  // `decodeSchnorr` is the inverse of the SDK's `encodeSchnorr`, but the released
+  // package exports only the forward direction, so the 80-byte wire form is
+  // unpacked here: `R (48, compressed G1) ‖ s (32, big-endian)`. Same layout as
+  // the protocol's `schnorr.encode`/`decode`, and the reference vectors cover a
+  // round trip through it.
+  let R: G1Point;
+  let sScalar: bigint;
+  try {
+    R = G1Point.fromBytes(sig.subarray(0, 48));
+    sScalar = BigInt(`0x${Buffer.from(sig.subarray(48)).toString('hex')}`);
+  } catch {
+    return false;
+  }
+  try {
+    return schnorrVerify(issuerVk, message, { R, s: sScalar });
+  } catch {
+    return false;
+  } finally {
+    R.destroyWasm();
+  }
 }

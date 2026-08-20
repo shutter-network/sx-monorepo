@@ -136,9 +136,10 @@ export async function verifyTeBallot(
     return { ok: false, reason: `bad_envelope: ${err?.message || err}` };
   }
 
-  // The WR slot is a constant ``() => true`` because this deployment does not
-  // use the legacy credential it verifies — the field is required to be empty
-  // above.
+  // The WR slot is a constant ``() => true`` because the field it verifies is
+  // required to be empty above. It can't carry the structured attestation because
+  // the SDK's field is opaque bytes shaped for the legacy weightless scheme, no
+  // room for weight or nonce. This is the end state, not a stub.
   try {
     return verifyBallot(inputs, proposal.te_config, mpk, () => true);
   } finally {

@@ -127,7 +127,7 @@ const privateVotingTooltip = computed(
     `${TE_MAX_WEIGHT_UNWEIGHTED.toLocaleString()} with basic voting, ` +
     `${TE_MAX_WEIGHT.toLocaleString()} with weighted voting. ` +
     'Anyone holding more is counted at that limit, and holdings below 0.5 are ' +
-    'not counted at all.'
+    'rejected upfront.'
 );
 
 const privacy = computed({

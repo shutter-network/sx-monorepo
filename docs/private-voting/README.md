@@ -57,7 +57,7 @@ flowchart LR
    terminally dead rather than merely late.
 2. **Voting.** The browser encrypts under `te_mpk`, attaches a zero-knowledge proof that the ballot
    is well-formed (per-candidate range plus an exact budget), signs it with the voter's wallet
-   (EIP-712), and carries an eligibility credential minted by the hub binding that ballot's voting
+   (EIP-712), and carries an eligibility credential minted by the sequencer at ingest, binding that ballot's voting
    power. The sequencer verifies every ballot at ingest.
 3. **Aggregation.** After close, **every keyper independently re-derives** the voting-power-weighted
    sum from the same ordered ballots and submits it signed. The artifact becomes canonical only when

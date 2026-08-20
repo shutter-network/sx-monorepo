@@ -385,6 +385,27 @@ export async function buildCommitteeSnapshot(args: {
  * `te_keyper_addresses[keyper_index - 1]`. Never edit those to fix a
  * disagreement; regenerate them from the snapshot.
  */
+/**
+ * The largest per-voter weight a budget allows: `floor(1e6 / budget)`.
+ *
+ * **A second copy of `deriveMaxWeight` in `apps/hub/src/helpers/gegConfig.ts`.**
+ * The hub still needs it to advertise `maxWeight` in the election config the
+ * keypers verify against; the sequencer needs it to clamp before minting. If the
+ * two ever disagree, the sequencer attests a weight the committee rejects and
+ * every over-cap ballot is excluded as `INVALID_ATTESTATION` — so the parity is
+ * asserted in `test/unit/helpers/teCommittee.test.ts` rather than assumed.
+ *
+ * The bound itself is the protocol's: `budget × maxWeight <= 1_000_000`, which
+ * exists because the tally is recovered by a discrete-log search over a range
+ * proportional to `budget × Σ weights`. Taking the largest value the protocol
+ * permits is the least restrictive reading available.
+ */
+export const MAX_BUDGET_TIMES_WEIGHT = 1_000_000;
+
+export function deriveMaxWeight(budget: number): number {
+  return Math.floor(MAX_BUDGET_TIMES_WEIGHT / budget);
+}
+
 export function ballotParamsColumn(
   choices: string[],
   type: string | null | undefined,

@@ -20,7 +20,7 @@
 
 import { Wallet } from '@ethersproject/wallet';
 import fetch from 'node-fetch';
-import { eligibilityPublicKey } from '../../src/helpers/gegAttestation';
+import { eligibilityPublicKey } from '../../src/helpers/eligibilityKey';
 import { requestDigest } from '../../src/helpers/gegDigests';
 import db from '../../src/helpers/mysql';
 
@@ -80,8 +80,10 @@ describe('POST /api/proposal/:id/te_tally_stalled', () => {
       created: 1,
       updated: 1
     });
-    // The frozen key has to be the one the hub actually holds: the election read
-    // asserts they match and 503s otherwise, which would look like a stall bug.
+    // The frozen key has to be the one in use: the election read asserts they
+    // match and 503s otherwise, which would look like a stall bug. The hub no
+    // longer holds the key — it fetches the public half from the sequencer — so
+    // this resolves through that fetch.
     const eligibilityKey = await eligibilityPublicKey();
     await db.queryAsync('DELETE FROM proposals WHERE id = ?', [ID]);
     await db.queryAsync('INSERT INTO proposals SET ?', {

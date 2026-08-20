@@ -1,8 +1,11 @@
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import fetch from 'node-fetch';
 import {
   buildCommitteeSnapshot,
   clearCommitteeCache,
   committeeColumns,
+  deriveMaxWeight,
   parseKeypers,
   resolveCommittee,
   TeConfigError,
@@ -381,5 +384,52 @@ describe('committeeColumns', () => {
       expect(addresses[i]).toBe(k.address);
       expect(urls[i]).toBe(k.url);
     });
+  });
+});
+
+describe('deriveMaxWeight', () => {
+  test.each([
+    [1, 1_000_000],
+    [10, 100_000],
+    [100, 10_000],
+    [1000, 1_000]
+  ])('budget %p allows maxWeight %p', (budget, expected) => {
+    expect(deriveMaxWeight(budget as number)).toBe(expected);
+  });
+
+  // The protocol's bound is `budget x maxWeight <= 1e6`; the derivation must
+  // never produce a pair that violates it, including where the division is not
+  // exact and the floor is what keeps it inside.
+  test('never exceeds the protocol bound, across the budget range', () => {
+    for (let budget = 1; budget <= 2000; budget++) {
+      const maxWeight = deriveMaxWeight(budget);
+      expect(maxWeight).toBeGreaterThanOrEqual(1);
+      expect(budget * maxWeight).toBeLessThanOrEqual(1_000_000);
+    }
+  });
+
+  // The hub keeps its own copy, because it advertises maxWeight in the election
+  // config the committee verifies against while the sequencer clamps with it
+  // before minting. A drift means the sequencer attests weights the committee
+  // rejects as INVALID_ATTESTATION.
+  //
+  // Both sides assert against one shared table rather than importing each other:
+  // a cross-app TypeScript import escapes each package's rootDir, and comparing
+  // two implementations to each other would pass if both drifted together.
+  // `apps/hub/test/unit/geg-config.test.ts` asserts the same file.
+  test('matches the shared parity table', () => {
+    const table = JSON.parse(
+      readFileSync(
+        join(
+          __dirname,
+          '../../../../../packages/geg-parity/vectors/max-weight.json'
+        ),
+        'utf8'
+      )
+    );
+    expect(table.cases.length).toBeGreaterThan(0);
+    for (const c of table.cases) {
+      expect(deriveMaxWeight(c.budget)).toBe(c.maxWeight);
+    }
   });
 });

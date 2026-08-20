@@ -1,0 +1,53 @@
+{
+  "description": "maxWeight = floor(1e6 / budget). The protocol bound is budget x maxWeight <= 1e6. Two implementations derive this — apps/hub/src/helpers/gegConfig.ts advertises it in the election config the committee verifies against, apps/sequencer/src/helpers/teCommittee.ts clamps with it before minting. A drift means the sequencer attests weights the committee rejects as INVALID_ATTESTATION, so both assert against this table rather than against each other.",
+  "cases": [
+    {
+      "budget": 1,
+      "maxWeight": 1000000
+    },
+    {
+      "budget": 2,
+      "maxWeight": 500000
+    },
+    {
+      "budget": 3,
+      "maxWeight": 333333
+    },
+    {
+      "budget": 7,
+      "maxWeight": 142857
+    },
+    {
+      "budget": 10,
+      "maxWeight": 100000
+    },
+    {
+      "budget": 25,
+      "maxWeight": 40000
+    },
+    {
+      "budget": 100,
+      "maxWeight": 10000
+    },
+    {
+      "budget": 333,
+      "maxWeight": 3003
+    },
+    {
+      "budget": 1000,
+      "maxWeight": 1000
+    },
+    {
+      "budget": 1999,
+      "maxWeight": 500
+    },
+    {
+      "budget": 2000,
+      "maxWeight": 500
+    },
+    {
+      "budget": 65534,
+      "maxWeight": 15
+    }
+  ]
+}

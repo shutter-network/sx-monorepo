@@ -172,6 +172,20 @@ CREATE TABLE votes (
   vp_state VARCHAR(24) NOT NULL,
   vp_value DECIMAL(13,3) NOT NULL DEFAULT '0.000',
   cb INT(11) NOT NULL,
+  -- Private voting (privacy='shutter-elgamal') only; NULL on every other vote.
+  --
+  -- The eligibility credential the keypers verify, minted by the sequencer at
+  -- ingest over (electionId, pseudonym, vk, weight, nonce). Columns rather than
+  -- a side table because it is strictly 1:1 with the vote and shares its
+  -- lifetime: written in the same statement, overwritten by the same re-vote
+  -- UPDATE, and removed with the row. A vote that exists without its credential
+  -- is a ballot the hub's feed cannot serve, which stalls the entire tally.
+  --
+  -- te_weight is the *attested* weight, min(round(vp), maxWeight) — so a clamped
+  -- ballot is recorded as clamped rather than inferred by recomputation.
+  te_weight BIGINT DEFAULT NULL,
+  te_nonce BIGINT DEFAULT NULL,
+  te_attestation VARCHAR(200) DEFAULT NULL,
   PRIMARY KEY (voter, space, proposal),
   INDEX id (id),
   INDEX ipfs (ipfs),
@@ -266,6 +280,23 @@ CREATE TABLE te_aggregate_submissions (
   PRIMARY KEY (proposal_id, keyper_index),
   INDEX idx_te_agg_match (proposal_id, digest)
 );
+
+-- The eligibility public key currently in use, published by the sequencer.
+--
+-- The sequencer holds the private half and mints one credential per private
+-- ballot; the hub needs the public half for one job: refusing to serve a
+-- proposal whose frozen key no longer matches the key in use, which is what
+-- stops a rotated key producing a legitimate-looking all-zeros tally.
+--
+-- Written on every sequencer boot. Rotating the key means changing an
+-- environment variable, which means a restart, so this row cannot lag reality.
+-- One row, enforced by a fixed primary key.
+CREATE TABLE te_eligibility_key (
+  id TINYINT NOT NULL PRIMARY KEY,
+  public_key VARCHAR(100) NOT NULL,
+  updated BIGINT NOT NULL
+);
+
 
 CREATE TABLE follows (
   id VARCHAR(66) NOT NULL,

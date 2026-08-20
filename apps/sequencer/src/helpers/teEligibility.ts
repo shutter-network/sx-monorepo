@@ -1,79 +1,79 @@
 /**
- * Fetch the eligibility public key from the hub, for freezing onto a proposal.
+ * The eligibility public key, for freezing onto a proposal.
  *
- * The hub holds the eligibility *private* key and signs one credential per
- * ballot, binding that ballot's voting-power weight. The keypers verify those
- * credentials against the public key frozen in the proposal's config — so if the
- * frozen key and the hub's actual key ever disagree, every credential fails to
+ * The sequencer holds the eligibility *private* key and mints one credential per
+ * ballot at ingest, binding that ballot's voting-power weight. The keypers verify
+ * those credentials against the public key frozen in the proposal's config — so
+ * if the frozen key and the signing key ever disagree, every credential fails to
  * verify, every ballot is excluded from the tally, and the result is all zeros
  * with nothing in the logs to explain it.
  *
- * The defence is to have exactly one source of truth. Rather than configuring the
- * public key separately here (two copies, free to drift), the sequencer asks the
- * hub for it at creation and freezes whatever it answers. The hub additionally
- * asserts the frozen key still matches its own on every read, which catches a key
- * rotated after the fact.
+ * The defence is exactly one source of truth. That used to mean fetching the key
+ * from the hub, which held it; now the signer is here, so the key is derived
+ * locally from `TE_ELIGIBILITY_PRIVATE_KEY` and the direction reverses — the hub
+ * fetches it from us, for its rotation guard. There is still one private key and
+ * one authority for the public half.
  *
- * Fetch failures reject the proposal. That is deliberate: a private proposal
- * created with no eligibility key is one whose tally can never complete, and
- * refusing it up front is strictly kinder than discovering that after voting.
- *
- * The key is a deployment constant, so it is cached for the process lifetime —
- * one request per sequencer, not one per proposal.
+ * A missing or malformed key rejects the proposal. That is deliberate: a private
+ * proposal created with no eligibility key is one whose tally can never complete,
+ * and refusing it up front is strictly kinder than discovering it after voting.
  */
 
-import fetch from 'node-fetch';
+import { eligibilityPublicKey, GegAttestationError } from './gegAttestation';
 import log from './log';
+import db from './mysql';
 
 export class TeEligibilityError extends Error {}
 
-const TIMEOUT_MS = 5000;
-
-let cached: string | null = null;
-
-function hubUrl(): string {
-  const url = process.env.HUB_URL;
-  if (!url?.trim()) {
-    throw new TeEligibilityError(
-      'HUB_URL is not configured; cannot fetch the eligibility key'
-    );
-  }
-  return url.trim().replace(/\/+$/, '');
-}
-
-/** Test seam: drop the cached key so a test can vary the hub response. */
-export function resetEligibilityKeyCache(): void {
-  cached = null;
-}
+/**
+ * Test seam. The issuer itself is memoised in `gegAttestation`; this re-exports
+ * its reset so callers that used to clear an HTTP cache keep working.
+ */
+export { resetIssuer as resetEligibilityKeyCache } from './gegAttestation';
 
 export async function getEligibilityKey(): Promise<string> {
-  if (cached) return cached;
-
-  const url = `${hubUrl()}/api/te_eligibility_key`;
-  let body: any;
   try {
-    const res = await fetch(url, {
-      timeout: TIMEOUT_MS,
-      headers: { accept: 'application/json' }
-    });
-    if (!res.ok) {
-      throw new TeEligibilityError(`hub responded ${res.status}`);
-    }
-    body = await res.json();
+    return await eligibilityPublicKey();
   } catch (err: any) {
-    throw new TeEligibilityError(
-      `could not fetch the eligibility key from ${url}: ${err?.message || err}`
-    );
+    if (err instanceof GegAttestationError) {
+      throw new TeEligibilityError(err.message);
+    }
+    throw err;
+  }
+}
+
+/**
+ * Publish the public half so the hub can run its rotation guard.
+ *
+ * The hub needs to know the key currently in use, to refuse serving a proposal
+ * whose frozen key no longer matches it. Both services already share this database, so
+ * the key goes through it.
+ *
+ * Called once at boot, and that is sufficient: the key comes from an environment
+ * variable read at startup, so changing it requires a restart, so this row
+ * cannot describe a key the process is no longer signing with.
+ *
+ * A missing key is not fatal here. Public voting must keep working; the private
+ * path fails loudly on its own, when a vote is cast or a proposal created.
+ */
+export async function publishEligibilityKey(): Promise<void> {
+  let publicKey: string;
+  try {
+    publicKey = await eligibilityPublicKey();
+  } catch (err: any) {
+    if (err instanceof GegAttestationError) {
+      log.warn(
+        `[te] eligibility key not published: ${err.message}. Private voting is unavailable until it is configured.`
+      );
+      return;
+    }
+    throw err;
   }
 
-  const key = body?.eligibilityKey;
-  if (typeof key !== 'string' || !/^0x[0-9a-fA-F]{96}$/.test(key)) {
-    throw new TeEligibilityError(
-      'hub returned a malformed eligibility key (expected 0x + 96 hex chars)'
-    );
-  }
-
-  cached = key.toLowerCase();
-  log.info(`[te] eligibility key ${cached.slice(0, 12)}… loaded from hub`);
-  return cached;
+  await db.queryAsync(
+    `INSERT INTO te_eligibility_key (id, public_key, updated) VALUES (1, ?, ?)
+       ON DUPLICATE KEY UPDATE public_key = VALUES(public_key), updated = VALUES(updated)`,
+    [publicKey, Math.floor(Date.now() / 1e3)]
+  );
+  log.info(`[te] published eligibility key ${publicKey.slice(0, 12)}…`);
 }

@@ -137,6 +137,9 @@ CREATE TABLE votes (
   vp_state VARCHAR(24) NOT NULL,
   cb INT(11) NOT NULL,
   vp_value DECIMAL(13,3) NOT NULL DEFAULT 0.000,
+  te_weight BIGINT DEFAULT NULL,
+  te_nonce BIGINT DEFAULT NULL,
+  te_attestation VARCHAR(200) DEFAULT NULL,
   PRIMARY KEY (voter, space, proposal),
   INDEX id (id),
   INDEX ipfs (ipfs),
@@ -338,6 +341,13 @@ CREATE TABLE te_aggregate_submissions (
   PRIMARY KEY (proposal_id, keyper_index),
   INDEX idx_te_agg_match (proposal_id, digest)
 );
+
+CREATE TABLE te_eligibility_key (
+  id TINYINT NOT NULL PRIMARY KEY,
+  public_key VARCHAR(100) NOT NULL,
+  updated BIGINT NOT NULL
+);
+
 
 CREATE TABLE te_results (
   proposal_id VARCHAR(66) NOT NULL PRIMARY KEY,

@@ -13,7 +13,6 @@ import {
   VerifyResult,
   verifyTally
 } from '@/helpers/teVerify';
-import { shortenAddress } from '@/helpers/utils';
 import { Proposal } from '@/types';
 
 const props = defineProps<{
@@ -113,6 +112,22 @@ const keyperRows = computed(() => {
       address: addresses[idx] || addresses[idx - 1] || null,
       shares
     }));
+});
+
+const clampSummary = computed(() => {
+  if (status.value.kind !== 'ok') return null;
+  const { clamped } = status.value.ballots;
+  if (!clamped.length) return null;
+
+  const held = clamped.reduce((acc, c) => acc + c.vp, 0);
+  const counted = clamped.reduce((acc, c) => acc + c.countedAs, 0);
+  return {
+    count: clamped.length,
+    held,
+    counted,
+    uncounted: held - counted,
+    cap: status.value.ballotsPayload.maxWeight ?? null
+  };
 });
 
 const numCandidates = computed(() =>
@@ -272,29 +287,37 @@ function downloadBundle() {
         the one the keypers decrypted.
       </span>
     </div>
-    <!-- The clamp is invisible in the numbers themselves: the tally is internally
-         consistent, so recomputing it reproduces the capped figure and reveals
-         nothing is missing. Anyone comparing these scores against the token
-         distribution has to be told that some voting power was not counted. -->
     <div
-      v-if="status.kind === 'ok' && status.ballots.clamped.length"
+      v-if="clampSummary"
       class="text-sm text-skin-text border-l-2 border-skin-border pl-2"
     >
       <div>
-        {{ status.ballots.clamped.length }}
-        {{ status.ballots.clamped.length === 1 ? 'ballot was' : 'ballots were' }}
-        counted at the per-voter cap, so the totals below understate their voting
-        power:
+        {{ clampSummary.count }}
+        {{ clampSummary.count === 1 ? 'ballot was' : 'ballots were' }}
+        counted at the per-voter cap<template v-if="clampSummary.cap">
+          of
+          <span
+            class="text-skin-link"
+            v-text="clampSummary.cap.toLocaleString()" /></template
+        >.
+        {{ clampSummary.count === 1 ? 'It held' : 'Together they held' }}
+        <span
+          class="text-skin-link"
+          v-text="clampSummary.held.toLocaleString()"
+        />, counted as
+        <span
+          class="text-skin-link"
+          v-text="clampSummary.counted.toLocaleString()"
+        />
+        , so
+        <span
+          class="text-skin-link"
+          v-text="clampSummary.uncounted.toLocaleString()"
+        />
+        of voting power is not reflected in the totals below.
       </div>
-      <ul class="list-disc pl-5">
-        <li v-for="c in status.ballots.clamped" :key="c.voter">
-          {{ shortenAddress(c.voter) }} held
-          {{ c.vp.toLocaleString() }}, counted as
-          {{ c.countedAs.toLocaleString() }}
-        </li>
-      </ul>
       <div>
-        The cap is 1,000,000 divided by the budget — a limit of the tally's
+        The cap is 1,000,000 divided by the budget, a limit of the tally's
         recovery step, not a policy choice.
       </div>
     </div>

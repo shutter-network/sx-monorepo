@@ -25,7 +25,7 @@
 #
 # Required for private voting (all four unset = public voting only, and every
 # private path stays dormant):
-#   TE_ELIGIBILITY_PRIVATE_KEY   the hub's credential-issuing key
+#   TE_ELIGIBILITY_PRIVATE_KEY   the sequencer's credential-issuing key
 #   TE_KEYPERS                   one URL per committee member (addresses are
 #                                read from each keyper's /status, not configured)
 #   TE_RESULT_PUBLISHER_ADDRESS  the coordinator's address
@@ -80,7 +80,6 @@ services:
       SIDEKICK_URL: https://sh5.co
       KEYCARD_URL: ""
       RATE_LIMIT_DATABASE_URL: ""
-      TE_ELIGIBILITY_PRIVATE_KEY: "${TE_ELIGIBILITY_PRIVATE_KEY:-}"
     ports:
       - "${HUB_PORT:-3000}:3000"
     depends_on:
@@ -132,6 +131,7 @@ services:
       # The coordinator's address: it signs the published result, and the hub accepts
       # a result from no other key.
       TE_RESULT_PUBLISHER_ADDRESS: "${TE_RESULT_PUBLISHER_ADDRESS:-}"
+      TE_ELIGIBILITY_PRIVATE_KEY: "${TE_ELIGIBILITY_PRIVATE_KEY:-}"
       # A private proposal must open at least this far ahead, or the key ceremony
       # cannot finish and the proposal is terminally failed when voting opens.
       MIN_DKG_LEAD_TIME_S: "${MIN_DKG_LEAD_TIME_S:-180}"

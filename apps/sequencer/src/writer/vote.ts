@@ -1,6 +1,11 @@
 import snapshot from '@snapshot-labs/snapshot.js';
 import { CB } from '../constants';
 import { getProposal } from '../helpers/actions';
+import {
+  GegAttestationError,
+  mintAttestation,
+  verifyAttestation
+} from '../helpers/gegAttestation';
 import log from '../helpers/log';
 import db from '../helpers/mysql';
 import {
@@ -8,6 +13,7 @@ import {
   isWithinGegVotingWindow,
   verifyTeBallot
 } from '../helpers/te';
+import { deriveMaxWeight } from '../helpers/teCommittee';
 import { captureError, hasStrategyOverride, jsonParse } from '../helpers/utils';
 import { updateProposalAndVotes } from '../scores';
 
@@ -161,7 +167,95 @@ export async function verify(body): Promise<any> {
 
   // if (await isLimitReached(msg.space)) return Promise.reject('too much activity, please contact an admin');
 
-  return { proposal, vp };
+  // Mint the eligibility credential here, not on the hub's read path.
+  //
+  // The credential binds this ballot's weight for the committee, and the weight
+  // comes from `vp` — which the sequencer computed a few lines up. Signing it
+  // here puts the signature with the component that made the claim, and takes
+  // ~2ms of BLS off an unauthenticated public GET (finding M2).
+  //
+  // Safe to fix the weight now because a private proposal cannot be edited once
+  // voting opens (`update-proposal` rejects `proposal.start < now`), so `budget`
+  // and therefore `maxWeight` are already final, and `votes.vp` is never
+  // recomputed for a private proposal.
+  let attestation: TeAttestation | null = null;
+  if (proposal.privacy === 'shutter-elgamal') {
+    try {
+      attestation = await mintBallotAttestation(proposal, msg, vp.vp);
+    } catch (err: any) {
+      if (err instanceof GegAttestationError) {
+        log.warn(`[writer] cannot mint credential: ${err.message}`);
+        return Promise.reject(`private voting unavailable: ${err.message}`);
+      }
+      throw err;
+    }
+  }
+
+  return { proposal, vp, attestation };
+}
+
+export interface TeAttestation {
+  weight: number;
+  nonce: number;
+  signature: string;
+}
+
+async function mintBallotAttestation(
+  proposal: any,
+  msg: any,
+  vp: number
+): Promise<TeAttestation> {
+  // `getProposal` already parses this column (helpers/actions.ts), so it arrives
+  // as an object — parsing it again turns it into the string "[object Object]"
+  // and yields no budget at all. Both shapes are accepted so a caller that hands
+  // over a raw row still works.
+  const teConfig =
+    typeof proposal.te_config === 'string'
+      ? jsonParse(proposal.te_config, null)
+      : proposal.te_config;
+  const budget = Number(teConfig?.budget);
+  if (!Number.isInteger(budget) || budget < 1) {
+    throw new GegAttestationError(
+      `proposal ${proposal.id} has no usable ballot budget`
+    );
+  }
+  const maxWeight = BigInt(deriveMaxWeight(budget));
+
+  // The same clamp the verify panel applies and the committee enforces. `vp` has
+  // already cleared the dust floor, so the rounded value is at least 1.
+  const rounded = BigInt(Math.round(vp));
+  const weight = rounded > maxWeight ? maxWeight : rounded;
+
+  // The vote's own timestamp, which becomes `votes.created`. The protocol ranks
+  // duplicate ballots by `(nonce, sequenceNumber)` under a last-wins policy —
+  // Snapshot's "newer vote wins" rule expressed in the committee's terms.
+  const nonce = BigInt(parseInt(msg.timestamp));
+  const envelope = jsonParse(JSON.stringify(msg.payload.choice), null);
+
+  const args = {
+    electionId: proposal.id,
+    pseudonym: envelope?.pseudonym,
+    vk: envelope?.vk,
+    weight,
+    nonce
+  };
+  const signature = await mintAttestation(args);
+
+  // Verify what we just signed. Not distrust of our own key — the same rule as
+  // the dust floor and the window boundary: do not accept what the committee
+  // will drop. A framing or encoding slip would otherwise be stored, shown to
+  // the voter as a cast vote, and excluded at tally as INVALID_ATTESTATION.
+  if (!(await verifyAttestation({ ...args, signature, maxWeight }))) {
+    throw new GegAttestationError(
+      'freshly minted credential failed verification'
+    );
+  }
+
+  return {
+    weight: Number(weight),
+    nonce: Number(nonce),
+    signature
+  };
 }
 
 export async function action(body, ipfs, receipt, id, context): Promise<void> {
@@ -194,7 +288,15 @@ export async function action(body, ipfs, receipt, id, context): Promise<void> {
     vp_by_strategy: JSON.stringify(context.vp.vp_by_strategy),
     vp_state: vpState,
     vp_value: 0,
-    cb: CB.PENDING_COMPUTE
+    cb: CB.PENDING_COMPUTE,
+    // NULL on every public proposal. On a private one these are the credential
+    // the committee verifies, stored on the vote row rather than in a side table
+    // so they are written in the same statement as the vote — a vote that exists
+    // without its credential is a ballot the hub's feed cannot serve, which
+    // stalls the whole tally.
+    te_weight: context.attestation?.weight ?? null,
+    te_nonce: context.attestation?.nonce ?? null,
+    te_attestation: context.attestation?.signature ?? null
   };
 
   // Check if voter already voted
@@ -217,7 +319,7 @@ export async function action(body, ipfs, receipt, id, context): Promise<void> {
     await db.queryAsync(
       `
       UPDATE votes
-      SET id = ?, ipfs = ?, created = ?, choice = ?, reason = ?, metadata = ?, app = ?, vp = ?, vp_by_strategy = ?, vp_state = ?
+      SET id = ?, ipfs = ?, created = ?, choice = ?, reason = ?, metadata = ?, app = ?, vp = ?, vp_by_strategy = ?, vp_state = ?, te_weight = ?, te_nonce = ?, te_attestation = ?
       WHERE voter = ? AND proposal = ? AND space = ?;
       UPDATE leaderboard SET last_vote = ? WHERE user = ? AND space = ? LIMIT 1;
     `,
@@ -232,6 +334,12 @@ export async function action(body, ipfs, receipt, id, context): Promise<void> {
         params.vp,
         params.vp_by_strategy,
         params.vp_state,
+        // Overwritten, not left behind: `created` changes on a re-vote, so the
+        // previous credential's nonce is stale. Carrying them in the same
+        // statement is why a re-vote cannot orphan a credential.
+        params.te_weight,
+        params.te_nonce,
+        params.te_attestation,
         voter,
         proposalId,
         msg.space,

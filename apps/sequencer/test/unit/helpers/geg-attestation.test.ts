@@ -38,12 +38,13 @@ import {
   attestationMessage,
   eligibilityPublicKey,
   mintAttestation,
-  resetIssuer
-} from '../../src/helpers/gegAttestation';
+  resetIssuer,
+  verifyAttestation
+} from '../../../src/helpers/gegAttestation';
 
 const VECTORS = join(
   __dirname,
-  '../../../../packages/geg-parity/vectors/attestation'
+  '../../../../../packages/geg-parity/vectors/attestation'
 );
 
 type AttestationVector = {
@@ -228,11 +229,11 @@ describe('ATTESTATION_V1 parity with the protocol corpus', () => {
 
     if (process.env.WRITE_ATTESTATION_FIXTURE) {
       writeFileSync(
-        join(__dirname, '..', 'fixtures', 'ts-minted-attestations.json'),
+        join(__dirname, '..', '..', 'fixtures', 'ts-minted-attestations.json'),
         `${JSON.stringify(
           {
             description:
-              "ATTESTATION_V1 credentials minted by the hub. geg's Python verify_attestation must accept every one.",
+              "ATTESTATION_V1 credentials minted by the sequencer. geg's Python verify_attestation must accept every one.",
             eligibilityKey,
             cases: emitted
           },
@@ -243,5 +244,119 @@ describe('ATTESTATION_V1 parity with the protocol corpus', () => {
     }
 
     expect(emitted).toHaveLength(cases.length);
+  });
+});
+
+describe('verifyAttestation — the ingest self-check', () => {
+  const ISSUER_SK =
+    '0x0000000000000000000000000000000000000000000000000000000000002a2a';
+  const electionId =
+    '0x1111111111111111111111111111111111111111111111111111111111111111';
+  const pseudonym =
+    '0x2222222222222222222222222222222222222222222222222222222222222222';
+  let vk: string;
+
+  beforeAll(() => {
+    process.env.TE_ELIGIBILITY_PRIVATE_KEY = ISSUER_SK;
+    resetIssuer();
+    const voter = schnorrKeygen(0x5151n);
+    vk = `0x${Buffer.from(voter.vk.toBytes()).toString('hex')}`;
+    voter.vk.destroyWasm();
+  });
+
+  const base = () => ({
+    electionId,
+    pseudonym,
+    vk,
+    weight: 7n,
+    nonce: 1700000000n
+  });
+
+  it('accepts a credential it just minted', async () => {
+    const args = base();
+    const signature = await mintAttestation(args);
+    await expect(
+      verifyAttestation({ ...args, signature, maxWeight: 10_000n })
+    ).resolves.toBe(true);
+  });
+
+  // Every field is bound into the signed message, so changing any one of them
+  // must break verification. A field that can be altered without detection is a
+  // field the committee is not actually relying on.
+  it.each([
+    ['weight', { weight: 8n }],
+    ['nonce', { nonce: 1700000001n }],
+    [
+      'electionId',
+      {
+        electionId:
+          '0x3333333333333333333333333333333333333333333333333333333333333333'
+      }
+    ],
+    [
+      'pseudonym',
+      {
+        pseudonym:
+          '0x4444444444444444444444444444444444444444444444444444444444444444'
+      }
+    ]
+  ])('rejects when %s is altered after signing', async (_label, override) => {
+    const args = base();
+    const signature = await mintAttestation(args);
+    await expect(
+      verifyAttestation({
+        ...args,
+        ...override,
+        signature,
+        maxWeight: 10_000n
+      })
+    ).resolves.toBe(false);
+  });
+
+  // The range check is half of what the committee's verify_attestation does, so
+  // a valid signature over an out-of-range weight must still fail here — that is
+  // an INVALID_ATTESTATION exclusion at tally.
+  it('rejects a validly signed weight above maxWeight', async () => {
+    const args = { ...base(), weight: 10_001n };
+    const signature = await mintAttestation(args);
+    await expect(
+      verifyAttestation({ ...args, signature, maxWeight: 10_000n })
+    ).resolves.toBe(false);
+  });
+
+  it('accepts a weight exactly at maxWeight', async () => {
+    const args = { ...base(), weight: 10_000n };
+    const signature = await mintAttestation(args);
+    await expect(
+      verifyAttestation({ ...args, signature, maxWeight: 10_000n })
+    ).resolves.toBe(true);
+  });
+
+  // Malformed input must return false rather than throw: this runs inside the
+  // vote writer, where an exception and a rejection are handled differently.
+  it.each([
+    ['not hex', 'nonsense'],
+    ['wrong length', '0xdeadbeef'],
+    ['empty', '0x']
+  ])('returns false for a %s signature', async (_label, signature) => {
+    await expect(
+      verifyAttestation({ ...base(), signature, maxWeight: 10_000n })
+    ).resolves.toBe(false);
+  });
+
+  it('rejects a signature from a different issuer', async () => {
+    const args = base();
+    const signature = await mintAttestation(args);
+    process.env.TE_ELIGIBILITY_PRIVATE_KEY =
+      '0x0000000000000000000000000000000000000000000000000000000000009999';
+    resetIssuer();
+    try {
+      await expect(
+        verifyAttestation({ ...args, signature, maxWeight: 10_000n })
+      ).resolves.toBe(false);
+    } finally {
+      process.env.TE_ELIGIBILITY_PRIVATE_KEY = ISSUER_SK;
+      resetIssuer();
+    }
   });
 });

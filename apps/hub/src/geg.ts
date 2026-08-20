@@ -22,14 +22,11 @@ import { capture } from '@snapshot-labs/snapshot-sentry';
 import express from 'express';
 import { parseJsonPreservingBigInts } from './helpers/bigIntJson';
 import {
-  eligibilityPublicKey,
-  GegAttestationError,
-  mintAttestation
-} from './helpers/gegAttestation';
+  EligibilityKeyError,
+  eligibilityPublicKey
+} from './helpers/eligibilityKey';
 import {
   composeElectionConfig,
-  deriveBallotParams,
-  deriveMaxWeight,
   GegConfigError,
   parseCommitteeSnapshot
 } from './helpers/gegConfig';
@@ -47,6 +44,16 @@ import db from './helpers/mysql';
 import { sendError } from './helpers/utils';
 
 const router = express.Router();
+
+/**
+ * Largest ballot page this route will serve.
+ *
+ * Matches the protocol's own `BALLOT_PAGE` and the reference data layer's
+ * `MAX_BALLOT_PAGE`, so a conforming keyper never sees a short page. A client
+ * asking for more gets one anyway: `read_all_ballots` advances by the number of
+ * rows it received, so truncation costs an extra request and nothing else.
+ */
+const MAX_BALLOT_PAGE = 1000;
 
 /** How many proposals one `list` response may name. */
 const LIST_LIMIT = 500;
@@ -74,26 +81,6 @@ async function loadProposal(proposalId: string): Promise<any | null> {
   );
   return rows[0] || null;
 }
-
-/**
- * The published eligibility key.
- *
- * The sequencer reads this at proposal creation and freezes the answer into the
- * proposal's config, which keeps the private key here as the single source of
- * truth rather than configuring the public half in two places.
- */
-router.get('/te_eligibility_key', async (req, res) => {
-  try {
-    return res.json({ eligibilityKey: await eligibilityPublicKey() });
-  } catch (err: any) {
-    log.error(`[geg] eligibility key unavailable: ${err?.message || err}`);
-    if (err instanceof GegAttestationError) {
-      return sendError(res, 'eligibility_key_not_configured', 503);
-    }
-    capture(err);
-    return sendError(res, 'server_error', 500);
-  }
-});
 
 /**
  * Proposals the coordinator could still act on.
@@ -150,7 +137,7 @@ router.get('/proposal/:id/te_geg_election', async (req, res) => {
         currentEligibilityKey: await eligibilityPublicKey()
       });
     } catch (err: any) {
-      if (err instanceof GegConfigError || err instanceof GegAttestationError) {
+      if (err instanceof GegConfigError || err instanceof EligibilityKeyError) {
         log.error(`[geg] ${proposalId}: ${err.message}`);
         return sendError(res, err.message, 503);
       }
@@ -198,12 +185,21 @@ router.get('/proposal/:id/te_geg_election', async (req, res) => {
  * That is deterministic, and stable by the time it matters: keypers only read
  * ballots after voting has closed, when no row can change again.
  *
- * **Dust.** A voter with `0 < vp < 0.5` rounds to weight 0, which the protocol
- * rejects outright — and rejecting it here would abort the whole read rather than
- * skip one ballot. Such a ballot already contributes nothing to a tally (a
- * zero-weight ballot adds zero), so it is omitted. That keeps results identical to
- * the legacy path. The cost is that an omitted ballot appears in neither the
- * admitted set nor the exclusions, which again matches existing behaviour.
+ * **Dust** no longer reaches here. A voter with `0 < vp < 0.5` rounds to weight 0,
+ * which the protocol rejects outright; the sequencer refuses such a vote at ingest
+ * (see `isDustVotingPower`) rather than storing a ballot this route would have to
+ * drop. Nothing is silently omitted, so every stored ballot is emitted and every
+ * sequence number is accounted for.
+ *
+ * **Paging is done in SQL, and capped.** A private envelope is around 120 KB — the
+ * budget-100 OR-proof dominates — so reading a whole election to serve one page
+ * meant hundreds of megabytes crossing the connection for a request that returns a
+ * fraction of it, and `countOnly` paid the same cost to return a single integer.
+ * The window is now chosen by a keys-only query and only those rows have their
+ * envelopes read, which keeps the cost proportional to what is served rather than
+ * to the size of the election. `MAX_BALLOT_PAGE` matches the protocol's own
+ * `BALLOT_PAGE`, and a client asking for more gets a short page, which its read
+ * loop already handles by advancing on the length it received.
  */
 router.get('/proposal/:id/te_geg_ballots', async (req, res) => {
   const proposalId = req.params.id;
@@ -221,35 +217,16 @@ router.get('/proposal/:id/te_geg_ballots', async (req, res) => {
     const rawCount = parseInt(String(req.query.count ?? '0'), 10);
     const countOnly = req.query.countOnly === '1';
 
-    // cb != -3 excludes soft-deleted votes (CB.PENDING_DELETE in the sequencer).
-    // Ordering must match the sequence-number derivation above exactly.
-    const rows = await (db as any).queryAsync(
-      `SELECT voter, vp, choice, created, id
-         FROM votes
-        WHERE proposal = ? AND cb != -3
-        ORDER BY created ASC, id ASC`,
-      [proposalId]
-    );
-
-    // Resolve the emitted set and its sequence numbers first, then slice. Doing
-    // it in one pass would make `total` depend on where pagination stopped, and
-    // would mint credentials for ballots the caller never asked for.
-    const emitted: Array<{
-      seq: number;
-      row: any;
-      weight: bigint;
-      envelope: any;
-    }> = [];
-    // The credential's weight is clamped to the ceiling this proposal's config
-    // advertises, not passed through raw. The protocol excludes a ballot whose
-    // attested weight exceeds maxWeight, so an unclamped whale would be dropped
-    // from the tally entirely; counting it at the cap keeps it in, with the
-    // weight the config permits. Derived from the same budget the config is
-    // composed with, so the two can never disagree.
-    let maxWeight: bigint;
+    // The weight is no longer computed here — the sequencer clamped and signed
+    // it at ingest. What this block still does is refuse to serve a proposal
+    // whose frozen eligibility key has been superseded, because every credential
+    // on it would fail verification and the tally would read as all zeros.
+    //
+    // It runs before any read: there is no point paying for rows this request is
+    // about to refuse to serve.
     try {
       const snapshot = parseCommitteeSnapshot(proposal.te_geg_config);
-      // Refuse to mint under a rotated key.
+      // Refuse to serve credentials minted under a superseded key.
       const currentEligibilityKey = await eligibilityPublicKey();
       if (
         currentEligibilityKey.toLowerCase() !==
@@ -265,12 +242,6 @@ router.get('/proposal/:id/te_geg_ballots', async (req, res) => {
           503
         );
       }
-      const { budget } = deriveBallotParams(
-        parseJsonField<string[]>(proposal.choices, []),
-        proposal.type,
-        snapshot.weightedBudget
-      );
-      maxWeight = BigInt(deriveMaxWeight(budget));
     } catch (err: any) {
       if (err instanceof GegConfigError) {
         log.error(`[geg] ${proposalId}: ${err.message}`);
@@ -278,49 +249,84 @@ router.get('/proposal/:id/te_geg_ballots', async (req, res) => {
       }
       throw err;
     }
-    for (const row of rows as any[]) {
-      const rounded = BigInt(Math.round(Number(row.vp)));
-      const weight = rounded > maxWeight ? maxWeight : rounded;
-      if (weight < 1n) continue; // dust — contributes nothing, see above
-      const envelope = parseJsonField<any>(row.choice, null);
-      if (!envelope?.ciphertexts) {
-        log.warn(`[geg] ${proposalId}: vote ${row.id} has no ballot envelope`);
-        continue;
-      }
-      // Sequence numbers index this emitted list, so they stay dense — the
-      // admitted set the keypers publish refers to these positions.
-      emitted.push({ seq: emitted.length, row, weight, envelope });
-    }
 
-    if (countOnly) return res.json({ count: emitted.length });
+    // cb != -3 excludes soft-deleted votes (CB.PENDING_DELETE in the sequencer).
+    // Counting is a count: it must not read an envelope. The committee asks for
+    // this before every tally, so reading the election to return one integer was
+    // the most wasteful call the route served.
+    const [{ total }] = await (db as any).queryAsync(
+      'SELECT COUNT(*) AS total FROM votes WHERE proposal = ? AND cb != -3',
+      [proposalId]
+    );
+    if (countOnly) return res.json({ count: Number(total) });
 
-    const page =
-      rawCount > 0
-        ? emitted.slice(start, start + rawCount)
-        : emitted.slice(start);
+    const limit =
+      rawCount > 0 ? Math.min(rawCount, MAX_BALLOT_PAGE) : MAX_BALLOT_PAGE;
+
+    // Two queries rather than one, deliberately. Ordering by `(created, id)`
+    // cannot use an index here — the only index leading with `proposal` orders by
+    // `vp` — so MySQL sorts, and whether it drags 120 KB envelopes through that
+    // sort is left to the optimiser. Choosing the window on keys alone removes
+    // the question: the sort touches small rows, and only the page's envelopes
+    // are ever read.
+    const keys = await (db as any).queryAsync(
+      `SELECT id FROM votes
+        WHERE proposal = ? AND cb != -3
+        ORDER BY created ASC, id ASC
+        LIMIT ? OFFSET ?`,
+      [proposalId, limit, start]
+    );
+    if (!keys.length) return res.json({ ballots: [], total: Number(total) });
+
+    // Ordering must match the sequence-number derivation above exactly, in both
+    // queries — the sequence number is a position in this order, and the
+    // committee expresses admission and exclusion in those numbers.
+    const rows = await (db as any).queryAsync(
+      `SELECT id, choice, created, te_weight, te_nonce, te_attestation
+         FROM votes
+        WHERE proposal = ? AND id IN (?)
+        ORDER BY created ASC, id ASC`,
+      [proposalId, (keys as any[]).map(k => k.id)]
+    );
 
     const ballots: any[] = [];
-    for (const { seq, row, weight, envelope } of page) {
-      const nonce = BigInt(row.created);
-      let signature: string;
-      try {
-        signature = await mintAttestation({
-          electionId: proposalId,
-          pseudonym: envelope.pseudonym,
-          vk: envelope.vk,
-          weight,
-          nonce
-        });
-      } catch (err: any) {
-        if (err instanceof GegAttestationError) {
-          log.error(
-            `[geg] ${proposalId}: cannot mint credential: ${err.message}`
-          );
-          return sendError(res, err.message, 503);
-        }
-        throw err;
+    for (let i = 0; i < (rows as any[]).length; i++) {
+      const row = (rows as any[])[i];
+      // Position in the total order, not in this page.
+      const seq = start + i;
+      const envelope = parseJsonField<any>(row.choice, null);
+      // A hard failure, not a skip. Skipping renumbers every ballot after it,
+      // so the committee's admitted set would point at the wrong ballots — and
+      // a silently dropped vote is the failure the ingest checks exist to
+      // prevent. Ingest verifies the envelope before storing it, so this cannot
+      // fire without something having corrupted the row.
+      if (!envelope?.ciphertexts) {
+        log.error(`[geg] ${proposalId}: vote ${row.id} has no ballot envelope`);
+        return sendError(
+          res,
+          `vote ${row.id} has no ballot envelope; the row is corrupt`,
+          500
+        );
       }
-
+      // No weight arithmetic here any more. The sequencer computed and signed
+      // the weight at ingest, so recomputing it would create a second opinion
+      // that could disagree with the signature — and a credential whose weight
+      // the committee reads from the signed message, not from us.
+      //
+      // A missing credential is a hard failure rather than a skip. Skipping
+      // would drop a real vote from the tally with no exclusion record, which is
+      // exactly the silent-omission failure the ingest checks exist to prevent.
+      if (row.te_attestation === null || row.te_weight === null) {
+        log.error(
+          `[geg] ${proposalId}: vote ${row.id} has no eligibility credential`
+        );
+        return sendError(
+          res,
+          `vote ${row.id} has no eligibility credential; it was stored before ` +
+            'credentials were minted at ingest and needs the backfill',
+          500
+        );
+      }
       // Storage metadata rides *alongside* the envelope, never inside it: the
       // envelope is the voter-signed artifact, so adding a field to it would
       // break the signature it carries. The committee reads `sequenceNumber`
@@ -335,14 +341,18 @@ router.get('/proposal/:id/te_geg_ballots', async (req, res) => {
           ciphertexts: envelope.ciphertexts,
           zkProof: envelope.zkProof,
           voterSignature: envelope.voterSignature,
+          // Reassembled here, not stored here. geg's ballot envelope carries the
+          // attestation as a field of the ballot; Snapshot stores the two apart
+          // because `choice` is the voter's EIP-712-signed blob and cannot take
+          // an extra field. The committee sees the designed shape either way.
           attestation: {
             scheme: 'ATTESTATION_V1',
             electionId: proposalId,
             pseudonym: envelope.pseudonym,
             vk: envelope.vk,
-            weight: Number(weight),
-            nonce: Number(nonce),
-            signature
+            weight: Number(row.te_weight),
+            nonce: Number(row.te_nonce),
+            signature: row.te_attestation
           }
         },
         sequenceNumber: seq,
@@ -350,7 +360,7 @@ router.get('/proposal/:id/te_geg_ballots', async (req, res) => {
       });
     }
 
-    return res.json({ ballots, total: emitted.length });
+    return res.json({ ballots, total: Number(total) });
   } catch (err: any) {
     log.error(`[geg] te_geg_ballots ${proposalId}: ${err?.message || err}`);
     capture(err);

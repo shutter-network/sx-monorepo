@@ -2,6 +2,7 @@
 import { getBoostsCount } from '@/helpers/boost';
 import { DOCS_URL, FLAGS } from '@/helpers/constants';
 import { loadSingleTopic, Topic } from '@/helpers/discourse';
+import { teVoteWeight, totalVotingPower } from '@/helpers/teVoteWeight';
 import { getFormattedVotingPower, sanitizeUrl } from '@/helpers/utils';
 import { useProposalQuery } from '@/queries/proposals';
 import { useProposalVotingPowerQuery } from '@/queries/votingPower';
@@ -57,6 +58,28 @@ const discussion = computed(() => {
 });
 
 const votingPowerDecimals = computed(() => proposal.value?.vp_decimals ?? 0);
+
+/**
+ * What a private proposal will actually count this voter as.
+ *
+ * Private voting counts in whole numbers and caps them, so voting power is not
+ * used as given — and until now the voter only found out afterwards: the clamp
+ * appeared in the verify panel once the tally was published, and the floor
+ * appeared as a rejection *after* they had chosen and signed. Surfacing it beside
+ * their voting power turns both into something they know before committing.
+ *
+ * Advisory only; the sequencer is what enforces either rule.
+ */
+const teWeightNotice = computed(() => {
+  if (proposal.value?.privacy !== 'shutter-elgamal') return null;
+  if (isVotingPowerPending.value || isVotingPowerError.value) return null;
+
+  const vp = totalVotingPower(votingPower.value);
+  if (vp === null) return null;
+
+  const result = teVoteWeight(vp, proposal.value.type);
+  return result.kind === 'ok' ? null : result;
+});
 
 const currentVote = computed(
   () =>
@@ -345,6 +368,36 @@ watchEffect(() => {
                     </AppLink>
                   </div>
                 </IndicatorVotingPower>
+                <!--
+                  Private voting counts whole numbers and caps them, so say so
+                  before the voter picks choices and signs rather than after.
+                  Advisory: the sequencer enforces both rules at ingest.
+                -->
+                <div
+                  v-if="teWeightNotice"
+                  class="flex gap-2 rounded-lg border px-3 py-2 text-[13px] leading-snug"
+                  :class="
+                    teWeightNotice.kind === 'dust'
+                      ? 'border-skin-danger/30 text-skin-danger'
+                      : 'border-skin-border text-skin-text'
+                  "
+                >
+                  <IH-exclamation-circle
+                    class="mt-[3px] size-[14px] shrink-0"
+                  />
+                  <span v-if="teWeightNotice.kind === 'dust'">
+                    <b>You can't vote on this proposal.</b> Private voting needs
+                    at least 0.5 voting power.
+                  </span>
+                  <span v-else>
+                    Counted as
+                    <b
+                      class="text-skin-link"
+                      v-text="teWeightNotice.counted.toLocaleString()"
+                    />, the maximum for this proposal. Private voting caps how
+                    much voting power any one voter can hold.
+                  </span>
+                </div>
                 <ProposalVote
                   v-if="proposal"
                   :proposal="proposal"
