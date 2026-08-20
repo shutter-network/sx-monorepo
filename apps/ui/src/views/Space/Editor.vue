@@ -8,6 +8,8 @@ import {
   BASIC_CHOICES,
   DOCS_URL,
   MIN_DKG_LEAD_TIME_S,
+  TE_MAX_WEIGHT,
+  TE_MAX_WEIGHT_UNWEIGHTED,
   VERIFIED_URL
 } from '@/helpers/constants';
 import { omit, prettyConcat } from '@/helpers/utils';
@@ -101,6 +103,31 @@ const unsupportedPremiumStrategiesList = computed(() => {
 
 const isPrivateVoting = computed(
   () => proposal.value?.privacy === 'shutter-elgamal'
+);
+
+/**
+ * The "?" beside the private-voting switch.
+ *
+ * It names the per-voter ceiling because that silently changes results: voting
+ * power above it is counted *at* it, and the tally stays internally consistent
+ * either way, so nothing downstream reveals that it happened. This switch is the
+ * last point at which the author can choose a mode where it does not apply.
+ *
+ * The two figures differ because the ceiling is `1,000,000 / budget`, and only
+ * weighted ballots spend budget on splitting points across choices. Both are
+ * derived, so a deployment at a different budget shows its own numbers.
+ */
+const privateVotingTooltip = computed(
+  () =>
+    'Permanent private voting. Each ballot is encrypted in your browser with ' +
+    'threshold ElGamal and tallied homomorphically, so individual votes stay ' +
+    'private forever. A committee of keypers publishes proven decryption shares ' +
+    'to reveal only the final result.\n\n' +
+    'Maximum voting power per voter: ' +
+    `${TE_MAX_WEIGHT_UNWEIGHTED.toLocaleString()} with basic voting, ` +
+    `${TE_MAX_WEIGHT.toLocaleString()} with weighted voting. ` +
+    'Anyone holding more is counted at that limit, and holdings below 0.5 are ' +
+    'not counted at all.'
 );
 
 const privacy = computed({
@@ -922,7 +949,7 @@ watchEffect(() => {
             "
             v-model="privacy"
             title="Private voting"
-            tooltip="Permanent private voting. Each ballot is encrypted in your browser with threshold ElGamal and tallied homomorphically, so individual votes stay private forever. A committee of keypers publishes proven decryption shares to reveal only the final result."
+            :tooltip="privateVotingTooltip"
           />
           <UiAlert
             v-if="rankedChoicePrivacyConflict"

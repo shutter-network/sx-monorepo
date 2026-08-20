@@ -32,8 +32,11 @@ beforeAll(async () => {
 
 // Factories rather than module-level constants so G2_GEN_HEX is read at call
 // time (inside it() callbacks), not at describe-evaluation time.
-function makeBallotsPayload(ballots: AuditBallot[]): BallotsPayload {
-  return { te_mpk: G2_GEN_HEX, te_config: BASE_CONFIG, ballots };
+function makeBallotsPayload(
+  ballots: AuditBallot[],
+  maxWeight?: number | null
+): BallotsPayload {
+  return { te_mpk: G2_GEN_HEX, te_config: BASE_CONFIG, maxWeight, ballots };
 }
 
 function makeDummyAggregate(numCandidates = BASE_CONFIG.numCandidates) {
@@ -233,6 +236,53 @@ describe('aggregateBallots: structural rejections', () => {
       expect(result.total).toBe(2); // the ballots exist...
       expect(result.contributing).toBe(0); // ...but none of them counted
       expect(result.aggregateMatches).toBe(true);
+    });
+  });
+
+  // The committee counts a voter above the ceiling *at* the ceiling. If this
+  // function does not, it sums a bigger aggregate than the keypers did and reports
+  // an honest election as tampered with — the audit tool crying wolf, which is
+  // worse than no audit tool. `maxWeight` is served by the hub precisely so the two
+  // sides cannot drift.
+  describe('the per-voter weight ceiling', () => {
+    it('counts an over-cap ballot at the cap, matching the committee', async () => {
+      const audit = makeAuditPayload();
+      // vp 5 against a ceiling of 1 must reproduce the weight-1 aggregate, which
+      // is the generator — the same bytes a single vp=1 ballot produces.
+      const result = await aggregateBallots(
+        makeBallotsPayload([makeBallot(1, 5)], 1),
+        audit.aggregate
+      );
+      expect(result.aggregateMatches).toBe(true);
+    });
+
+    it('reports which ballots were capped, and what they held', async () => {
+      const result = await aggregateBallots(
+        makeBallotsPayload([makeBallot(1, 5)], 1),
+        makeAuditPayload().aggregate
+      );
+      expect(result.clamped).toEqual([
+        { voter: expect.any(String), vp: 5, countedAs: 1 }
+      ]);
+    });
+
+    it('says nothing about ballots under the cap', async () => {
+      const result = await aggregateBallots(
+        makeBallotsPayload([makeBallot(1, 1)], 10_000),
+        makeAuditPayload().aggregate
+      );
+      expect(result.clamped).toEqual([]);
+      expect(result.aggregateMatches).toBe(true);
+    });
+
+    // The regression itself: without a served ceiling the old code summed raw vp.
+    it('would mis-report the election as tampered with if the cap were ignored', async () => {
+      const uncapped = await aggregateBallots(
+        makeBallotsPayload([makeBallot(1, 5)], null),
+        makeAuditPayload().aggregate
+      );
+      expect(uncapped.aggregateMatches).toBe(false);
+      expect(uncapped.clamped).toEqual([]);
     });
   });
 

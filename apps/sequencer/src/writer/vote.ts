@@ -3,7 +3,11 @@ import { CB } from '../constants';
 import { getProposal } from '../helpers/actions';
 import log from '../helpers/log';
 import db from '../helpers/mysql';
-import { verifyTeBallot } from '../helpers/te';
+import {
+  isDustVotingPower,
+  isWithinGegVotingWindow,
+  verifyTeBallot
+} from '../helpers/te';
 import { captureError, hasStrategyOverride, jsonParse } from '../helpers/utils';
 import { updateProposalAndVotes } from '../scores';
 
@@ -50,6 +54,13 @@ export async function verify(body): Promise<any> {
     )
       return Promise.reject('invalid choice');
   } else if (proposal.privacy === 'shutter-elgamal') {
+    // The committee re-checks the voting window at tally time against the frozen
+    // config, and its window is half-open where Snapshot's is closed. Adopt geg's
+    // boundary here so a vote cannot be accepted now and excluded then — see
+    // helpers/te.ts for what that costs and why the alternative is worse.
+    if (!isWithinGegVotingWindow(msgTs, proposal.start, proposal.end)) {
+      return Promise.reject('not in voting window');
+    }
     if (msg.payload.reason)
       return Promise.reject('reason not allowed with shutter-elgamal');
     // The voter ships the encrypted ballot as a JSON object under
@@ -125,6 +136,15 @@ export async function verify(body): Promise<any> {
       { url: scoreAPIUrl }
     );
     if (vp.vp === 0) return Promise.reject('no voting power');
+    // Private ballots are weighted by an integer, so anything under 0.5 would be
+    // counted as zero and dropped from the feed without ever reaching the
+    // committee. Refuse it here so the voter is told, rather than shown a cast
+    // vote that silently does not count.
+    if (proposal.privacy === 'shutter-elgamal' && isDustVotingPower(vp.vp)) {
+      return Promise.reject(
+        'voting power too low for a private proposal, must be at least 0.5'
+      );
+    }
   } catch (err: any) {
     captureError(
       err,

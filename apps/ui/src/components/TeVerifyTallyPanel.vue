@@ -13,6 +13,7 @@ import {
   VerifyResult,
   verifyTally
 } from '@/helpers/teVerify';
+import { shortenAddress } from '@/helpers/utils';
 import { Proposal } from '@/types';
 
 const props = defineProps<{
@@ -271,6 +272,33 @@ function downloadBundle() {
         the one the keypers decrypted.
       </span>
     </div>
+    <!-- The clamp is invisible in the numbers themselves: the tally is internally
+         consistent, so recomputing it reproduces the capped figure and reveals
+         nothing is missing. Anyone comparing these scores against the token
+         distribution has to be told that some voting power was not counted. -->
+    <div
+      v-if="status.kind === 'ok' && status.ballots.clamped.length"
+      class="text-sm text-skin-text border-l-2 border-skin-border pl-2"
+    >
+      <div>
+        {{ status.ballots.clamped.length }}
+        {{ status.ballots.clamped.length === 1 ? 'ballot was' : 'ballots were' }}
+        counted at the per-voter cap, so the totals below understate their voting
+        power:
+      </div>
+      <ul class="list-disc pl-5">
+        <li v-for="c in status.ballots.clamped" :key="c.voter">
+          {{ shortenAddress(c.voter) }} held
+          {{ c.vp.toLocaleString() }}, counted as
+          {{ c.countedAs.toLocaleString() }}
+        </li>
+      </ul>
+      <div>
+        The cap is 1,000,000 divided by the budget — a limit of the tally's
+        recovery step, not a policy choice.
+      </div>
+    </div>
+
     <ul
       v-if="status.kind === 'ok'"
       class="text-sm text-skin-text grid grid-cols-2 gap-x-4"

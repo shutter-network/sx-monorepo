@@ -145,7 +145,15 @@ export async function action(body, ipfs): Promise<void> {
           await buildCommitteeSnapshot({
             eligibilityKey: await getEligibilityKey(),
             votingStart: existing.start,
-            votingEnd: existing.end
+            votingEnd: existing.end,
+            // Same rule the hub applies live: the space's first admin, or the
+            // author when it lists none.
+            adminAddress:
+              (Array.isArray(spaceSettings?.admins)
+                ? spaceSettings.admins.find(
+                    (a: any) => typeof a === 'string' && a
+                  )
+                : undefined) || existing.author
           })
         )
       );

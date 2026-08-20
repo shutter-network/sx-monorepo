@@ -89,6 +89,18 @@ async function validateSpace(space: any) {
   await validateSpaceSettings(space);
 }
 
+/**
+ * The address recorded as the config's admin key: the space's first admin, or the
+ * proposal author when the space lists none. Mirrors the fallback the hub applies
+ * when it decides who may resume a stalled tally, so the recorded value matches the
+ * live rule as it stood at creation.
+ */
+function adminForConfig(space: any, author: string): string {
+  const admins = Array.isArray(space?.admins) ? space.admins : [];
+  const first = admins.find((a: any) => typeof a === 'string' && a);
+  return first || author;
+}
+
 export async function verify(body): Promise<any> {
   const msg = jsonParse(body.msg);
   const created = parseInt(msg.timestamp);
@@ -187,7 +199,8 @@ export async function verify(body): Promise<any> {
       await buildCommitteeSnapshot({
         eligibilityKey: await getEligibilityKey(),
         votingStart: parseInt(msg.payload.start),
-        votingEnd: parseInt(msg.payload.end)
+        votingEnd: parseInt(msg.payload.end),
+        adminAddress: adminForConfig(space, body.address)
       });
       // The ballot's own shape is bounded too, and it depends on this proposal
       // rather than on the deployment: a weighted proposal encodes one proof
@@ -408,7 +421,8 @@ export async function action(body, ipfs, receipt, id): Promise<void> {
         await buildCommitteeSnapshot({
           eligibilityKey: await getEligibilityKey(),
           votingStart: proposal.start,
-          votingEnd: proposal.end
+          votingEnd: proposal.end,
+          adminAddress: adminForConfig(space, proposal.author)
         })
       ),
       // Without this the proposal has a committee and a key but no ballot shape,

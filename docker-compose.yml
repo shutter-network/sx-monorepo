@@ -29,7 +29,6 @@
 #   TE_KEYPERS                   one URL per committee member (addresses are
 #                                read from each keyper's /status, not configured)
 #   TE_RESULT_PUBLISHER_ADDRESS  the coordinator's address
-#   TE_ADMIN_ADDRESS             operator wallet that can clear a stalled tally
 #
 # Quick start:
 #   cp .env.example .env
@@ -82,7 +81,6 @@ services:
       KEYCARD_URL: ""
       RATE_LIMIT_DATABASE_URL: ""
       TE_ELIGIBILITY_PRIVATE_KEY: "${TE_ELIGIBILITY_PRIVATE_KEY:-}"
-      TE_ADMIN_ADDRESS: "${TE_ADMIN_ADDRESS:-}"
     ports:
       - "${HUB_PORT:-3000}:3000"
     depends_on:
@@ -131,7 +129,6 @@ services:
       TE_THRESHOLD_T: "${TE_THRESHOLD_T:-2}"
       # Denominator for weighted vote splits: 100 means percentages.
       TE_WEIGHTED_BUDGET: "${TE_WEIGHTED_BUDGET:-100}"
-      TE_ADMIN_ADDRESS: "${TE_ADMIN_ADDRESS:-}"
       # The coordinator's address: it signs the published result, and the hub accepts
       # a result from no other key.
       TE_RESULT_PUBLISHER_ADDRESS: "${TE_RESULT_PUBLISHER_ADDRESS:-}"
@@ -153,6 +150,7 @@ services:
     environment:
       PORT: "3002"
       HUB_URL: http://hub:3000
+      LOG_LEVEL: "${TE_DATA_LAYER_LOG_LEVEL:-info}"
     ports:
       # Published because the coordinator and the keypers are separate stacks, on
       # separate hosts in a real deployment and separate compose projects locally.

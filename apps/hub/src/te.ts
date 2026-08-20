@@ -22,6 +22,7 @@
 
 import { capture } from '@snapshot-labs/snapshot-sentry';
 import express from 'express';
+import { deriveMaxWeight } from './helpers/gegConfig';
 import db from './helpers/mysql';
 import { sendError } from './helpers/utils';
 
@@ -159,9 +160,15 @@ router.get('/proposal/:id/te_ballots', async (req, res) => {
       'SELECT voter, vp, choice FROM votes WHERE proposal = ? AND cb != -3 ORDER BY created ASC',
       [proposalId]
     );
+    const teConfig = parseJsonField<any>(proposal.te_config, null);
+    const maxWeight = teConfig?.budget
+      ? deriveMaxWeight(Number(teConfig.budget))
+      : null;
+
     return res.json({
       te_mpk: `0x${Buffer.from(proposal.te_mpk).toString('hex')}`,
-      te_config: parseJsonField<any>(proposal.te_config, null),
+      te_config: teConfig,
+      maxWeight,
       ballots: (rows as any[]).map(r => ({
         voter: r.voter,
         vp: Number(r.vp),

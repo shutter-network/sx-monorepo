@@ -29,25 +29,34 @@ const props = defineProps<{
 const { auth, web3 } = useWeb3();
 
 const stalled = ref(false);
-const adminAddress = ref<string | null>(null);
 const busy = ref(false);
 const message = ref<{ kind: 'ok' | 'err'; text: string } | null>(null);
 
 let timer: ReturnType<typeof setInterval> | undefined;
 
 const account = computed(() => web3.value.account || '');
+
+/**
+ * Who may retry: an admin of the proposal's space, falling back to its author when
+ * the space lists none.
+ */
+const authorities = computed(() => {
+  const admins = (props.proposal.space?.admins || []).filter(Boolean);
+  return admins.length ? admins : [props.proposal.author?.id].filter(Boolean);
+});
+
 const isAdmin = computed(
   () =>
     !!account.value &&
-    !!adminAddress.value &&
-    account.value.toLowerCase() === adminAddress.value.toLowerCase()
+    authorities.value.some(
+      a => a.toLowerCase() === account.value.toLowerCase()
+    )
 );
 
 async function refresh() {
   try {
     const state = await fetchGegElection(props.apiBaseUrl, props.proposal.id);
     stalled.value = state.tallyStalled;
-    adminAddress.value = state.adminAddress;
   } catch {
     // Transient: the notice is an aid, not a source of truth. Leaving the last
     // known state in place beats flickering it away on one failed poll.
@@ -109,10 +118,6 @@ onBeforeUnmount(() => clearInterval(timer));
         <li>the keypers responded but derived different totals;</li>
         <li>the count did not finish in the time the coordinator allows.</li>
       </ul>
-      <div>
-        Which one it was is in the coordinator's logs. Retrying before the cause
-        is fixed will simply stall again.
-      </div>
     </div>
     <div v-if="isAdmin" class="flex flex-wrap items-center gap-2">
       <button
@@ -128,8 +133,10 @@ onBeforeUnmount(() => clearInterval(timer));
       </span>
     </div>
     <div v-else class="text-skin-text text-base">
-      Retrying is restricted to the tally admin<span v-if="adminAddress">
-        ({{ shortenAddress(adminAddress) }})</span
+      Retrying is restricted to this space's admins<span
+        v-if="authorities.length"
+      >
+        ({{ authorities.map(a => shortenAddress(a)).join(', ') }})</span
       >.
       <span v-if="!account">Connect that wallet to retry.</span>
     </div>

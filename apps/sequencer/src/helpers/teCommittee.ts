@@ -250,7 +250,6 @@ export interface TeEnv {
   keypers: string | undefined;
   thresholdT: string | undefined;
   weightedBudget: string | undefined;
-  adminAddress: string | undefined;
   resultPublisherAddress: string | undefined;
 }
 
@@ -259,7 +258,6 @@ export function readTeEnv(env: NodeJS.ProcessEnv = process.env): TeEnv {
     keypers: env.TE_KEYPERS,
     thresholdT: env.TE_THRESHOLD_T,
     weightedBudget: env.TE_WEIGHTED_BUDGET,
-    adminAddress: env.TE_ADMIN_ADDRESS,
     resultPublisherAddress: env.TE_RESULT_PUBLISHER_ADDRESS
   };
 }
@@ -305,6 +303,7 @@ export async function buildCommitteeSnapshot(args: {
   eligibilityKey: string;
   votingStart: number;
   votingEnd: number;
+  adminAddress: string;
 }): Promise<TeCommitteeSnapshot> {
   const env = args.env ?? readTeEnv();
 
@@ -370,7 +369,7 @@ export async function buildCommitteeSnapshot(args: {
       env.resultPublisherAddress,
       'TE_RESULT_PUBLISHER_ADDRESS'
     ),
-    adminAddress: requireAddress(env.adminAddress, 'TE_ADMIN_ADDRESS'),
+    adminAddress: args.adminAddress,
     votingStart: args.votingStart,
     votingEnd: args.votingEnd,
     weightedBudget

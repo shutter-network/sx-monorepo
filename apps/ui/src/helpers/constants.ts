@@ -20,6 +20,33 @@ export const MIN_DKG_LEAD_TIME_S = Number(
   import.meta.env.VITE_MIN_DKG_LEAD_TIME_S ?? 180
 );
 
+/**
+ * Points a voter distributes across choices on a weighted private proposal, and
+ * the per-voter ceiling that follows from it.
+ * Precision and magnitude are spent from the same allowance — budget
+ * 100 gives whole-percent splits and a ceiling of 10,000, budget 10 gives 10%
+ * splits and a ceiling of 100,000.
+ * Voting power above the ceiling is counted *at* it, so this changes outcomes on
+ * a space with large holders and has to be visible before someone picks the
+ * privacy mode.
+ */
+export const TE_WEIGHTED_BUDGET = Number(
+  import.meta.env.VITE_TE_WEIGHTED_BUDGET ?? 100
+);
+
+/**
+ * The protocol's ceiling on `budget x maxWeight`. Both figures below come from
+ * it, so they cannot drift apart.
+ */
+const TE_MAX_BUDGET_TIMES_WEIGHT = 1_000_000;
+
+/** Per-voter ceiling on a weighted proposal — `floor(1e6 / budget)`. */
+export const TE_MAX_WEIGHT = Math.floor(
+  TE_MAX_BUDGET_TIMES_WEIGHT / TE_WEIGHTED_BUDGET
+);
+
+export const TE_MAX_WEIGHT_UNWEIGHTED = TE_MAX_BUDGET_TIMES_WEIGHT;
+
 export const API_URL =
   import.meta.env.VITE_API_URL ?? 'https://api.snapshot.box';
 export const API_TESTNET_URL =
@@ -202,7 +229,13 @@ export const PRIVACY_TYPES_INFO: Record<
   'shutter-elgamal': {
     label: 'Permanent private voting',
     description:
-      'Choices are encrypted and never decrypted: only the aggregate tally is ever revealed. Powered by threshold-ElGamal homomorphic tallying.',
+      'Choices are encrypted and never decrypted: only the aggregate tally is ever revealed. ' +
+      'Powered by threshold-ElGamal homomorphic tallying. ' +
+      'Maximum voting power per voter: ' +
+      `${TE_MAX_WEIGHT_UNWEIGHTED.toLocaleString()} with basic voting, ` +
+      `${TE_MAX_WEIGHT.toLocaleString()} with weighted voting. ` +
+      'Anyone holding more is counted at that limit, and holdings below 0.5 ' +
+      'cannot vote.',
     isAlpha: true
   },
   any: {

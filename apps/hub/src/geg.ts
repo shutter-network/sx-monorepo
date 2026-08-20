@@ -66,8 +66,9 @@ function parseJsonField<T>(value: unknown, fallback: T): T {
 
 async function loadProposal(proposalId: string): Promise<any | null> {
   const rows = await (db as any).queryAsync(
-    `SELECT id, privacy, type, choices, start, end, te_mpk, te_committee_pks,
-            te_geg_config, te_aggregate, te_dkg_status, te_tally_stalled
+    `SELECT id, privacy, type, choices, start, end, author, space, te_mpk,
+            te_committee_pks, te_geg_config, te_aggregate, te_dkg_status,
+            te_tally_stalled
        FROM proposals WHERE id = ? LIMIT 1`,
     [proposalId]
   );
@@ -248,6 +249,22 @@ router.get('/proposal/:id/te_geg_ballots', async (req, res) => {
     let maxWeight: bigint;
     try {
       const snapshot = parseCommitteeSnapshot(proposal.te_geg_config);
+      // Refuse to mint under a rotated key.
+      const currentEligibilityKey = await eligibilityPublicKey();
+      if (
+        currentEligibilityKey.toLowerCase() !==
+        snapshot.eligibilityKey.toLowerCase()
+      ) {
+        log.error(
+          `[geg] ${proposalId}: eligibility key rotated since this proposal was created`
+        );
+        return sendError(
+          res,
+          'frozen eligibility key does not match the hub key in use; ' +
+            'the key was rotated and credentials on this proposal can no longer verify',
+          503
+        );
+      }
       const { budget } = deriveBallotParams(
         parseJsonField<string[]>(proposal.choices, []),
         proposal.type,
@@ -329,8 +346,6 @@ router.get('/proposal/:id/te_geg_ballots', async (req, res) => {
           }
         },
         sequenceNumber: seq,
-        // Snapshot's own receive time for the vote. The committee uses it to
-        // check the voting window itself rather than trusting that ingest did.
         submittedAt: Number(row.created)
       });
     }
@@ -1309,7 +1324,8 @@ router.get('/proposal/:id/te_result', async (req, res) => {
  *
  *   - `stalled: true` may only be signed by the `resultPublisherKey` — the
  *     coordinator, the one party that knows it has exhausted its attempts;
- *   - `stalled: false` may only be signed by `TE_ADMIN_ADDRESS`.
+ *   - `stalled: false` may only be signed by one of the proposal's space admins
+ *     (or its author, when the space lists none) — see `resumeAuthorities`.
  *
  * If the coordinator could clear a stall, a restart would clear it: its retry
  * budget lives in memory, so a fresh process sees a stalled election, tries
@@ -1321,6 +1337,25 @@ router.get('/proposal/:id/te_result', async (req, res) => {
  * the direction encoded in the op name (`tally_stall` / `tally_resume`) and an
  * empty payload — so a stall signature cannot be replayed as a resume.
  */
+/**
+ * Who may clear a stalled tally: the proposal's **space admins**, live.
+ *
+ * Falls back to the proposal's author when a space lists no admins, so a stall is
+ * never unrecoverable. Moderators are excluded: retrying is operational rather than
+ * moderation.
+ */
+async function resumeAuthorities(proposal: any): Promise<string[]> {
+  const rows = await (db as any).queryAsync(
+    'SELECT settings FROM spaces WHERE id = ? LIMIT 1',
+    [proposal.space]
+  );
+  const admins = parseJsonField<any>(rows[0]?.settings, {})?.admins;
+  const list = Array.isArray(admins)
+    ? admins.filter((a: any) => typeof a === 'string' && a)
+    : [];
+  return list.length ? list : [proposal.author].filter(Boolean);
+}
+
 router.post('/proposal/:id/te_tally_stalled', async (req, res) => {
   const proposalId = req.params.id;
   try {
@@ -1349,8 +1384,8 @@ router.post('/proposal/:id/te_tally_stalled', async (req, res) => {
 
     const op = stalled ? 'tally_stall' : 'tally_resume';
     const expected = stalled
-      ? snapshot.resultPublisherAddress
-      : snapshot.adminAddress;
+      ? [snapshot.resultPublisherAddress]
+      : await resumeAuthorities(proposal);
 
     let signer: string | null;
     try {
@@ -1358,9 +1393,11 @@ router.post('/proposal/:id/te_tally_stalled', async (req, res) => {
     } catch (err: any) {
       return sendError(res, err?.message || 'bad_request', 400);
     }
-    if (!signer || signer.toLowerCase() !== expected.toLowerCase()) {
+    const permitted =
+      !!signer && expected.some(a => a.toLowerCase() === signer!.toLowerCase());
+    if (!permitted) {
       log.warn(
-        `[geg] ${proposalId}: ${op} from ${signer ?? 'unrecoverable'}, expected ${expected}`
+        `[geg] ${proposalId}: ${op} from ${signer ?? 'unrecoverable'}, expected one of ${expected.join(', ')}`
       );
       return sendError(
         res,

@@ -41,7 +41,6 @@ function env(overrides: Partial<TeEnv> = {}): TeEnv {
       'https://k1.example.com,https://k2.example.com,https://k3.example.com',
     thresholdT: '2',
     weightedBudget: '100',
-    adminAddress: ADMIN,
     resultPublisherAddress: ADMIN,
     ...overrides
   };
@@ -53,6 +52,9 @@ function build(overrides: Partial<TeEnv> = {}) {
   return buildCommitteeSnapshot({
     env: env(overrides),
     eligibilityKey: ELIGIBILITY_KEY,
+    // Recorded into the config; the live authority is the space's admins, checked
+    // by the hub at resume time.
+    adminAddress: ADMIN,
     ...window
   });
 }
@@ -211,17 +213,20 @@ describe('buildCommitteeSnapshot', () => {
     await expect(build({ keypers: undefined })).rejects.toThrow(/TE_KEYPERS/);
   });
 
-  it.each([
-    ['TE_ADMIN_ADDRESS', { adminAddress: undefined }],
-    ['TE_RESULT_PUBLISHER_ADDRESS', { resultPublisherAddress: undefined }]
-  ])('requires %s', async (name, overrides) => {
-    await expect(build(overrides as Partial<TeEnv>)).rejects.toThrow(name);
+  it('requires TE_RESULT_PUBLISHER_ADDRESS', async () => {
+    await expect(build({ resultPublisherAddress: undefined })).rejects.toThrow(
+      'TE_RESULT_PUBLISHER_ADDRESS'
+    );
+  });
+
+  it('records the admin address it is given', async () => {
+    await expect(build()).resolves.toMatchObject({ adminAddress: ADMIN });
   });
 
   it('rejects a non-address role key', async () => {
-    await expect(build({ adminAddress: 'not-an-address' })).rejects.toThrow(
-      /not an address/
-    );
+    await expect(
+      build({ resultPublisherAddress: 'not-an-address' })
+    ).rejects.toThrow(/not an address/);
   });
 
   it('rejects a non-integer threshold', async () => {
@@ -238,6 +243,7 @@ describe('buildCommitteeSnapshot', () => {
     await expect(
       buildCommitteeSnapshot({
         env: env(),
+        adminAddress: ADMIN,
         eligibilityKey: '0xdeadbeef',
         ...window
       })
@@ -248,6 +254,7 @@ describe('buildCommitteeSnapshot', () => {
     await expect(
       buildCommitteeSnapshot({
         env: env(),
+        adminAddress: ADMIN,
         eligibilityKey: ELIGIBILITY_KEY,
         votingStart: 200,
         votingEnd: 100
@@ -256,6 +263,7 @@ describe('buildCommitteeSnapshot', () => {
     await expect(
       buildCommitteeSnapshot({
         env: env(),
+        adminAddress: ADMIN,
         eligibilityKey: ELIGIBILITY_KEY,
         votingStart: 100,
         votingEnd: 100

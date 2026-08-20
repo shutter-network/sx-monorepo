@@ -8,12 +8,6 @@
  * ``BallotInputs`` shape and runs ``verifyBallot`` against the
  * proposal's master public key.
  *
- * Auth model: the EIP-712 outer signature on the vote message is
- * Snapshot's existing voter-authentication boundary. The SDK's
- * ``WRAttestationVerifier`` slot is therefore satisfied with a constant
- * ``() => true`` here — the registration check happens earlier in the
- * pipeline, not on the SDK's wrAttestation field.
- *
  * Pseudonym: ``keccak256(voter_address || proposal_id)``. Voter and the
  * sequencer agree on this construction; the sequencer recomputes it and
  * rejects any ballot that ships a different one (so a voter cannot
@@ -98,6 +92,15 @@ export async function verifyTeBallot(
     return { ok: false, reason: 'choice_not_json_envelope' };
   }
 
+  if (
+    envelope.wrAttestation !== undefined &&
+    envelope.wrAttestation !== null &&
+    envelope.wrAttestation !== '0x' &&
+    envelope.wrAttestation !== ''
+  ) {
+    return { ok: false, reason: 'wr_attestation_not_supported' };
+  }
+
   // Pseudonym must equal keccak256(voter || proposalId). A mismatch is
   // either a malformed client or someone trying to attribute a ballot to
   // a different proposal — reject before doing the (expensive) zk verify.
@@ -133,12 +136,33 @@ export async function verifyTeBallot(
     return { ok: false, reason: `bad_envelope: ${err?.message || err}` };
   }
 
-  // wrAttestation is satisfied by Snapshot's outer EIP-712 envelope, so
-  // the SDK-level WR verifier is a constant ``() => true``. See module
-  // docstring for the full auth-boundary argument.
+  // The WR slot is a constant ``() => true`` because this deployment does not
+  // use the legacy credential it verifies — the field is required to be empty
+  // above.
   try {
     return verifyBallot(inputs, proposal.te_config, mpk, () => true);
   } finally {
     mpk.destroyWasm();
   }
+}
+
+/**
+ * A private ballot is counted by scaling its ciphertexts by an **integer**
+ * weight — the protocol has no representation for a fractional one — so the hub
+ * emits each ballot at `round(vp)` and skips anything that rounds to zero.
+ * Voting power below 0.5 therefore contributes nothing to a private tally, where
+ * the same figure would count normally on a public proposal.
+ * Refusing such a vote at ingest is better than accepting one the tally will
+ * drop.
+ */
+export function isDustVotingPower(vp: number): boolean {
+  return !Number.isFinite(vp) || Math.round(vp) < 1;
+}
+
+export function isWithinGegVotingWindow(
+  t: number,
+  votingStart: number,
+  votingEnd: number
+): boolean {
+  return votingStart <= t && t < votingEnd;
 }

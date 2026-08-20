@@ -29,6 +29,9 @@ const HOST = `http://localhost:${process.env.PORT || 3030}`;
 const PUBLISHER = new Wallet(`0x${'a1'.repeat(32)}`);
 const ADMIN = new Wallet(`0x${'b2'.repeat(32)}`);
 const KEYPER = new Wallet(`0x${'c3'.repeat(32)}`);
+// Distinct from ADMIN on purpose: the author is only the *fallback* authority, so a
+// fixture where they are the same address cannot tell the two rules apart.
+const AUTHOR = new Wallet(`0x${'e5'.repeat(32)}`);
 
 const ID = '0xbbbb000000000000000000000000000000000000000000000000000000000001';
 
@@ -60,6 +63,23 @@ async function reportedByElectionRead(): Promise<boolean> {
 
 describe('POST /api/proposal/:id/te_tally_stalled', () => {
   beforeAll(async () => {
+    // The resume authority is the proposal's space admins, read live.
+    await db.queryAsync('DELETE FROM spaces WHERE id = ?', ['test.eth']);
+    await db.queryAsync('INSERT INTO spaces SET ?', {
+      id: 'test.eth',
+      name: 'Stall fixture space',
+      settings: JSON.stringify({ admins: [ADMIN.address] }),
+      verified: 0,
+      deleted: 0,
+      flagged: 0,
+      hibernated: 0,
+      turbo_expiration: 0,
+      proposal_count: 0,
+      vote_count: 0,
+      follower_count: 0,
+      created: 1,
+      updated: 1
+    });
     // The frozen key has to be the one the hub actually holds: the election read
     // asserts they match and 503s otherwise, which would look like a stall bug.
     const eligibilityKey = await eligibilityPublicKey();
@@ -67,7 +87,7 @@ describe('POST /api/proposal/:id/te_tally_stalled', () => {
     await db.queryAsync('INSERT INTO proposals SET ?', {
       id: ID,
       ipfs: 'bafkreistallfixture',
-      author: ADMIN.address,
+      author: AUTHOR.address,
       created: 1,
       space: 'test.eth',
       network: '1',
@@ -109,6 +129,7 @@ describe('POST /api/proposal/:id/te_tally_stalled', () => {
   });
 
   afterAll(async () => {
+    await db.queryAsync('DELETE FROM spaces WHERE id = ?', ['test.eth']);
     await db.queryAsync('DELETE FROM proposals WHERE id = ?', [ID]);
     await db.endAsync();
   });
@@ -202,6 +223,74 @@ describe('POST /api/proposal/:id/te_tally_stalled', () => {
       })
     ).toBe(403);
     expect(await stalledFlag()).toBe(1);
+  });
+
+  // The authority is live, so adding an admin grants it immediately — this is the
+  // case a frozen list gets wrong: an admin appointed after the proposal was made
+  // could not revive it.
+  it('lets an admin added after the proposal was created clear it', async () => {
+    const LATE = new Wallet(`0x${'d4'.repeat(32)}`);
+    await db.queryAsync('UPDATE spaces SET settings = ? WHERE id = ?', [
+      JSON.stringify({ admins: [ADMIN.address, LATE.address] }),
+      'test.eth'
+    ]);
+    await post({
+      stalled: true,
+      resultPublisherSig: await sign(PUBLISHER, 'tally_stall')
+    });
+    expect(
+      await post({ stalled: false, adminSig: await sign(LATE, 'tally_resume') })
+    ).toBe(204);
+    await db.queryAsync('UPDATE spaces SET settings = ? WHERE id = ?', [
+      JSON.stringify({ admins: [ADMIN.address] }),
+      'test.eth'
+    ]);
+  });
+
+  // And removing one revokes it, which a frozen list also gets wrong.
+  it('refuses an admin who has since been removed from the space', async () => {
+    await db.queryAsync('UPDATE spaces SET settings = ? WHERE id = ?', [
+      JSON.stringify({ admins: [] }),
+      'test.eth'
+    ]);
+    await post({
+      stalled: true,
+      resultPublisherSig: await sign(PUBLISHER, 'tally_stall')
+    });
+    // The author is the fallback, and ADMIN is not the author.
+    expect(
+      await post({
+        stalled: false,
+        adminSig: await sign(ADMIN, 'tally_resume')
+      })
+    ).toBe(403);
+    expect(await stalledFlag()).toBe(1);
+    await db.queryAsync('UPDATE spaces SET settings = ? WHERE id = ?', [
+      JSON.stringify({ admins: [ADMIN.address] }),
+      'test.eth'
+    ]);
+  });
+
+  // A space with no admins must not leave a stall unrecoverable.
+  it('falls back to the proposal author when the space lists no admins', async () => {
+    await db.queryAsync('UPDATE spaces SET settings = ? WHERE id = ?', [
+      JSON.stringify({ admins: [] }),
+      'test.eth'
+    ]);
+    await post({
+      stalled: true,
+      resultPublisherSig: await sign(PUBLISHER, 'tally_stall')
+    });
+    expect(
+      await post({
+        stalled: false,
+        adminSig: await sign(AUTHOR, 'tally_resume')
+      })
+    ).toBe(204);
+    await db.queryAsync('UPDATE spaces SET settings = ? WHERE id = ?', [
+      JSON.stringify({ admins: [ADMIN.address] }),
+      'test.eth'
+    ]);
   });
 
   it('rejects a missing or non-boolean direction', async () => {

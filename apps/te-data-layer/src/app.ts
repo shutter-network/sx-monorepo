@@ -62,7 +62,29 @@ const UNSUPPORTED: Array<{ path: string; reason: string }> = [
 ];
 
 function fail(res: Response, status: number, message: string): void {
+  (res as any).failureReason = message;
   res.status(status).json({ error: message, message });
+}
+
+function accessLog(req: Request, res: Response, next: () => void): void {
+  const startedAt = Date.now();
+  const path = req.originalUrl.split('?')[0] ?? req.path;
+  res.on('finish', () => {
+    const ms = Date.now() - startedAt;
+    const match = /\/elections\/([0-9a-fA-Fx]+)/.exec(path);
+    const eid = match?.[1] ? ` election=${match[1].replace(/^0x/, '')}` : '';
+    const via = path.startsWith(PORT_READ_PREFIX) ? ' via=port' : '';
+    const reason = (res as any).failureReason
+      ? ` reason="${(res as any).failureReason}"`
+      : '';
+    const line = `[te-dl] ${req.method} ${path}${eid} status=${res.statusCode}${via} ${ms}ms${reason}`;
+
+    if (res.statusCode >= 500) log.error(line);
+    else if (res.statusCode >= 400) log.warn(line);
+    else if (req.method === 'GET') log.debug(line);
+    else log.info(line);
+  });
+  next();
 }
 
 /** The `:eid` path segment. Express types it as optional; a route match guarantees it. */
@@ -111,6 +133,7 @@ export function buildApp(): Express {
   // Reads are public by design: the protocol treats its data layer as trusted for
   // availability only, and every artifact it serves is independently verifiable.
   app.use(cors({ maxAge: 86400 }));
+  app.use(accessLog);
 
   app.get('/health', (req, res) => {
     res.json({ ok: true, uptimeS: Math.round(process.uptime()) });
@@ -329,9 +352,9 @@ export function buildApp(): Express {
       const id = toProposalId(electionIdParam(req));
       // Passed through as text for the same reason the write is: the hub
       // composes exact decimals that must not round-trip through a double here.
-      res.type('application/json').send(
-        await hubGetRaw(`/api/proposal/${id}/te_result`)
-      );
+      res
+        .type('application/json')
+        .send(await hubGetRaw(`/api/proposal/${id}/te_result`));
     })
   );
 

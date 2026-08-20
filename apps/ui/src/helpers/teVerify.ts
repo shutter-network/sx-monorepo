@@ -100,6 +100,7 @@ export interface AuditBallot {
 export interface BallotsPayload {
   te_mpk: string;
   te_config: BallotVerifyParams | null;
+  maxWeight?: number | null;
   ballots: AuditBallot[];
 }
 
@@ -114,6 +115,11 @@ export interface BallotAggregateResult {
   contributing: number;
   /** Recomputed vp-weighted aggregate equals the published aggregate. */
   aggregateMatches: boolean;
+  /**
+   * Ballots counted at the ceiling rather than at their voting power, with what
+   * each one actually held. Empty on most elections.
+   */
+  clamped: Array<{ voter: string; vp: number; countedAs: number }>;
 }
 
 /**
@@ -204,14 +210,24 @@ export async function aggregateBallots(
   const numCandidates = expectedAggregate.num_candidates;
   const acc: (Ciphertext | null)[] = new Array(numCandidates).fill(null);
   let contributing = 0;
+  const clamped: BallotAggregateResult['clamped'] = [];
+
+  const maxWeight =
+    typeof payload.maxWeight === 'number' && payload.maxWeight > 0
+      ? BigInt(payload.maxWeight)
+      : null;
 
   try {
     for (const b of payload.ballots) {
       const env = b.choice;
       if (!env) continue;
 
-      const w = BigInt(Math.round(b.vp));
+      const raw = BigInt(Math.round(b.vp));
+      const w = maxWeight !== null && raw > maxWeight ? maxWeight : raw;
       if (w <= 0n) continue;
+      if (w !== raw) {
+        clamped.push({ voter: b.voter, vp: b.vp, countedAs: Number(w) });
+      }
       contributing++;
 
       const cts: Ciphertext[] = env.ciphertexts.map(c => ({
@@ -242,11 +258,6 @@ export async function aggregateBallots(
     let aggregateMatches = true;
     for (let j = 0; j < numCandidates; j++) {
       const want = expectedAggregate.ciphertexts[j];
-      // Nothing accumulated for this candidate: the sum over an empty set is the
-      // identity, and that is exactly what the committee publishes. Treating the
-      // empty sum as a mismatch made every zero-turnout election report as
-      // tampered-with. Still a real check — a hub serving no ballots while
-      // publishing a non-empty aggregate fails here.
       const got =
         acc[j] === null
           ? { c1: IDENTITY_G2, c2: IDENTITY_G2 }
@@ -263,6 +274,7 @@ export async function aggregateBallots(
     return {
       total: payload.ballots.length,
       contributing,
+      clamped,
       aggregateMatches
     };
   } finally {

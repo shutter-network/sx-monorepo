@@ -18,6 +18,7 @@
  */
 
 import fetch from 'node-fetch';
+import log from './log';
 
 export class HubError extends Error {
   constructor(
@@ -26,6 +27,17 @@ export class HubError extends Error {
   ) {
     super(message);
   }
+}
+
+function logUpstream(
+  method: string,
+  path: string,
+  status: number,
+  detail: string
+): void {
+  const line = `[te-dl] upstream ${method} hub${path} status=${status}: ${detail}`;
+  if (status >= 500) log.error(line);
+  else log.warn(line);
 }
 
 const TIMEOUT_MS = Number(process.env.HUB_TIMEOUT_MS || 10000);
@@ -56,6 +68,7 @@ export async function hubGet<T>(path: string): Promise<T> {
   } catch (err: any) {
     // The hub being unreachable is not the caller's fault, and it is retryable —
     // 502 says exactly that, where a 500 would suggest a bug in this service.
+    logUpstream('GET', path, 502, `unreachable: ${err?.message || err}`);
     throw new HubError(`hub unreachable: ${err?.message || err}`, 502);
   }
 
@@ -68,6 +81,9 @@ export async function hubGet<T>(path: string): Promise<T> {
   }
 
   if (!res.ok) {
+    const detail =
+      body?.error || body?.message || `hub responded ${res.status}`;
+    logUpstream('GET', path, res.status, detail);
     throw new HubError(
       body?.error || body?.message || `hub responded ${res.status}`,
       res.status
@@ -105,6 +121,7 @@ export async function hubPost<T>(
       body: JSON.stringify(payload)
     });
   } catch (err: any) {
+    logUpstream('POST', path, 502, `unreachable: ${err?.message || err}`);
     throw new HubError(`hub unreachable: ${err?.message || err}`, 502);
   }
 
@@ -118,6 +135,12 @@ export async function hubPost<T>(
   }
 
   if (!res.ok) {
+    logUpstream(
+      'POST',
+      path,
+      res.status,
+      body?.error || body?.message || `hub responded ${res.status}`
+    );
     throw new HubError(
       body?.error || body?.message || `hub responded ${res.status}`,
       res.status
@@ -155,6 +178,7 @@ export async function hubPostRaw(
       body: rawBody
     });
   } catch (err: any) {
+    logUpstream('POST', path, 502, `unreachable: ${err?.message || err}`);
     throw new HubError(`hub unreachable: ${err?.message || err}`, 502);
   }
 
@@ -182,6 +206,7 @@ export async function hubGetRaw(path: string): Promise<string> {
       headers: { accept: 'application/json' }
     });
   } catch (err: any) {
+    logUpstream('POST', path, 502, `unreachable: ${err?.message || err}`);
     throw new HubError(`hub unreachable: ${err?.message || err}`, 502);
   }
 
@@ -193,6 +218,12 @@ export async function hubGetRaw(path: string): Promise<string> {
     } catch {
       /* status-only error */
     }
+    logUpstream(
+      'GET',
+      path,
+      res.status,
+      body?.error || body?.message || `hub responded ${res.status}`
+    );
     throw new HubError(
       body?.error || body?.message || `hub responded ${res.status}`,
       res.status
