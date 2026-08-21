@@ -5,7 +5,7 @@
  * exhausted its attempts and persisted a flag saying so.
  */
 
-import { requestDigest } from './gegRequest';
+import { requestDigest, requestNoncePayload } from './gegRequest';
 
 /** What the hub reports for a geg election. Only the fields the stall UI needs. */
 export type GegElectionState = {
@@ -47,17 +47,38 @@ export async function submitTallyResume(
   proposalId: string,
   signRaw: (digest: Uint8Array) => Promise<string>
 ): Promise<void> {
-  const adminSig = await signRaw(requestDigest('tally_resume', proposalId));
+  // The signature says when it was made, and the hub accepts each timestamp once
+  // inside a short window. Without it, one retry signature would authorise
+  // un-stalling this proposal forever — including after the coordinator has
+  // legitimately stalled it again.
+  const issuedAt = Math.floor(Date.now() / 1000);
+  const adminSig = await signRaw(
+    requestDigest('tally_resume', proposalId, requestNoncePayload(issuedAt))
+  );
   const r = await fetch(endpoint(apiBaseUrl, proposalId, 'te_tally_stalled'), {
     method: 'POST',
     credentials: 'omit',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ stalled: false, adminSig })
+    body: JSON.stringify({ stalled: false, adminSig, issuedAt })
   });
   if (r.status === 403) {
     throw new Error(
       "The hub refused this signature. Only an admin of this proposal's space can retry a tally."
     );
+  }
+  // The signature is only valid for a few minutes around the time it was made, so a
+  // clock that is far off produces a signature the hub considers expired before it
+  // arrives. Worth naming: the raw 400 reads like a server fault, and the fix is on
+  // the admin's own machine.
+  if (r.status === 400) {
+    const detail = await r.text();
+    if (detail.includes('issuedAt')) {
+      throw new Error(
+        "This retry was signed too far from the hub's clock to be accepted. " +
+          "Check that this device's date and time are set automatically, then try again."
+      );
+    }
+    throw new Error(`hub 400: ${detail}`);
   }
   if (!r.ok) throw new Error(`hub ${r.status}: ${await r.text()}`);
 }

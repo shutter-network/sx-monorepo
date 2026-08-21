@@ -9,6 +9,7 @@ import { containsFlaggedLinks, flaggedAddresses } from '../helpers/moderation';
 import { isMalicious } from '../helpers/monitoring';
 import db from '../helpers/mysql';
 import { getLimits, getSpaceType } from '../helpers/options';
+import { effectivePrivacy } from '../helpers/privacy';
 import { getProvider } from '../helpers/provider';
 import { validateSpaceSettings } from '../helpers/spaceValidation';
 import {
@@ -181,9 +182,9 @@ export async function verify(body): Promise<any> {
     return Promise.reject('not allowed to set privacy');
   }
 
-  const effectivePrivacy =
-    spacePrivacy !== 'any' ? spacePrivacy : proposalPrivacy ?? '';
-  if (effectivePrivacy === 'shutter-elgamal') {
+  // No `existing` on creation: a proposal that does not exist yet has no privacy
+  // to preserve, so the chain collapses to the `''` this always used.
+  if (effectivePrivacy(space, msg.payload) === 'shutter-elgamal') {
     const now = Math.floor(Date.now() / 1e3);
     if (msg.payload.start - now < MIN_DKG_LEAD_TIME_S) {
       return Promise.reject(
@@ -352,10 +353,7 @@ export async function action(body, ipfs, receipt, id): Promise<void> {
   const plugins = JSON.stringify(metadata.plugins || {});
   const spaceNetwork = spaceSettings.network;
   const proposalSnapshot = parseInt(msg.payload.snapshot || '0');
-  let privacy = spaceSettings.voting?.privacy ?? 'any';
-  if (privacy === 'any') {
-    privacy = msg.payload.privacy ?? '';
-  }
+  const privacy = effectivePrivacy(spaceSettings, msg.payload);
 
   let quorum = spaceSettings.voting?.quorum || 0;
   if (!quorum && spaceSettings.plugins?.quorum) {
@@ -415,20 +413,26 @@ export async function action(body, ipfs, receipt, id): Promise<void> {
   // builds, so a throw here is a genuine fault and must abort the insert rather
   // than leave a private proposal with no committee.
   if (privacy === 'shutter-elgamal') {
+    const snapshot = await buildCommitteeSnapshot({
+      eligibilityKey: await getEligibilityKey(),
+      votingStart: proposal.start,
+      votingEnd: proposal.end,
+      adminAddress: adminForConfig(space, proposal.author)
+    });
     Object.assign(
       proposal,
-      committeeColumns(
-        await buildCommitteeSnapshot({
-          eligibilityKey: await getEligibilityKey(),
-          votingStart: proposal.start,
-          votingEnd: proposal.end,
-          adminAddress: adminForConfig(space, proposal.author)
-        })
-      ),
+      committeeColumns(snapshot),
       // Without this the proposal has a committee and a key but no ballot shape,
       // so the browser refuses to build a ballot and ingest refuses to verify
       // one — a proposal that looks ready and cannot be voted on.
-      ballotParamsColumn(msg.payload.choices, msg.payload.type)
+      //
+      // The budget comes from the snapshot rather than the environment, so the
+      // two copies of it cannot describe different ballots later.
+      ballotParamsColumn(
+        msg.payload.choices,
+        msg.payload.type,
+        snapshot.weightedBudget
+      )
     );
   }
 

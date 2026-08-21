@@ -11,6 +11,7 @@
 import fetch from 'node-fetch';
 import request from 'supertest';
 import { buildApp } from '../src/app';
+import log from '../src/log';
 
 // ts-jest hoists this above the imports, so `fetch` is already the mock by the
 // time the app module resolves it.
@@ -318,8 +319,6 @@ describe('unsupported writes', () => {
     expect(res.body.error).toContain(reason);
     expect(mockFetch).not.toHaveBeenCalled();
   });
-
-
 });
 
 describe('the /port read mount', () => {
@@ -403,7 +402,9 @@ describe('aggregate', () => {
       .send(body);
 
     expect(res.status).toBe(204);
-    expect(lastUrl()).toBe(`http://hub.test/api/proposal/${PREFIXED}/te_aggregate`);
+    expect(lastUrl()).toBe(
+      `http://hub.test/api/proposal/${PREFIXED}/te_aggregate`
+    );
     expect(JSON.parse(mockFetch.mock.calls[0][1].body)).toEqual(body);
   });
 
@@ -411,7 +412,11 @@ describe('aggregate', () => {
     hubReplies({}, 204);
     await request(app)
       .post(`/elections/${BARE}/aggregate`)
-      .send({ aggregate: { admitted: [] }, keyperSig: '0xsig', keyperIndex: 3 });
+      .send({
+        aggregate: { admitted: [] },
+        keyperSig: '0xsig',
+        keyperIndex: 3
+      });
     expect(JSON.parse(mockFetch.mock.calls[0][1].body)).toEqual({
       aggregate: { admitted: [] },
       keyperSig: '0xsig'
@@ -460,7 +465,9 @@ describe('aggregate', () => {
 
   it('serves the aggregate on the keyper read mount too', async () => {
     hubReplies({ aggregate: null });
-    expect((await request(app).get(`/port/elections/${BARE}/aggregate`)).status).toBe(200);
+    expect(
+      (await request(app).get(`/port/elections/${BARE}/aggregate`)).status
+    ).toBe(200);
   });
 
   it('does not route the write under /port', async () => {
@@ -529,7 +536,8 @@ describe('decryption shares', () => {
 
   it('does not route the write under /port', async () => {
     expect(
-      (await request(app).post(`/port/elections/${BARE}/shares`).send({})).status
+      (await request(app).post(`/port/elections/${BARE}/shares`).send({}))
+        .status
     ).toBe(404);
   });
 });
@@ -551,7 +559,9 @@ describe('published result', () => {
         resultPublisherSig: '0xsig'
       });
     expect(res.status).toBe(204);
-    expect(lastUrl()).toBe(`http://hub.test/api/proposal/${PREFIXED}/te_result`);
+    expect(lastUrl()).toBe(
+      `http://hub.test/api/proposal/${PREFIXED}/te_result`
+    );
   });
 
   // The totals are what the publisher signed. Re-serialising them here would
@@ -655,9 +665,56 @@ describe('tally stall', () => {
 
   it('does not route the write under /port', async () => {
     expect(
-      (await request(app)
-        .post(`/port/elections/${BARE}/tally-stalled`)
-        .send({ stalled: true })).status
+      (
+        await request(app)
+          .post(`/port/elections/${BARE}/tally-stalled`)
+          .send({ stalled: true })
+      ).status
     ).toBe(404);
+  });
+});
+
+describe('a rate-limited hub names itself in the log', () => {
+  it('logs 429 at error level, with the consequence and the remedy', async () => {
+    const errors: string[] = [];
+    const spy = jest
+      .spyOn(log, 'error')
+      .mockImplementation((...args: unknown[]) => {
+        errors.push(args.map(String).join(' '));
+        return undefined as never;
+      });
+    try {
+      hubReplies({ error: 'too many requests' }, 429);
+      const res = await request(app).get(`/elections/${BARE}`);
+      expect(res.status).toBe(429);
+
+      const line = errors.join('\n');
+      expect(line).toContain('429');
+      // Names the cause, the symptom an operator will actually see, and the fix.
+      expect(line).toMatch(/rate-limited/i);
+      expect(line).toMatch(/stall/i);
+      expect(line).toMatch(/exempt|limit/i);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  // Other 4xx are ordinary and must stay at warn, or the distinction is lost.
+  it('leaves an ordinary 4xx at warn', async () => {
+    const errorSpy = jest
+      .spyOn(log, 'error')
+      .mockImplementation(() => undefined as never);
+    const warnSpy = jest
+      .spyOn(log, 'warn')
+      .mockImplementation(() => undefined as never);
+    try {
+      hubReplies({ error: 'proposal_not_found' }, 404);
+      await request(app).get(`/elections/${BARE}`);
+      expect(warnSpy).toHaveBeenCalled();
+      expect(errorSpy).not.toHaveBeenCalled();
+    } finally {
+      errorSpy.mockRestore();
+      warnSpy.mockRestore();
+    }
   });
 });

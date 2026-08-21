@@ -25,6 +25,7 @@ import {
   EligibilityKeyError,
   eligibilityPublicKey
 } from './helpers/eligibilityKey';
+import { canonicalAggregate, canonicalPoint } from './helpers/gegAggregate';
 import {
   composeElectionConfig,
   GegConfigError,
@@ -37,6 +38,7 @@ import {
   GegDigestError,
   recoverDigestSigner,
   requestDigest,
+  requestNoncePayload,
   resultDigest
 } from './helpers/gegDigests';
 import log from './helpers/log';
@@ -54,6 +56,16 @@ const router = express.Router();
  * rows it received, so truncation costs an extra request and nothing else.
  */
 const MAX_BALLOT_PAGE = 1000;
+
+/**
+ * How far a stall/resume request's `issuedAt` may sit from the hub's clock.
+ *
+ * Wide enough that ordinary clock skew between the coordinator, a voter's browser
+ * and the hub never rejects an honest request; narrow enough that a captured
+ * signature stops being useful long before the next admin retry, which is the
+ * replay this bounds.
+ */
+const REQUEST_FRESHNESS_S = 300;
 
 /** How many proposals one `list` response may name. */
 const LIST_LIMIT = 500;
@@ -74,8 +86,8 @@ function parseJsonField<T>(value: unknown, fallback: T): T {
 async function loadProposal(proposalId: string): Promise<any | null> {
   const rows = await (db as any).queryAsync(
     `SELECT id, privacy, type, choices, start, end, author, space, te_mpk,
-            te_committee_pks, te_geg_config, te_aggregate, te_dkg_status,
-            te_tally_stalled
+            te_committee_pks, te_geg_config, te_config, te_aggregate,
+            te_dkg_status, te_tally_stalled
        FROM proposals WHERE id = ? LIMIT 1`,
     [proposalId]
   );
@@ -124,7 +136,7 @@ router.get('/proposal/:id/te_geg_election', async (req, res) => {
     const proposal = await loadProposal(proposalId);
     if (!proposal) return sendError(res, 'proposal_not_found', 404);
     if (proposal.privacy !== 'shutter-elgamal') {
-      return sendError(res, 'proposal_not_private', 400);
+      return sendError(res, 'proposal_not_private', 404);
     }
 
     let config;
@@ -142,6 +154,22 @@ router.get('/proposal/:id/te_geg_election', async (req, res) => {
         return sendError(res, err.message, 503);
       }
       throw err;
+    }
+
+    const ingestConfig = parseJsonField<any>(proposal.te_config, null);
+    const ingestBudget = Number(ingestConfig?.budget);
+    if (ingestBudget !== config.budget) {
+      log.error(
+        `[geg] ${proposalId}: ballot budget disagrees — te_config says ${ingestConfig?.budget}, ` +
+          `the committee config says ${config.budget}`
+      );
+      return sendError(
+        res,
+        `ballot budget mismatch: ballots are built to ${ingestConfig?.budget} but the ` +
+          `committee would verify against ${config.budget}; every ballot would be ` +
+          'rejected as INVALID_PROOF',
+        500
+      );
     }
 
     const committeePks = parseJsonField<string[] | null>(
@@ -207,7 +235,7 @@ router.get('/proposal/:id/te_geg_ballots', async (req, res) => {
     const proposal = await loadProposal(proposalId);
     if (!proposal) return sendError(res, 'proposal_not_found', 404);
     if (proposal.privacy !== 'shutter-elgamal') {
-      return sendError(res, 'proposal_not_private', 400);
+      return sendError(res, 'proposal_not_private', 404);
     }
 
     const start = Math.max(
@@ -376,21 +404,6 @@ router.get('/proposal/:id/te_geg_ballots', async (req, res) => {
  * would otherwise never reach quorum, and the failure would look like disagreement
  * rather than formatting.
  */
-function canonicalPoint(value: unknown, label: string, size: number): string {
-  const body =
-    typeof value === 'string' &&
-    (value.startsWith('0x') || value.startsWith('0X'))
-      ? value.slice(2)
-      : value;
-  if (
-    typeof body !== 'string' ||
-    body.length !== size * 2 ||
-    !/^[0-9a-fA-F]*$/.test(body)
-  ) {
-    throw new GegDigestError(`${label}: expected ${size} bytes of hex`);
-  }
-  return `0x${body.toLowerCase()}`;
-}
 
 /**
  * A keyper's DKG result.
@@ -416,7 +429,7 @@ router.post('/proposal/:id/te_geg_dkg', async (req, res) => {
     const proposal = await loadProposal(proposalId);
     if (!proposal) return sendError(res, 'proposal_not_found', 404);
     if (proposal.privacy !== 'shutter-elgamal') {
-      return sendError(res, 'proposal_not_private', 400);
+      return sendError(res, 'proposal_not_private', 404);
     }
 
     let snapshot;
@@ -574,62 +587,6 @@ async function canonicalAggregateFor(
 }
 
 /**
- * Canonicalise an aggregate envelope for storage and comparison.
- *
- * The quorum counts submissions that agree *byte-for-byte*, so what is stored
- * has to be canonical: two keypers that derived the same tally must produce the
- * same string, and two that derived different tallies must not. Field order and
- * point capitalisation are normalised here for that reason — otherwise a
- * formatting difference reads as a disagreeing committee, which is the one
- * failure that looks exactly like a real split.
- *
- * The digest is what actually decides agreement (it is what the keypers signed);
- * this JSON is stored beside it so an auditor can see what each member claimed
- * when a quorum does not form.
- */
-function canonicalAggregate(raw: any, electionId: string) {
-  if (!raw || typeof raw !== 'object') {
-    throw new GegDigestError('aggregate: expected an object');
-  }
-  const aggregates = (Array.isArray(raw.aggregates) ? raw.aggregates : []).map(
-    (ct: any, i: number) => ({
-      c1: canonicalPoint(ct?.c1, `aggregates[${i}].c1`, 96),
-      c2: canonicalPoint(ct?.c2, `aggregates[${i}].c2`, 96)
-    })
-  );
-  const admitted = (Array.isArray(raw.admitted) ? raw.admitted : []).map(
-    (seq: any, i: number) => {
-      if (!Number.isInteger(seq) || seq < 0) {
-        throw new GegDigestError(`admitted[${i}]: expected a sequence number`);
-      }
-      return seq;
-    }
-  );
-  const exclusions = (Array.isArray(raw.exclusions) ? raw.exclusions : []).map(
-    (x: any, i: number) => {
-      if (!Number.isInteger(x?.sequenceNumber) || x.sequenceNumber < 0) {
-        throw new GegDigestError(
-          `exclusions[${i}].sequenceNumber: expected a sequence number`
-        );
-      }
-      if (typeof x?.reason !== 'string') {
-        throw new GegDigestError(`exclusions[${i}].reason: expected a string`);
-      }
-      return { sequenceNumber: x.sequenceNumber, reason: x.reason };
-    }
-  );
-  const totalAdmittedWeight = raw.totalAdmittedWeight ?? 0;
-
-  return {
-    electionId,
-    aggregates,
-    admitted,
-    exclusions,
-    totalAdmittedWeight
-  };
-}
-
-/**
  * One keyper's aggregate, and the quorum rule that makes one of them canonical.
  *
  * Three behaviours here are the protocol's, not choices — they mirror its own
@@ -655,7 +612,7 @@ router.post('/proposal/:id/te_aggregate', async (req, res) => {
     const proposal = await loadProposal(proposalId);
     if (!proposal) return sendError(res, 'proposal_not_found', 404);
     if (proposal.privacy !== 'shutter-elgamal') {
-      return sendError(res, 'proposal_not_private', 400);
+      return sendError(res, 'proposal_not_private', 404);
     }
 
     let snapshot;
@@ -810,7 +767,7 @@ router.get('/proposal/:id/te_geg_aggregate', async (req, res) => {
     const proposal = await loadProposal(proposalId);
     if (!proposal) return sendError(res, 'proposal_not_found', 404);
     if (proposal.privacy !== 'shutter-elgamal') {
-      return sendError(res, 'proposal_not_private', 400);
+      return sendError(res, 'proposal_not_private', 404);
     }
 
     let snapshot;
@@ -948,7 +905,7 @@ router.post('/proposal/:id/te_geg_decryption_share', async (req, res) => {
     const proposal = await loadProposal(proposalId);
     if (!proposal) return sendError(res, 'proposal_not_found', 404);
     if (proposal.privacy !== 'shutter-elgamal') {
-      return sendError(res, 'proposal_not_private', 400);
+      return sendError(res, 'proposal_not_private', 404);
     }
 
     let snapshot;
@@ -1123,7 +1080,7 @@ router.get('/proposal/:id/te_geg_decryption_shares', async (req, res) => {
     const proposal = await loadProposal(proposalId);
     if (!proposal) return sendError(res, 'proposal_not_found', 404);
     if (proposal.privacy !== 'shutter-elgamal') {
-      return sendError(res, 'proposal_not_private', 400);
+      return sendError(res, 'proposal_not_private', 404);
     }
 
     const choices = parseJsonField<string[]>(proposal.choices, []);
@@ -1188,7 +1145,7 @@ router.post('/proposal/:id/te_result', async (req, res) => {
     const proposal = await loadProposal(proposalId);
     if (!proposal) return sendError(res, 'proposal_not_found', 404);
     if (proposal.privacy !== 'shutter-elgamal') {
-      return sendError(res, 'proposal_not_private', 400);
+      return sendError(res, 'proposal_not_private', 404);
     }
 
     let snapshot;
@@ -1303,7 +1260,7 @@ router.get('/proposal/:id/te_result', async (req, res) => {
     const proposal = await loadProposal(proposalId);
     if (!proposal) return sendError(res, 'proposal_not_found', 404);
     if (proposal.privacy !== 'shutter-elgamal') {
-      return sendError(res, 'proposal_not_private', 400);
+      return sendError(res, 'proposal_not_private', 404);
     }
 
     const rows = await (db as any).queryAsync(
@@ -1372,7 +1329,7 @@ router.post('/proposal/:id/te_tally_stalled', async (req, res) => {
     const proposal = await loadProposal(proposalId);
     if (!proposal) return sendError(res, 'proposal_not_found', 404);
     if (proposal.privacy !== 'shutter-elgamal') {
-      return sendError(res, 'proposal_not_private', 400);
+      return sendError(res, 'proposal_not_private', 404);
     }
 
     let snapshot;
@@ -1397,9 +1354,28 @@ router.post('/proposal/:id/te_tally_stalled', async (req, res) => {
       ? [snapshot.resultPublisherAddress]
       : await resumeAuthorities(proposal);
 
+    // The signature must say *when* it was made, and that timestamp must be
+    // recent and unused. Without it the digest binds only the operation and the
+    // election, so one observed stall stays valid forever — replayed after each
+    // admin retry, it keeps a confidential tally from ever completing.
+    const issuedAt = req.body?.issuedAt;
+    if (!Number.isInteger(issuedAt) || issuedAt < 0) {
+      return sendError(res, 'issuedAt: expected a unix timestamp', 400);
+    }
+    const now = Math.floor(Date.now() / 1000);
+    if (Math.abs(now - issuedAt) > REQUEST_FRESHNESS_S) {
+      log.warn(
+        `[geg] ${proposalId}: ${op} issuedAt ${issuedAt} is outside the ±${REQUEST_FRESHNESS_S}s window (now ${now})`
+      );
+      return sendError(res, 'issuedAt is not within the accepted window', 400);
+    }
+
     let signer: string | null;
     try {
-      signer = recoverDigestSigner(requestDigest(op, proposalId), sig);
+      signer = recoverDigestSigner(
+        requestDigest(op, proposalId, requestNoncePayload(issuedAt)),
+        sig
+      );
     } catch (err: any) {
       return sendError(res, err?.message || 'bad_request', 400);
     }
@@ -1415,6 +1391,32 @@ router.post('/proposal/:id/te_tally_stalled', async (req, res) => {
         403
       );
     }
+
+    try {
+      await (db as any).queryAsync(
+        `INSERT INTO te_request_nonces (proposal_id, op, issued_at, accepted_at)
+         VALUES (?, ?, ?, ?)`,
+        [proposalId, op, issuedAt, now]
+      );
+    } catch (err: any) {
+      if (err?.code === 'ER_DUP_ENTRY') {
+        const already = Boolean(proposal.te_tally_stalled) === stalled;
+        log.warn(
+          `[geg] ${proposalId}: ${op} reused nonce ${issuedAt}${
+            already ? ' (no-op, already in that state)' : ' — REJECTED'
+          }`
+        );
+        if (already) return res.status(204).end();
+        return sendError(res, 'this request has already been used', 409);
+      }
+      throw err;
+    }
+    // Nothing outside the window can be accepted again, so only rows that could
+    // still be replayed are worth keeping.
+    await (db as any).queryAsync(
+      'DELETE FROM te_request_nonces WHERE accepted_at < ?',
+      [now - REQUEST_FRESHNESS_S]
+    );
 
     await (db as any).queryAsync(
       'UPDATE proposals SET te_tally_stalled = ? WHERE id = ? LIMIT 1',
@@ -1438,7 +1440,7 @@ router.get('/proposal/:id/te_geg_dkg', async (req, res) => {
     const proposal = await loadProposal(proposalId);
     if (!proposal) return sendError(res, 'proposal_not_found', 404);
     if (proposal.privacy !== 'shutter-elgamal') {
-      return sendError(res, 'proposal_not_private', 400);
+      return sendError(res, 'proposal_not_private', 404);
     }
     const rows = await (db as any).queryAsync(
       `SELECT keyper_index, mpk_hex, committee_pks_hex, signature

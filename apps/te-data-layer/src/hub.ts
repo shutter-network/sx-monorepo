@@ -36,6 +36,17 @@ function logUpstream(
   detail: string
 ): void {
   const line = `[te-dl] upstream ${method} hub${path} status=${status}: ${detail}`;
+
+  if (status === 429) {
+    log.error(
+      `${line} — the hub rate-limited this request. All keyper and coordinator ` +
+        "traffic shares this service's IP, so a throttled read makes keypers " +
+        'fail to aggregate and the tally stalls reporting "unreachable". Raise ' +
+        "the hub's limit for this service, or exempt it."
+    );
+    return;
+  }
+
   if (status >= 500) log.error(line);
   else log.warn(line);
 }

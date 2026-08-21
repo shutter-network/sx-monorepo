@@ -7,8 +7,10 @@ import {
   ballotParamsColumn,
   buildCommitteeSnapshot,
   committeeColumns,
+  frozenWeightedBudget,
   TeConfigError
 } from '../helpers/teCommittee';
+import { effectivePrivacy } from '../helpers/privacy';
 import { getEligibilityKey } from '../helpers/teEligibility';
 import { jsonParse, validateChoices } from '../helpers/utils';
 
@@ -87,9 +89,8 @@ export async function verify(body): Promise<any> {
   // proposal starting in ten seconds and then flip its privacy — bypassing the
   // gate in writer/proposal.ts entirely and leaving a proposal whose key
   // generation cannot possibly finish before voting opens.
-  const effectivePrivacy =
-    spacePrivacy !== 'any' ? spacePrivacy : proposalPrivacy ?? proposal.privacy;
-  if (effectivePrivacy === 'shutter-elgamal' && !proposal.te_mpk) {
+  const privacy = effectivePrivacy(space, msg.payload, proposal);
+  if (privacy === 'shutter-elgamal' && !proposal.te_mpk) {
     const now = Math.floor(Date.now() / 1e3);
     if (proposal.start - now < MIN_DKG_LEAD_TIME_S) {
       return Promise.reject(
@@ -108,10 +109,7 @@ export async function action(body, ipfs): Promise<void> {
   const plugins = JSON.stringify(metadata.plugins || {});
   const spaceSettings = await getSpace(msg.space);
   const existing = await getProposal(msg.space, msg.payload.proposal);
-  let privacy = spaceSettings.voting?.privacy ?? 'any';
-  if (privacy === 'any') {
-    privacy = msg.payload.privacy ?? '';
-  }
+  const privacy = effectivePrivacy(spaceSettings, msg.payload, existing);
 
   const proposal = {
     ipfs,
@@ -137,26 +135,22 @@ export async function action(body, ipfs): Promise<void> {
   // proposal keeps the snapshot it was created with — the committee is frozen
   // for its whole life, and re-deriving it here could silently swap the
   // committee under a proposal mid-ceremony if env changed in between.
+  let frozenBudget: number | null = null;
   if (privacy === 'shutter-elgamal' && existing && !existing.te_geg_config) {
     try {
-      Object.assign(
-        proposal,
-        committeeColumns(
-          await buildCommitteeSnapshot({
-            eligibilityKey: await getEligibilityKey(),
-            votingStart: existing.start,
-            votingEnd: existing.end,
-            // Same rule the hub applies live: the space's first admin, or the
-            // author when it lists none.
-            adminAddress:
-              (Array.isArray(spaceSettings?.admins)
-                ? spaceSettings.admins.find(
-                    (a: any) => typeof a === 'string' && a
-                  )
-                : undefined) || existing.author
-          })
-        )
-      );
+      const snapshot = await buildCommitteeSnapshot({
+        eligibilityKey: await getEligibilityKey(),
+        votingStart: existing.start,
+        votingEnd: existing.end,
+        // Same rule the hub applies live: the space's first admin, or the
+        // author when it lists none.
+        adminAddress:
+          (Array.isArray(spaceSettings?.admins)
+            ? spaceSettings.admins.find((a: any) => typeof a === 'string' && a)
+            : undefined) || existing.author
+      });
+      Object.assign(proposal, committeeColumns(snapshot));
+      frozenBudget = snapshot.weightedBudget;
     } catch (err: any) {
       const reason =
         err instanceof TeConfigError
@@ -173,10 +167,21 @@ export async function action(body, ipfs): Promise<void> {
   // proposal edited after creation would reject the very ballots the browser
   // builds from its own (correct) reading of the same fields.
   if (privacy === 'shutter-elgamal') {
-    Object.assign(
-      proposal,
-      ballotParamsColumn(msg.payload.choices, msg.payload.type)
-    );
+    try {
+      const budget =
+        frozenBudget ?? frozenWeightedBudget(existing?.te_geg_config);
+      Object.assign(
+        proposal,
+        ballotParamsColumn(msg.payload.choices, msg.payload.type, budget)
+      );
+    } catch (err: any) {
+      log.warn(
+        `[writer] cannot rebuild ballot params for ${msg.payload.proposal}: ${err?.message || err}`
+      );
+      return Promise.reject(
+        `private voting unavailable: ${err?.message || err}`
+      );
+    }
   }
 
   const query = 'UPDATE proposals SET ? WHERE id = ? LIMIT 1';

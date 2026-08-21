@@ -21,7 +21,10 @@
 import { Wallet } from '@ethersproject/wallet';
 import fetch from 'node-fetch';
 import { eligibilityPublicKey } from '../../src/helpers/eligibilityKey';
-import { requestDigest } from '../../src/helpers/gegDigests';
+import {
+  requestDigest,
+  requestNoncePayload
+} from '../../src/helpers/gegDigests';
 import db from '../../src/helpers/mysql';
 
 const HOST = `http://localhost:${process.env.PORT || 3030}`;
@@ -35,8 +38,40 @@ const AUTHOR = new Wallet(`0x${'e5'.repeat(32)}`);
 
 const ID = '0xbbbb000000000000000000000000000000000000000000000000000000000001';
 
-async function sign(wallet: Wallet, op: string) {
-  return wallet.signMessage(requestDigest(op, ID));
+/**
+ * A stall/resume signature carries the moment it was made, and the hub spends
+ * each timestamp once inside a short window — without it, one captured signature
+ * would re-stall a tally after every admin retry, forever.
+ *
+ * Each call takes a fresh `issuedAt`, so tests never collide on a spent nonce.
+ * `nextIssuedAt` steps forward rather than reusing `Date.now()`, because two
+ * signatures made in the same second are byte-identical under RFC 6979 and the
+ * second would be refused as a replay.
+ */
+let issuedAtCursor = Math.floor(Date.now() / 1000);
+function nextIssuedAt(): number {
+  return issuedAtCursor++;
+}
+
+async function sign(wallet: Wallet, op: string, issuedAt: number) {
+  return wallet.signMessage(
+    requestDigest(op, ID, requestNoncePayload(issuedAt))
+  );
+}
+
+/** One timestamp, used both in the signed digest and in the body beside it. */
+async function postSigned(
+  stalled: boolean,
+  key: 'resultPublisherSig' | 'adminSig',
+  wallet: Wallet,
+  op: string
+) {
+  const issuedAt = nextIssuedAt();
+  return post({
+    stalled,
+    [key]: await sign(wallet, op, issuedAt),
+    issuedAt
+  });
 }
 
 async function post(body: unknown) {
@@ -115,6 +150,16 @@ describe('POST /api/proposal/:id/te_tally_stalled', () => {
       scores_updated: 0,
       vp_value_by_strategy: '[]',
       votes: 0,
+      // A private proposal always has its ballot shape stored — it is written at
+      // creation and rewritten on every edit. The election read asserts it agrees
+      // with the budget the committee will verify against, because a disagreement
+      // rejects every ballot as INVALID_PROOF and publishes a tally of zeros.
+      te_config: JSON.stringify({
+        numCandidates: 2,
+        budget: 100,
+        mode: 'exact',
+        variant: 'A'
+      }),
       te_geg_config: JSON.stringify({
         v: 1,
         keypers: [{ address: KEYPER.address, url: 'https://k1.example' }],
@@ -145,26 +190,17 @@ describe('POST /api/proposal/:id/te_tally_stalled', () => {
 
   it('lets the coordinator mark a stall', async () => {
     expect(
-      await post({
-        stalled: true,
-        resultPublisherSig: await sign(PUBLISHER, 'tally_stall')
-      })
+      await postSigned(true, 'resultPublisherSig', PUBLISHER, 'tally_stall')
     ).toBe(204);
     expect(await stalledFlag()).toBe(1);
     expect(await reportedByElectionRead()).toBe(true);
   });
 
   it('lets the admin clear one', async () => {
-    await post({
-      stalled: true,
-      resultPublisherSig: await sign(PUBLISHER, 'tally_stall')
-    });
-    expect(
-      await post({
-        stalled: false,
-        adminSig: await sign(ADMIN, 'tally_resume')
-      })
-    ).toBe(204);
+    await postSigned(true, 'resultPublisherSig', PUBLISHER, 'tally_stall');
+    expect(await postSigned(false, 'adminSig', ADMIN, 'tally_resume')).toBe(
+      204
+    );
     expect(await stalledFlag()).toBe(0);
     expect(await reportedByElectionRead()).toBe(false);
   });
@@ -173,57 +209,34 @@ describe('POST /api/proposal/:id/te_tally_stalled', () => {
   // whatever it can; if that included a resume, a stalled election would clear
   // itself and loop.
   it('refuses a resume signed by the coordinator', async () => {
-    await post({
-      stalled: true,
-      resultPublisherSig: await sign(PUBLISHER, 'tally_stall')
-    });
-    expect(
-      await post({
-        stalled: false,
-        adminSig: await sign(PUBLISHER, 'tally_resume')
-      })
-    ).toBe(403);
+    await postSigned(true, 'resultPublisherSig', PUBLISHER, 'tally_stall');
+    expect(await postSigned(false, 'adminSig', PUBLISHER, 'tally_resume')).toBe(
+      403
+    );
     expect(await stalledFlag()).toBe(1); // still stalled
   });
 
   it('refuses a stall signed by the admin', async () => {
     expect(
-      await post({
-        stalled: true,
-        resultPublisherSig: await sign(ADMIN, 'tally_stall')
-      })
+      await postSigned(true, 'resultPublisherSig', ADMIN, 'tally_stall')
     ).toBe(403);
     expect(await stalledFlag()).toBe(0);
   });
 
   it('refuses either direction from a committee member', async () => {
     expect(
-      await post({
-        stalled: true,
-        resultPublisherSig: await sign(KEYPER, 'tally_stall')
-      })
+      await postSigned(true, 'resultPublisherSig', KEYPER, 'tally_stall')
     ).toBe(403);
-    expect(
-      await post({
-        stalled: false,
-        adminSig: await sign(KEYPER, 'tally_resume')
-      })
-    ).toBe(403);
+    expect(await postSigned(false, 'adminSig', KEYPER, 'tally_resume')).toBe(
+      403
+    );
   });
 
   // The direction is inside the signed message, so a signature taken for one
   // direction cannot be presented as the other.
   it('refuses a stall signature replayed as a resume', async () => {
-    await post({
-      stalled: true,
-      resultPublisherSig: await sign(PUBLISHER, 'tally_stall')
-    });
-    expect(
-      await post({
-        stalled: false,
-        adminSig: await sign(ADMIN, 'tally_stall')
-      })
-    ).toBe(403);
+    await postSigned(true, 'resultPublisherSig', PUBLISHER, 'tally_stall');
+    expect(await postSigned(false, 'adminSig', ADMIN, 'tally_stall')).toBe(403);
     expect(await stalledFlag()).toBe(1);
   });
 
@@ -236,13 +249,8 @@ describe('POST /api/proposal/:id/te_tally_stalled', () => {
       JSON.stringify({ admins: [ADMIN.address, LATE.address] }),
       'test.eth'
     ]);
-    await post({
-      stalled: true,
-      resultPublisherSig: await sign(PUBLISHER, 'tally_stall')
-    });
-    expect(
-      await post({ stalled: false, adminSig: await sign(LATE, 'tally_resume') })
-    ).toBe(204);
+    await postSigned(true, 'resultPublisherSig', PUBLISHER, 'tally_stall');
+    expect(await postSigned(false, 'adminSig', LATE, 'tally_resume')).toBe(204);
     await db.queryAsync('UPDATE spaces SET settings = ? WHERE id = ?', [
       JSON.stringify({ admins: [ADMIN.address] }),
       'test.eth'
@@ -255,17 +263,11 @@ describe('POST /api/proposal/:id/te_tally_stalled', () => {
       JSON.stringify({ admins: [] }),
       'test.eth'
     ]);
-    await post({
-      stalled: true,
-      resultPublisherSig: await sign(PUBLISHER, 'tally_stall')
-    });
+    await postSigned(true, 'resultPublisherSig', PUBLISHER, 'tally_stall');
     // The author is the fallback, and ADMIN is not the author.
-    expect(
-      await post({
-        stalled: false,
-        adminSig: await sign(ADMIN, 'tally_resume')
-      })
-    ).toBe(403);
+    expect(await postSigned(false, 'adminSig', ADMIN, 'tally_resume')).toBe(
+      403
+    );
     expect(await stalledFlag()).toBe(1);
     await db.queryAsync('UPDATE spaces SET settings = ? WHERE id = ?', [
       JSON.stringify({ admins: [ADMIN.address] }),
@@ -279,16 +281,10 @@ describe('POST /api/proposal/:id/te_tally_stalled', () => {
       JSON.stringify({ admins: [] }),
       'test.eth'
     ]);
-    await post({
-      stalled: true,
-      resultPublisherSig: await sign(PUBLISHER, 'tally_stall')
-    });
-    expect(
-      await post({
-        stalled: false,
-        adminSig: await sign(AUTHOR, 'tally_resume')
-      })
-    ).toBe(204);
+    await postSigned(true, 'resultPublisherSig', PUBLISHER, 'tally_stall');
+    expect(await postSigned(false, 'adminSig', AUTHOR, 'tally_resume')).toBe(
+      204
+    );
     await db.queryAsync('UPDATE spaces SET settings = ? WHERE id = ?', [
       JSON.stringify({ admins: [ADMIN.address] }),
       'test.eth'
@@ -296,13 +292,33 @@ describe('POST /api/proposal/:id/te_tally_stalled', () => {
   });
 
   it('rejects a missing or non-boolean direction', async () => {
+    const issuedAt = nextIssuedAt();
+    const sig = await sign(PUBLISHER, 'tally_stall', issuedAt);
+    expect(await post({ resultPublisherSig: sig, issuedAt })).toBe(400);
     expect(
-      await post({ resultPublisherSig: await sign(PUBLISHER, 'tally_stall') })
+      await post({ stalled: 'yes', resultPublisherSig: sig, issuedAt })
     ).toBe(400);
+  });
+
+  // The freshness half of the replay defence: a signature made outside the
+  // window is refused even though it is perfectly valid, because the replay that
+  // matters is the one presented long after it was issued.
+  it('rejects a signature issued outside the acceptance window', async () => {
+    const stale = Math.floor(Date.now() / 1000) - 3600;
     expect(
       await post({
-        stalled: 'yes',
-        resultPublisherSig: await sign(PUBLISHER, 'tally_stall')
+        stalled: true,
+        resultPublisherSig: await sign(PUBLISHER, 'tally_stall', stale),
+        issuedAt: stale
+      })
+    ).toBe(400);
+  });
+
+  it('rejects a body with no issuedAt at all', async () => {
+    expect(
+      await post({
+        stalled: true,
+        resultPublisherSig: await sign(PUBLISHER, 'tally_stall', nextIssuedAt())
       })
     ).toBe(400);
   });

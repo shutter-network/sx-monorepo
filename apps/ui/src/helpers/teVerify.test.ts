@@ -405,3 +405,107 @@ describe('verifyTally: WASM heap cleanup on early throw', () => {
     // ctSums + committeePKs on every iteration.
   }, 30_000);
 });
+
+describe('aggregateBallots: the committee admitted set', () => {
+  const generatorAggregate = () => ({
+    election_id: PROPOSAL_ID,
+    num_candidates: BASE_CONFIG.numCandidates,
+    ciphertexts: Array.from({ length: BASE_CONFIG.numCandidates }, () => ({
+      c1: G2_GEN_HEX,
+      c2: G2_GEN_HEX
+    }))
+  });
+
+  const seq = (b: AuditBallot, sequenceNumber: number) => ({
+    ...b,
+    sequenceNumber
+  });
+
+  // The regression: one excluded ballot must not read as a failed audit.
+  it('sums only the admitted ballots, so an exclusion still matches', async () => {
+    const result = await aggregateBallots(
+      makeBallotsPayload([
+        seq(makeBallot(1, 1), 0), // refused by the committee
+        seq(makeBallot(2, 1), 1) // the only one it counted
+      ]),
+      {
+        ...generatorAggregate(),
+        admitted: [1],
+        exclusions: [{ sequenceNumber: 0, reason: 'INVALID_PROOF' }]
+      }
+    );
+    expect(result.aggregateMatches).toBe(true);
+    expect(result.contributing).toBe(1);
+    expect(result.total).toBe(2);
+  });
+
+  // The same fixture without the admitted set is the old behaviour, and it is
+  // what made this a false alarm: two ballots sum to 2G, not G.
+  it('would not match if every ballot were summed', async () => {
+    const result = await aggregateBallots(
+      makeBallotsPayload([seq(makeBallot(1, 1), 0), seq(makeBallot(2, 1), 1)]),
+      generatorAggregate()
+    );
+    expect(result.aggregateMatches).toBe(false);
+    expect(result.contributing).toBe(2);
+  });
+
+  it('reports the exclusions rather than folding them into the match', async () => {
+    const exclusions = [
+      { sequenceNumber: 0, reason: 'INVALID_PROOF' },
+      { sequenceNumber: 2, reason: 'OUT_OF_WINDOW' }
+    ];
+    const result = await aggregateBallots(
+      makeBallotsPayload([
+        seq(makeBallot(1, 1), 0),
+        seq(makeBallot(2, 1), 1),
+        seq(makeBallot(3, 1), 2)
+      ]),
+      { ...generatorAggregate(), admitted: [1], exclusions }
+    );
+    expect(result.aggregateMatches).toBe(true);
+    expect(result.exclusions).toEqual(exclusions);
+  });
+
+  // An aggregate published before the committee took over carries neither field,
+  // and must keep behaving exactly as it did.
+  it('falls back to summing everything when admitted is absent', async () => {
+    const result = await aggregateBallots(
+      makeBallotsPayload([seq(makeBallot(1, 1), 0), seq(makeBallot(2, 1), 1)]),
+      makeDummyAggregate()
+    );
+    expect(result.contributing).toBe(2);
+    expect(result.exclusions).toEqual([]);
+    expect(result.admittedSetResolved).toBe(true);
+  });
+
+  // Two views that disagree about which ballots exist — reported on its own,
+  // because it is not a sum that came out differently.
+  it('flags an admitted ballot the hub did not serve', async () => {
+    const result = await aggregateBallots(
+      makeBallotsPayload([seq(makeBallot(1, 1), 0)]),
+      { ...generatorAggregate(), admitted: [0, 7], exclusions: [] }
+    );
+    expect(result.admittedSetResolved).toBe(false);
+  });
+
+  it('resolves cleanly when every admitted ballot is present', async () => {
+    const result = await aggregateBallots(
+      makeBallotsPayload([seq(makeBallot(1, 1), 0)]),
+      { ...generatorAggregate(), admitted: [0], exclusions: [] }
+    );
+    expect(result.admittedSetResolved).toBe(true);
+    expect(result.aggregateMatches).toBe(true);
+  });
+
+  // A ballot with no sequence number cannot be shown to be one the committee
+  // counted, so it must not be summed into a comparison against its aggregate.
+  it('ignores a ballot with no sequence number once admitted is in play', async () => {
+    const result = await aggregateBallots(
+      makeBallotsPayload([makeBallot(1, 1), seq(makeBallot(2, 1), 1)]),
+      { ...generatorAggregate(), admitted: [1], exclusions: [] }
+    );
+    expect(result.contributing).toBe(1);
+    expect(result.aggregateMatches).toBe(true);
+  });
+});

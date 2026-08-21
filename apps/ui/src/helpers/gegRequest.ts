@@ -43,6 +43,21 @@ function concatBytes(parts: Uint8Array[]): Uint8Array {
 }
 
 /**
+ * The freshness term a stall/resume request carries as its payload.
+ *
+ * Eight bytes, big-endian, unsigned seconds. Byte-exact with the hub's
+ * `requestNoncePayload` and geg's `request_nonce_payload`.
+ */
+export function requestNoncePayload(issuedAt: number): Uint8Array {
+  if (!Number.isInteger(issuedAt) || issuedAt < 0) {
+    throw new Error(`issuedAt must be a non-negative integer, got ${issuedAt}`);
+  }
+  const b = new Uint8Array(8);
+  new DataView(b.buffer).setBigUint64(0, BigInt(issuedAt), false);
+  return b;
+}
+
+/**
  * `keccak256(DST ‖ len|op ‖ len|electionId ‖ len|payload)` as raw bytes.
  *
  * `electionId` is the Snapshot proposal id, which the protocol reads as the 32-byte

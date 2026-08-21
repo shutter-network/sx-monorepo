@@ -23,7 +23,9 @@ import { join } from 'node:path';
 import {
   dkgResultDigest,
   GegDigestError,
-  recoverDigestSigner
+  recoverDigestSigner,
+  requestDigest,
+  requestNoncePayload
 } from '../../src/helpers/gegDigests';
 
 type DigestCase = {
@@ -160,5 +162,63 @@ describe('GEG-DKG-RESULT-v1 digest', () => {
     expect(recoverDigestSigner(otherDigest, ONE.signature)).not.toBe(
       ONE.signer
     );
+  });
+});
+
+// The freshness payload is written four times — geg's `request_nonce_payload`, the
+// hub's and the browser's `requestNoncePayload`, and read back by two verifiers. If
+// any of them disagrees by a byte, a stall signature stops verifying and a tally
+// cannot be marked stalled at all. These vectors come from geg's Python, so this
+// asserts agreement with the protocol rather than agreement with ourselves.
+describe('requestNoncePayload — cross-language parity', () => {
+  const vectors = JSON.parse(
+    readFileSync(
+      join(
+        __dirname,
+        '../../../../packages/geg-parity/vectors/request-nonce.json'
+      ),
+      'utf8'
+    )
+  ) as {
+    cases: {
+      name: string;
+      op: string;
+      electionId: string;
+      payload: string;
+      digest: string;
+      signature: string;
+      signer: string;
+    }[];
+  };
+
+  it('has vectors to check', () => {
+    expect(vectors.cases.length).toBeGreaterThan(0);
+  });
+
+  it.each(vectors.cases.map(c => [c.name, c] as const))(
+    'reproduces %s',
+    (_name, c) => {
+      // The timestamp is recovered from the vector's own payload, so the encoding is
+      // what is under test rather than a number we also chose.
+      const issuedAt = Number(BigInt(c.payload));
+      expect(`0x${requestNoncePayload(issuedAt).toString('hex')}`).toBe(
+        c.payload
+      );
+      expect(
+        `0x${requestDigest(c.op, c.electionId, requestNoncePayload(issuedAt)).toString('hex')}`
+      ).toBe(c.digest);
+      // And a signature geg produced over it recovers to geg's signer here.
+      expect(
+        recoverDigestSigner(
+          Buffer.from(c.digest.slice(2), 'hex'),
+          c.signature
+        )?.toLowerCase()
+      ).toBe(c.signer.toLowerCase());
+    }
+  );
+
+  it('refuses a non-integer or negative timestamp rather than encoding nonsense', () => {
+    expect(() => requestNoncePayload(-1)).toThrow();
+    expect(() => requestNoncePayload(1.5)).toThrow();
   });
 });

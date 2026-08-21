@@ -157,7 +157,9 @@ router.get('/proposal/:id/te_ballots', async (req, res) => {
     }
     const rows = await (db as any).queryAsync(
       // cb != -3 excludes soft-deleted votes (CB.PENDING_DELETE in sequencer/constants.ts)
-      'SELECT voter, vp, choice FROM votes WHERE proposal = ? AND cb != -3 ORDER BY created ASC',
+      `SELECT voter, vp, choice FROM votes
+        WHERE proposal = ? AND cb != -3
+        ORDER BY created ASC, id ASC`,
       [proposalId]
     );
     const teConfig = parseJsonField<any>(proposal.te_config, null);
@@ -169,7 +171,8 @@ router.get('/proposal/:id/te_ballots', async (req, res) => {
       te_mpk: `0x${Buffer.from(proposal.te_mpk).toString('hex')}`,
       te_config: teConfig,
       maxWeight,
-      ballots: (rows as any[]).map(r => ({
+      ballots: (rows as any[]).map((r, i) => ({
+        sequenceNumber: i,
         voter: r.voter,
         vp: Number(r.vp),
         choice: parseJsonField<any>(r.choice, null)

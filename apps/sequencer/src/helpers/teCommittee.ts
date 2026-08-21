@@ -406,16 +406,25 @@ export function deriveMaxWeight(budget: number): number {
   return Math.floor(MAX_BUDGET_TIMES_WEIGHT / budget);
 }
 
+export function frozenWeightedBudget(teGegConfig: unknown): number {
+  const snapshot =
+    typeof teGegConfig === 'string'
+      ? JSON.parse(teGegConfig)
+      : (teGegConfig as any);
+  const budget = Number(snapshot?.weightedBudget);
+  if (!Number.isInteger(budget) || budget < 1) {
+    throw new TeConfigError(
+      `te_geg_config.weightedBudget is missing or invalid (${snapshot?.weightedBudget})`
+    );
+  }
+  return budget;
+}
+
 export function ballotParamsColumn(
   choices: string[],
   type: string | null | undefined,
-  env: TeEnv = readTeEnv()
+  weightedBudget: number
 ): { te_config: string } {
-  const weightedBudget = requireInt(
-    env.weightedBudget,
-    'TE_WEIGHTED_BUDGET',
-    100
-  );
   return {
     te_config: JSON.stringify({
       numCandidates: choices.length,

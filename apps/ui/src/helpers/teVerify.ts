@@ -72,6 +72,8 @@ export interface AuditPayload {
     election_id: string;
     num_candidates: number;
     ciphertexts: Array<{ c1: string; c2: string }>;
+    admitted?: number[];
+    exclusions?: Array<{ sequenceNumber: number; reason: string }>;
   };
   shares: Array<{
     keyper_index: number;
@@ -84,6 +86,8 @@ export interface AuditPayload {
 
 /** One encrypted ballot as served by ``GET /proposal/:id/te_ballots``. */
 export interface AuditBallot {
+  /** Position in the committee's order; what `admitted`/`exclusions` refer to. */
+  sequenceNumber?: number;
   voter: string;
   vp: number;
   choice: {
@@ -115,6 +119,8 @@ export interface BallotAggregateResult {
   contributing: number;
   /** Recomputed vp-weighted aggregate equals the published aggregate. */
   aggregateMatches: boolean;
+  exclusions: Array<{ sequenceNumber: number; reason: string }>;
+  admittedSetResolved: boolean;
   /**
    * Ballots counted at the ceiling rather than at their voting power, with what
    * each one actually held. Empty on most elections.
@@ -217,10 +223,31 @@ export async function aggregateBallots(
       ? BigInt(payload.maxWeight)
       : null;
 
+  const admitted = Array.isArray(expectedAggregate.admitted)
+    ? new Set(expectedAggregate.admitted)
+    : null;
+  const exclusions = Array.isArray(expectedAggregate.exclusions)
+    ? expectedAggregate.exclusions
+    : [];
+
+  const present = new Set(
+    payload.ballots
+      .map(b => b.sequenceNumber)
+      .filter((n): n is number => typeof n === 'number')
+  );
+  const admittedSetResolved =
+    admitted === null || [...admitted].every(n => present.has(n));
+
   try {
     for (const b of payload.ballots) {
       const env = b.choice;
       if (!env) continue;
+      if (admitted !== null) {
+        // Without a sequence number there is nothing to match against, so the
+        // ballot cannot be shown to be one the committee counted.
+        if (typeof b.sequenceNumber !== 'number') continue;
+        if (!admitted.has(b.sequenceNumber)) continue;
+      }
 
       const raw = BigInt(Math.round(b.vp));
       const w = maxWeight !== null && raw > maxWeight ? maxWeight : raw;
@@ -275,7 +302,9 @@ export async function aggregateBallots(
       total: payload.ballots.length,
       contributing,
       clamped,
-      aggregateMatches
+      aggregateMatches,
+      exclusions,
+      admittedSetResolved
     };
   } finally {
     for (const ct of acc) {
@@ -451,7 +480,13 @@ export function buildVerificationBundle(args: {
     encryptedBallots: args.ballots.ballots,
     localVerification: {
       ballotsTotal: args.ballotResult.total,
+      ballotsAggregated: args.ballotResult.contributing,
       aggregateMatches: args.ballotResult.aggregateMatches,
+      // Recorded in the bundle too: a reader reproducing this offline has to
+      // know which ballots were in scope, or they will recompute over all of
+      // them and reach a different answer for a correct election.
+      exclusions: args.ballotResult.exclusions,
+      admittedSetResolved: args.ballotResult.admittedSetResolved,
       recoveredTallies: args.tallyResult.tallies.map(t => t.toString()),
       thresholdMet: args.tallyResult.thresholdMet,
       matchesPublishedScores: args.tallyResult.matchesPublished

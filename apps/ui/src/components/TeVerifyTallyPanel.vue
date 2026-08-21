@@ -130,6 +130,23 @@ const clampSummary = computed(() => {
   };
 });
 
+const exclusionSummary = computed(() => {
+  if (status.value.kind !== 'ok') return null;
+  const { exclusions } = status.value.ballots;
+  if (!exclusions?.length) return null;
+
+  const byReason = new Map<string, number>();
+  for (const e of exclusions) {
+    byReason.set(e.reason, (byReason.get(e.reason) ?? 0) + 1);
+  }
+  return {
+    count: exclusions.length,
+    reasons: [...byReason.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .map(([reason, count]) => ({ reason, count }))
+  };
+});
+
 const numCandidates = computed(() =>
   status.value.kind === 'ok' ? status.value.audit.aggregate.num_candidates : 0
 );
@@ -281,11 +298,42 @@ function downloadBundle() {
         No votes were cast, but the published aggregate is NOT empty.
       </span>
       <span v-else>
-        {{ status.ballots.contributing }} ballots aggregated; the recomputed
-        total
+        {{ status.ballots.contributing }} ballots aggregated{{
+          exclusionSummary ? ' (the ones the committee admitted)' : ''
+        }}; the recomputed total
         {{ status.ballots.aggregateMatches ? 'matches' : 'does NOT match' }}
         the one the keypers decrypted.
       </span>
+    </div>
+    <!-- The committee named an admitted ballot the hub did not serve. Not a sum
+         that disagrees — two views of the election that disagree about which
+         ballots exist — so it is said separately and in stronger terms. -->
+    <div
+      v-if="status.kind === 'ok' && !status.ballots.admittedSetResolved"
+      class="text-sm text-skin-danger flex items-center gap-1"
+    >
+      <IH-exclamation-circle class="size-[16px] shrink-0" />
+      <span>
+        The published aggregate counts ballots the hub did not return. The two
+        do not agree on which ballots exist, so this recomputation is
+        incomplete.
+      </span>
+    </div>
+    <div
+      v-if="exclusionSummary"
+      class="text-sm text-skin-text border-l-2 border-skin-border pl-2"
+    >
+      <div>
+        The committee excluded {{ exclusionSummary.count }}
+        {{ exclusionSummary.count === 1 ? 'ballot' : 'ballots' }} from the
+        tally. This is expected behaviour, not a verification failure — the
+        totals above are over the ballots it admitted.
+      </div>
+      <div class="text-skin-link">
+        <span v-for="(r, i) in exclusionSummary.reasons" :key="r.reason"
+          >{{ i ? ', ' : '' }}{{ r.count }} × {{ r.reason }}</span
+        >
+      </div>
     </div>
     <div
       v-if="clampSummary"

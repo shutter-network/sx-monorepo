@@ -297,6 +297,16 @@ CREATE TABLE te_eligibility_key (
   updated BIGINT NOT NULL
 );
 
+CREATE TABLE te_request_nonces (
+  proposal_id VARCHAR(66) NOT NULL,
+  op VARCHAR(32) NOT NULL,
+  issued_at BIGINT NOT NULL,
+  accepted_at BIGINT NOT NULL,
+  PRIMARY KEY (proposal_id, op, issued_at),
+  INDEX idx_te_nonce_accepted (accepted_at)
+);
+
+
 
 CREATE TABLE follows (
   id VARCHAR(66) NOT NULL,

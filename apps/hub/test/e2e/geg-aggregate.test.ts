@@ -141,6 +141,16 @@ async function seed(id: string, endsAt: number, quorum = 2) {
     scores_updated: 0,
     vp_value_by_strategy: '[]',
     votes: 0,
+    // A private proposal always has its ballot shape stored — it is written at
+    // creation and rewritten on every edit. The election read asserts it agrees
+    // with the budget the committee will verify against, because a disagreement
+    // rejects every ballot as INVALID_PROOF and publishes a tally of zeros.
+    te_config: JSON.stringify({
+      numCandidates: 2,
+      budget: 100,
+      mode: 'exact',
+      variant: 'A'
+    }),
     te_geg_config: JSON.stringify(committee(quorum))
   });
 }

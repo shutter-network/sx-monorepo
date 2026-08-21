@@ -340,6 +340,18 @@ export function resultDigest(args: {
  * carries `resultDigest(...)`, so one signature cannot be re-paired with
  * different totals.
  */
+
+export function requestNoncePayload(issuedAt: number): Buffer {
+  if (!Number.isInteger(issuedAt) || issuedAt < 0) {
+    throw new GegDigestError(
+      `issuedAt must be a non-negative integer, got ${issuedAt}`
+    );
+  }
+  const b = Buffer.alloc(8);
+  b.writeBigUInt64BE(BigInt(issuedAt), 0);
+  return b;
+}
+
 export function requestDigest(
   op: string,
   electionId: string,

@@ -96,3 +96,18 @@ CREATE TABLE te_eligibility_key (
   public_key VARCHAR(100) NOT NULL,
   updated BIGINT NOT NULL
 );
+
+-- Stall/resume request nonces, for replay rejection. The signer
+-- binds a timestamp, and this table makes each one usable exactly once.
+--
+-- Rows outside the acceptance window are pruned on write; the freshness check
+-- already rejects them, so they are only kept to bound a replay inside it.
+CREATE TABLE te_request_nonces (
+  proposal_id VARCHAR(66) NOT NULL,
+  op VARCHAR(32) NOT NULL,
+  issued_at BIGINT NOT NULL,
+  accepted_at BIGINT NOT NULL,
+  PRIMARY KEY (proposal_id, op, issued_at),
+  INDEX idx_te_nonce_accepted (accepted_at)
+);
+

@@ -2,10 +2,12 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import fetch from 'node-fetch';
 import {
+  ballotParamsColumn,
   buildCommitteeSnapshot,
   clearCommitteeCache,
   committeeColumns,
   deriveMaxWeight,
+  frozenWeightedBudget,
   parseKeypers,
   resolveCommittee,
   TeConfigError,
@@ -431,5 +433,55 @@ describe('deriveMaxWeight', () => {
     for (const c of table.cases) {
       expect(deriveMaxWeight(c.budget)).toBe(c.maxWeight);
     }
+  });
+});
+
+describe('frozenWeightedBudget / ballotParamsColumn', () => {
+  const snapshot = (weightedBudget: unknown) =>
+    JSON.stringify({ v: 1, weightedBudget, eligibilityKey: '0x00' });
+
+  it.each([
+    ['a JSON string', snapshot(100), 100],
+    ['an already-parsed object', { weightedBudget: 50 }, 50]
+  ])('reads the frozen budget from %s', (_label, stored, expected) => {
+    expect(frozenWeightedBudget(stored)).toBe(expected);
+  });
+
+  // Refusing beats defaulting. A default here would be the environment read this
+  // function exists to remove, reintroduced silently.
+  it.each([
+    ['missing', snapshot(undefined)],
+    ['not a number', snapshot('abc')],
+    ['zero', snapshot(0)],
+    ['absent config', null]
+  ])('throws rather than guessing when the budget is %s', (_label, stored) => {
+    expect(() => frozenWeightedBudget(stored as any)).toThrow(TeConfigError);
+  });
+
+  // The regression this whole change is about (M-2). `te_config` and
+  // `te_geg_config` are both written at creation from one env read, so they agree
+  // — until the env moves and the proposal is edited. Only `te_config` used to be
+  // rebuilt, so the browser and ingest would agree on the new budget while the
+  // committee verified against the old one, rejecting every ballot as
+  // INVALID_PROOF and publishing zeros.
+  it('follows the frozen snapshot, not a changed environment', () => {
+    const frozen = snapshot(100);
+    process.env.TE_WEIGHTED_BUDGET = '50'; // operator changed it after creation
+    try {
+      const { te_config } = ballotParamsColumn(
+        ['a', 'b'],
+        'weighted',
+        frozenWeightedBudget(frozen)
+      );
+      expect(JSON.parse(te_config).budget).toBe(100);
+    } finally {
+      delete process.env.TE_WEIGHTED_BUDGET;
+    }
+  });
+
+  it('still uses budget 1 for a non-weighted proposal', () => {
+    expect(
+      JSON.parse(ballotParamsColumn(['a', 'b'], 'basic', 100).te_config).budget
+    ).toBe(1);
   });
 });

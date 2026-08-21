@@ -15,10 +15,13 @@
  *   .venv/bin/python -c "from geg.core.authz import request_digest; ..."
  */
 
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { hexlify } from '@ethersproject/bytes';
 import { verifyMessage } from '@ethersproject/wallet';
 import { describe, expect, it } from 'vitest';
 import fixture from './__fixtures__/geg-request-digests.json';
-import { requestDigest } from './gegRequest';
+import { requestDigest, requestNoncePayload } from './gegRequest';
 
 type RequestCase = {
   name: string;
@@ -93,5 +96,47 @@ describe('GEG-REQUEST-v1 digest', () => {
     ['an over-long id', `0x${'de'.repeat(33)}`]
   ])('rejects %s rather than padding it', (_label, id) => {
     expect(() => requestDigest('tally_resume', id)).toThrow(/32 bytes/);
+  });
+});
+
+// The browser holds a third copy of the freshness encoding, because the admin's retry
+// is the one protocol write a human signs in a wallet. A byte of drift here means the
+// hub cannot reproduce the digest and the retry is refused as `not_the_admin` — which
+// reads like the wrong wallet rather than an encoding bug. Vectors from geg's Python.
+describe('requestNoncePayload — parity with geg', () => {
+  const vectors = JSON.parse(
+    readFileSync(
+      join(
+        __dirname,
+        '../../../../packages/geg-parity/vectors/request-nonce.json'
+      ),
+      'utf8'
+    )
+  ) as {
+    cases: {
+      name: string;
+      op: string;
+      electionId: string;
+      payload: string;
+      digest: string;
+    }[];
+  };
+
+  it.each(vectors.cases.map(c => [c.name, c] as const))(
+    'reproduces %s',
+    (_name, c) => {
+      const issuedAt = Number(BigInt(c.payload));
+      expect(hexlify(requestNoncePayload(issuedAt))).toBe(c.payload);
+      expect(
+        hexlify(
+          requestDigest(c.op, c.electionId, requestNoncePayload(issuedAt))
+        )
+      ).toBe(c.digest);
+    }
+  );
+
+  it('refuses a non-integer or negative timestamp', () => {
+    expect(() => requestNoncePayload(-1)).toThrow();
+    expect(() => requestNoncePayload(1.5)).toThrow();
   });
 });

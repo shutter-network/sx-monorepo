@@ -246,6 +246,7 @@ export function buildApp(): Express {
       // interpreted here.
       await hubPost(`/api/proposal/${id}/te_tally_stalled`, {
         stalled: req.body?.stalled,
+        issuedAt: req.body?.issuedAt,
         resultPublisherSig: req.body?.resultPublisherSig,
         adminSig: req.body?.adminSig
       });
