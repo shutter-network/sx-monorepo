@@ -137,9 +137,6 @@ CREATE TABLE votes (
   vp_state VARCHAR(24) NOT NULL,
   cb INT(11) NOT NULL,
   vp_value DECIMAL(13,3) NOT NULL DEFAULT 0.000,
-  te_weight BIGINT DEFAULT NULL,
-  te_nonce BIGINT DEFAULT NULL,
-  te_attestation VARCHAR(200) DEFAULT NULL,
   PRIMARY KEY (voter, space, proposal),
   INDEX id (id),
   INDEX ipfs (ipfs),
@@ -367,3 +364,12 @@ CREATE TABLE te_results (
   signature VARCHAR(200) NOT NULL,
   posted_at BIGINT NOT NULL
 );
+
+CREATE TABLE te_revote_nonces (
+  proposal_id VARCHAR(66) NOT NULL,
+  pseudonym VARCHAR(66) NOT NULL,
+  last BIGINT NOT NULL,
+  updated BIGINT NOT NULL,
+  PRIMARY KEY (proposal_id, pseudonym)
+);
+

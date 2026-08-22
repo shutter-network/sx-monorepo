@@ -10,12 +10,13 @@ node scripts/sync-geg-vectors.mjs /path/to/generalised-el-gamal
 |---|---|
 | Source repo | `generalised-el-gamal` |
 | Source path | `tests/vectors/` |
-| Commit | `b94e63c1d328bf5990e731ee26626a37ad579798` |
-| Commit date / subject | 2026-08-14T18:30:06+05:30 feat: harden DKG complaint repair, quorum semantics, write authorization, and input validation |
-| Vectors | 24 across 10 categories |
+| Commit | `a8017ec142e1f0deda6d3361f087be3de56e4289` |
+| Commit date / subject | 2026-08-21T20:27:24+05:30 feat: enhance tally-stalled functionality with nonce management |
+| Vectors | 25 across 11 categories |
 
 - `attestation/` — 6
 - `ballot/` — 4
+- `binding/` — 1
 - `budget/` — 2
 - `decrypt-share/` — 4
 - `dleq/` — 1

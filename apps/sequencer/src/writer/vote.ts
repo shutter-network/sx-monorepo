@@ -3,9 +3,9 @@ import { CB } from '../constants';
 import { getProposal } from '../helpers/actions';
 import {
   GegAttestationError,
-  mintAttestation,
   verifyAttestation
 } from '../helpers/gegAttestation';
+import { verifyBallotBinding } from '../helpers/gegBinding';
 import log from '../helpers/log';
 import db from '../helpers/mysql';
 import {
@@ -167,25 +167,27 @@ export async function verify(body): Promise<any> {
 
   // if (await isLimitReached(msg.space)) return Promise.reject('too much activity, please contact an admin');
 
-  // Mint the eligibility credential here, not on the hub's read path.
+  // Verify the credential the voter presented; do not mint one.
   //
-  // The credential binds this ballot's weight for the committee, and the weight
-  // comes from `vp` — which the sequencer computed a few lines up. Signing it
-  // here puts the signature with the component that made the claim, and takes
-  // ~2ms of BLS off an unauthenticated public GET (finding M2).
+  // The sequencer used to mint here, from voting power it had just computed.
+  // That put the signature next to the component that made the claim, but it
+  // also meant `weight` and `nonce` were this service's assertions about a voter
+  // who had never seen them — and `nonce` decides which of a voter's ballots the
+  // committee counts. Credentials are now issued up front
+  // (`helpers/teAttestationIssuer`), shown to the voter, and signed by them
+  // together with the ballot. What is left here is checking that.
   //
-  // Safe to fix the weight now because a private proposal cannot be edited once
-  // voting opens (`update-proposal` rejects `proposal.start < now`), so `budget`
-  // and therefore `maxWeight` are already final, and `votes.vp` is never
-  // recomputed for a private proposal.
+  // Both signatures are required. The issuer's proves the weight was authorised;
+  // the voter's proves *this* ballot was cast with *that* credential. Either one
+  // alone leaves the pairing forgeable by whoever assembles it.
   let attestation: TeAttestation | null = null;
   if (proposal.privacy === 'shutter-elgamal') {
     try {
-      attestation = await mintBallotAttestation(proposal, msg, vp.vp);
+      attestation = await verifyBallotCredential(proposal, msg);
     } catch (err: any) {
       if (err instanceof GegAttestationError) {
-        log.warn(`[writer] cannot mint credential: ${err.message}`);
-        return Promise.reject(`private voting unavailable: ${err.message}`);
+        log.warn(`[writer] credential rejected: ${err.message}`);
+        return Promise.reject(`invalid ballot credential: ${err.message}`);
       }
       throw err;
     }
@@ -198,17 +200,17 @@ export interface TeAttestation {
   weight: number;
   nonce: number;
   signature: string;
+  bindingSignature: string;
 }
 
-async function mintBallotAttestation(
+// Exported for tests: the structural checks here run before any crypto, so
+// they can be exercised without standing up a valid ballot.
+export async function verifyBallotCredential(
   proposal: any,
-  msg: any,
-  vp: number
+  msg: any
 ): Promise<TeAttestation> {
-  // `getProposal` already parses this column (helpers/actions.ts), so it arrives
-  // as an object — parsing it again turns it into the string "[object Object]"
-  // and yields no budget at all. Both shapes are accepted so a caller that hands
-  // over a raw row still works.
+  // `getProposal` already parses this column, so it arrives as an object;
+  // parsing it again yields the string "[object Object]" and no budget at all.
   const teConfig =
     typeof proposal.te_config === 'string'
       ? jsonParse(proposal.te_config, null)
@@ -221,40 +223,75 @@ async function mintBallotAttestation(
   }
   const maxWeight = BigInt(deriveMaxWeight(budget));
 
-  // The same clamp the verify panel applies and the committee enforces. `vp` has
-  // already cleared the dust floor, so the rounded value is at least 1.
-  const rounded = BigInt(Math.round(vp));
-  const weight = rounded > maxWeight ? maxWeight : rounded;
-
-  // The vote's own timestamp, which becomes `votes.created`. The protocol ranks
-  // duplicate ballots by `(nonce, sequenceNumber)` under a last-wins policy —
-  // Snapshot's "newer vote wins" rule expressed in the committee's terms.
-  const nonce = BigInt(parseInt(msg.timestamp));
   const envelope = jsonParse(JSON.stringify(msg.payload.choice), null);
-
-  const args = {
-    electionId: proposal.id,
-    pseudonym: envelope?.pseudonym,
-    vk: envelope?.vk,
-    weight,
-    nonce
-  };
-  const signature = await mintAttestation(args);
-
-  // Verify what we just signed. Not distrust of our own key — the same rule as
-  // the dust floor and the window boundary: do not accept what the committee
-  // will drop. A framing or encoding slip would otherwise be stored, shown to
-  // the voter as a cast vote, and excluded at tally as INVALID_ATTESTATION.
-  if (!(await verifyAttestation({ ...args, signature, maxWeight }))) {
+  const credential = envelope?.attestation;
+  const bindingSignature = envelope?.voterAttestationSignature;
+  if (!credential || typeof bindingSignature !== 'string') {
     throw new GegAttestationError(
-      'freshly minted credential failed verification'
+      'ballot carries no credential and binding; request one from /te_attestation first'
+    );
+  }
+
+  // The credential must name this ballot. Without these the committee would
+  // reject it at tally as INVALID_ATTESTATION, which is a silent loss of a vote
+  // the voter was told had been cast.
+  if (
+    credential.electionId?.toLowerCase() !== String(proposal.id).toLowerCase()
+  )
+    throw new GegAttestationError('credential is for a different proposal');
+  if (credential.pseudonym !== envelope.pseudonym)
+    throw new GegAttestationError('credential does not match this pseudonym');
+  if (credential.vk !== envelope.vk)
+    throw new GegAttestationError('credential does not match this ballot key');
+
+  // JSON numbers, not strings. The credential is stored verbatim inside `choice`
+  // and served to the committee from there, and geg's decoder requires an integer
+  // (`envelopes/codecs.py::_int` rejects a str). Coercing would be worse than
+  // refusing: `BigInt("10000")` and `bindingMessage` both accept a string, so a
+  // quoted weight verifies here and is then rejected by every keyper — the ballot
+  // is excluded for a reason that looks nothing like the cause.
+  if (!Number.isInteger(credential.weight))
+    throw new GegAttestationError('credential weight must be an integer');
+  if (!Number.isInteger(credential.nonce))
+    throw new GegAttestationError('credential nonce must be an integer');
+
+  const weight = BigInt(credential.weight);
+  const nonce = BigInt(credential.nonce);
+
+  // The issuer's signature: the weight was authorised by us, and is inside the
+  // cap the committee enforces.
+  const ok = await verifyAttestation({
+    electionId: proposal.id,
+    pseudonym: credential.pseudonym,
+    vk: credential.vk,
+    weight,
+    nonce,
+    signature: credential.signature,
+    maxWeight
+  });
+  if (!ok) throw new GegAttestationError('credential signature is not valid');
+
+  // The voter's signature over the ballot *and* the credential. This is what
+  // stops a credential being moved onto a different ballot of the same voter,
+  // and what makes the weight something the voter endorsed rather than
+  // something we asserted.
+  if (
+    !(await verifyBallotBinding({
+      envelope,
+      attestation: credential,
+      signature: bindingSignature
+    }))
+  ) {
+    throw new GegAttestationError(
+      'ballot is not bound to this credential by the voter'
     );
   }
 
   return {
     weight: Number(weight),
     nonce: Number(nonce),
-    signature
+    signature: credential.signature,
+    bindingSignature
   };
 }
 
@@ -288,15 +325,11 @@ export async function action(body, ipfs, receipt, id, context): Promise<void> {
     vp_by_strategy: JSON.stringify(context.vp.vp_by_strategy),
     vp_state: vpState,
     vp_value: 0,
-    cb: CB.PENDING_COMPUTE,
-    // NULL on every public proposal. On a private one these are the credential
-    // the committee verifies, stored on the vote row rather than in a side table
-    // so they are written in the same statement as the vote — a vote that exists
-    // without its credential is a ballot the hub's feed cannot serve, which
-    // stalls the whole tally.
-    te_weight: context.attestation?.weight ?? null,
-    te_nonce: context.attestation?.nonce ?? null,
-    te_attestation: context.attestation?.signature ?? null
+    cb: CB.PENDING_COMPUTE
+    // No credential columns. The credential and the voter's binding live inside
+    // `choice`, which is the artifact the EIP-712 signature covers, and the hub's
+    // feed serves them from there. A scalar copy beside it would be a second,
+    // unsigned source for bytes the committee verifies a signature over.
   };
 
   // Check if voter already voted
@@ -319,7 +352,7 @@ export async function action(body, ipfs, receipt, id, context): Promise<void> {
     await db.queryAsync(
       `
       UPDATE votes
-      SET id = ?, ipfs = ?, created = ?, choice = ?, reason = ?, metadata = ?, app = ?, vp = ?, vp_by_strategy = ?, vp_state = ?, te_weight = ?, te_nonce = ?, te_attestation = ?
+      SET id = ?, ipfs = ?, created = ?, choice = ?, reason = ?, metadata = ?, app = ?, vp = ?, vp_by_strategy = ?, vp_state = ?
       WHERE voter = ? AND proposal = ? AND space = ?;
       UPDATE leaderboard SET last_vote = ? WHERE user = ? AND space = ? LIMIT 1;
     `,
@@ -334,12 +367,9 @@ export async function action(body, ipfs, receipt, id, context): Promise<void> {
         params.vp,
         params.vp_by_strategy,
         params.vp_state,
-        // Overwritten, not left behind: `created` changes on a re-vote, so the
-        // previous credential's nonce is stale. Carrying them in the same
-        // statement is why a re-vote cannot orphan a credential.
-        params.te_weight,
-        params.te_nonce,
-        params.te_attestation,
+        // `choice` above carries the credential and the binding, so a re-vote
+        // replaces them with the ballot they belong to in one statement — there
+        // is no separate credential to leave stale.
         voter,
         proposalId,
         msg.space,

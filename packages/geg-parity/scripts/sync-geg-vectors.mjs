@@ -68,7 +68,18 @@ try {
 
 // Replace wholesale — a vector deleted upstream must disappear here too, or the
 // gate silently keeps verifying a file geg no longer publishes.
-rmSync(DEST, { recursive: true, force: true });
+//
+// Only the *vendored* part, though. Some vectors in here are ours: they are
+// generated against sx's own code (`scripts/geg/gen-legacy-equivalence.ts` and
+// friends) and geg has never heard of them. Wiping the directory wholesale
+// deleted them, which is silent and irreversible for any that were not yet
+// committed. Vendored content is always a category directory; anything loose at
+// the top level is ours and is left alone.
+for (const entry of readdirSync(DEST, { withFileTypes: true })) {
+  if (entry.isDirectory()) {
+    rmSync(join(DEST, entry.name), { recursive: true, force: true });
+  }
+}
 mkdirSync(DEST, { recursive: true });
 cpSync(src, DEST, {
   recursive: true,

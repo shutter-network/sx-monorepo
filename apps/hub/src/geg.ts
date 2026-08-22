@@ -310,7 +310,7 @@ router.get('/proposal/:id/te_geg_ballots', async (req, res) => {
     // queries — the sequence number is a position in this order, and the
     // committee expresses admission and exclusion in those numbers.
     const rows = await (db as any).queryAsync(
-      `SELECT id, choice, created, te_weight, te_nonce, te_attestation
+      `SELECT id, choice, created
          FROM votes
         WHERE proposal = ? AND id IN (?)
         ORDER BY created ASC, id ASC`,
@@ -336,22 +336,24 @@ router.get('/proposal/:id/te_geg_ballots', async (req, res) => {
           500
         );
       }
-      // No weight arithmetic here any more. The sequencer computed and signed
-      // the weight at ingest, so recomputing it would create a second opinion
-      // that could disagree with the signature — and a credential whose weight
-      // the committee reads from the signed message, not from us.
-      //
-      // A missing credential is a hard failure rather than a skip. Skipping
-      // would drop a real vote from the tally with no exclusion record, which is
-      // exactly the silent-omission failure the ingest checks exist to prevent.
-      if (row.te_attestation === null || row.te_weight === null) {
+
+      const credential = envelope.attestation;
+      const voterBinding = envelope.voterAttestationSignature;
+      const missing = [
+        !credential?.signature && 'credential',
+        !Number.isInteger(credential?.weight) && 'weight',
+        !Number.isInteger(credential?.nonce) && 'nonce',
+        typeof voterBinding !== 'string' && "voter's binding"
+      ].filter(Boolean);
+      if (missing.length) {
         log.error(
-          `[geg] ${proposalId}: vote ${row.id} has no eligibility credential`
+          `[geg] ${proposalId}: vote ${row.id} is missing ${missing.join(', ')}`
         );
         return sendError(
           res,
-          `vote ${row.id} has no eligibility credential; it was stored before ` +
-            'credentials were minted at ingest and needs the backfill',
+          `vote ${row.id} has an incomplete eligibility credential (missing ` +
+            `${missing.join(', ')}). Ingest refuses a ballot without all of them, ` +
+            'so this row predates that check and cannot be served to the committee.',
           500
         );
       }
@@ -369,19 +371,22 @@ router.get('/proposal/:id/te_geg_ballots', async (req, res) => {
           ciphertexts: envelope.ciphertexts,
           zkProof: envelope.zkProof,
           voterSignature: envelope.voterSignature,
-          // Reassembled here, not stored here. geg's ballot envelope carries the
-          // attestation as a field of the ballot; Snapshot stores the two apart
-          // because `choice` is the voter's EIP-712-signed blob and cannot take
-          // an extra field. The committee sees the designed shape either way.
+          // Emitted as the voter signed it. `scheme` is theirs too rather than a
+          // constant here, so a LEGACY credential stays legible to the committee
+          // instead of being relabelled on the way through.
           attestation: {
-            scheme: 'ATTESTATION_V1',
-            electionId: proposalId,
-            pseudonym: envelope.pseudonym,
-            vk: envelope.vk,
-            weight: Number(row.te_weight),
-            nonce: Number(row.te_nonce),
-            signature: row.te_attestation
-          }
+            scheme: credential.scheme ?? 'ATTESTATION_V1',
+            electionId: credential.electionId,
+            pseudonym: credential.pseudonym,
+            vk: credential.vk,
+            weight: credential.weight,
+            nonce: credential.nonce,
+            signature: credential.signature
+          },
+          // The voter's binding of this ballot to that credential. The committee
+          // refuses a ballot without it: the credential alone proves the weight
+          // was authorised, not that this voter cast this ballot with it.
+          voterAttestationSignature: voterBinding
         },
         sequenceNumber: seq,
         submittedAt: Number(row.created)

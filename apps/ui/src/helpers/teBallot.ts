@@ -22,6 +22,11 @@ import {
   initCurves,
   schnorrKeygen
 } from '@shutter-network/urban-verified-crypto';
+import {
+  BallotCredential,
+  bindingMessage,
+  requestBallotCredential
+} from './teBinding';
 
 let curvesReady: Promise<void> | null = null;
 
@@ -39,6 +44,17 @@ export interface TeBallotEnvelope {
   zkProof: string;
   voterSignature: string;
   wrAttestation: string;
+  /**
+   * The eligibility credential, and the voter's binding of this ballot to it.
+   *
+   * Inside the envelope rather than beside it, because the envelope *is*
+   * Snapshot's `choice` — so the outer EIP-712 signature covers them too, and
+   * the sequencer reads them from the same signed blob it reads the ballot from.
+   * `wrAttestation` above cannot carry this: it is the SDK's opaque slot, not
+   * covered by the ballot signature and structurally unable to hold a weight.
+   */
+  attestation: BallotCredential;
+  voterAttestationSignature: string;
 }
 
 function toHex(bytes: Uint8Array): string {
@@ -59,7 +75,14 @@ export function pseudonymFor(voter: string, proposalId: string): Uint8Array {
   return arrayify(keccak256(buf));
 }
 
-export interface BuildTeBallotArgs {
+/** What both builders need to obtain a credential before signing. */
+export interface CredentialSource {
+  /** Sequencer base URL. */
+  sequencerUrl: string;
+  space: string;
+}
+
+export interface BuildTeBallotArgs extends CredentialSource {
   voter: string;
   proposalId: string; // 0x-prefixed bytes32
   mpk: string; // 0x-prefixed compressed G2 (96 bytes)
@@ -68,13 +91,63 @@ export interface BuildTeBallotArgs {
   choice: number;
 }
 
-export interface BuildTeWeightedBallotArgs {
+export interface BuildTeWeightedBallotArgs extends CredentialSource {
   voter: string;
   proposalId: string; // 0x-prefixed bytes32
   mpk: string; // 0x-prefixed compressed G2 (96 bytes)
   config: BallotVerifyParams; // proposal.te_config — budget must equal WEIGHTED_BUDGET
   /** Snapshot weighted choice: 1-based candidate index (as string) → weight. */
   choice: Record<string, number>;
+}
+
+/**
+ * Obtain a credential for this key, then bind the built ballot to it.
+ *
+ * Ordered deliberately: the credential names `vk`, so the key has to exist
+ * before the request, and the binding covers the ballot digest, so the ballot
+ * has to exist before the signature. That leaves one network round trip between
+ * keygen and ballot construction — and no wallet interaction at all, since the
+ * request carries no signature and the binding uses the ballot's ephemeral key.
+ */
+async function credentialAndBinding(args: {
+  src: CredentialSource;
+  proposalId: string;
+  vk: G1Point;
+  sk: bigint;
+  ballot: {
+    electionId: Uint8Array;
+    pseudonym: Uint8Array;
+    ciphertexts: [Uint8Array, Uint8Array][];
+    zkProof: Uint8Array;
+  };
+  credential: BallotCredential;
+}): Promise<string> {
+  const { canonicalBallotMessage, encodeSchnorr, schnorrSign } = await import(
+    '@shutter-network/urban-verified-crypto'
+  );
+  const ballotDigest = keccak256(
+    canonicalBallotMessage({
+      electionId: args.ballot.electionId,
+      pseudonym: args.ballot.pseudonym,
+      ciphertexts: args.ballot.ciphertexts,
+      zkProof: args.ballot.zkProof
+    })
+  );
+  return toHex(
+    encodeSchnorr(
+      schnorrSign(
+        args.sk,
+        args.vk,
+        bindingMessage({
+          electionId: args.proposalId,
+          pseudonym: toHex(args.ballot.pseudonym),
+          vk: toHex(args.vk.toBytes()),
+          ballotDigest,
+          attestation: args.credential
+        })
+      )
+    )
+  );
 }
 
 /**
@@ -91,7 +164,7 @@ export interface BuildTeWeightedBallotArgs {
 export async function buildTeBallotEnvelope(
   args: BuildTeBallotArgs
 ): Promise<TeBallotEnvelope> {
-  const { voter, proposalId, mpk, config, choice } = args;
+  const { voter, proposalId, mpk, config, choice, sequencerUrl, space } = args;
   await ensureCurvesInit();
 
   if (
@@ -125,11 +198,22 @@ export async function buildTeBallotEnvelope(
   const { sk, vk } = schnorrKeygen();
   const vkPoint: G1Point = vk;
 
+  // Before the ballot, because the credential is issued *for* this key and the
+  // weight it carries has to be settled before the voter signs anything.
+  const issued = await requestBallotCredential({
+    sequencerUrl,
+    space,
+    proposalId,
+    vk: toHex(vk.toBytes()),
+    voter
+  });
+
   // Unit vector for single-choice exact-B=1.
   const votes: bigint[] = new Array(config.numCandidates).fill(0n);
   votes[choice - 1] = 1n;
 
   let ballot;
+  let bindingSignature: string;
   try {
     ballot = buildBallot({
       mpk: mpkPoint,
@@ -143,6 +227,17 @@ export async function buildTeBallotEnvelope(
       // SDK's wrAttestation slot is unused. The sequencer's WR verifier
       // is also a constant true. Send a zero-length blob.
       wrAttestation: new Uint8Array(0)
+    });
+    // Signed here, inside the try: `vk` is a WASM handle that the finally below
+    // frees, and the binding needs it. Signing after the free would read a
+    // released pointer.
+    bindingSignature = await credentialAndBinding({
+      src: { sequencerUrl, space },
+      proposalId,
+      vk: vkPoint,
+      sk,
+      ballot,
+      credential: issued.attestation
     });
   } finally {
     mpkPoint.destroyWasm();
@@ -159,7 +254,12 @@ export async function buildTeBallotEnvelope(
     })),
     zkProof: toHex(ballot.zkProof),
     voterSignature: toHex(ballot.voterSignature),
-    wrAttestation: toHex(ballot.wrAttestation)
+    wrAttestation: toHex(ballot.wrAttestation),
+    // Carried *inside* the envelope, which is Snapshot's `choice`, so the outer
+    // EIP-712 signature covers them too. The committee reads the credential and
+    // the binding from the hub's feed; ingest reads them from here.
+    attestation: issued.attestation,
+    voterAttestationSignature: bindingSignature
   };
 }
 
@@ -178,7 +278,7 @@ export async function buildTeBallotEnvelope(
 export async function buildTeWeightedBallotEnvelope(
   args: BuildTeWeightedBallotArgs
 ): Promise<TeBallotEnvelope> {
-  const { voter, proposalId, mpk, config, choice } = args;
+  const { voter, proposalId, mpk, config, choice, sequencerUrl, space } = args;
   await ensureCurvesInit();
 
   if (config.variant !== 'A' || config.mode !== 'exact') {
@@ -220,7 +320,18 @@ export async function buildTeWeightedBallotEnvelope(
   const { sk, vk } = schnorrKeygen();
   const vkPoint: G1Point = vk;
 
+  // Before the ballot, because the credential is issued *for* this key and the
+  // weight it carries has to be settled before the voter signs anything.
+  const issued = await requestBallotCredential({
+    sequencerUrl,
+    space,
+    proposalId,
+    vk: toHex(vk.toBytes()),
+    voter
+  });
+
   let ballot;
+  let bindingSignature: string;
   try {
     ballot = buildBallot({
       mpk: mpkPoint,
@@ -231,6 +342,17 @@ export async function buildTeWeightedBallotEnvelope(
       votes,
       params: config,
       wrAttestation: new Uint8Array(0)
+    });
+    // Signed here, inside the try: `vk` is a WASM handle that the finally below
+    // frees, and the binding needs it. Signing after the free would read a
+    // released pointer.
+    bindingSignature = await credentialAndBinding({
+      src: { sequencerUrl, space },
+      proposalId,
+      vk: vkPoint,
+      sk,
+      ballot,
+      credential: issued.attestation
     });
   } finally {
     mpkPoint.destroyWasm();
@@ -247,6 +369,11 @@ export async function buildTeWeightedBallotEnvelope(
     })),
     zkProof: toHex(ballot.zkProof),
     voterSignature: toHex(ballot.voterSignature),
-    wrAttestation: toHex(ballot.wrAttestation)
+    wrAttestation: toHex(ballot.wrAttestation),
+    // Carried *inside* the envelope, which is Snapshot's `choice`, so the outer
+    // EIP-712 signature covers them too. The committee reads the credential and
+    // the binding from the hub's feed; ingest reads them from here.
+    attestation: issued.attestation,
+    voterAttestationSignature: bindingSignature
   };
 }

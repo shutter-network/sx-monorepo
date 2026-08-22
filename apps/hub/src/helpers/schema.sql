@@ -172,20 +172,6 @@ CREATE TABLE votes (
   vp_state VARCHAR(24) NOT NULL,
   vp_value DECIMAL(13,3) NOT NULL DEFAULT '0.000',
   cb INT(11) NOT NULL,
-  -- Private voting (privacy='shutter-elgamal') only; NULL on every other vote.
-  --
-  -- The eligibility credential the keypers verify, minted by the sequencer at
-  -- ingest over (electionId, pseudonym, vk, weight, nonce). Columns rather than
-  -- a side table because it is strictly 1:1 with the vote and shares its
-  -- lifetime: written in the same statement, overwritten by the same re-vote
-  -- UPDATE, and removed with the row. A vote that exists without its credential
-  -- is a ballot the hub's feed cannot serve, which stalls the entire tally.
-  --
-  -- te_weight is the *attested* weight, min(round(vp), maxWeight) — so a clamped
-  -- ballot is recorded as clamped rather than inferred by recomputation.
-  te_weight BIGINT DEFAULT NULL,
-  te_nonce BIGINT DEFAULT NULL,
-  te_attestation VARCHAR(200) DEFAULT NULL,
   PRIMARY KEY (voter, space, proposal),
   INDEX id (id),
   INDEX ipfs (ipfs),
@@ -422,3 +408,22 @@ CREATE TABLE networks (
   PRIMARY KEY (id),
   INDEX premium (premium)
 );
+
+-- The re-vote counter the eligibility credential carries.
+--
+-- The committee ranks a voter's duplicate ballots by (nonce, sequenceNumber), so
+-- this is what decides which of their ballots is counted. It has to be strictly
+-- increasing per (proposal, pseudonym) and it has to survive a restart: a
+-- regression would let a stale ballot outrank a genuine re-vote.
+--
+-- A counter rather than the issuance timestamp, because credentials are now
+-- minted before the vote is cast and two requests in the same second — a
+-- double-click — would otherwise share a nonce and leave the ordering undefined.
+CREATE TABLE te_revote_nonces (
+  proposal_id VARCHAR(66) NOT NULL,
+  pseudonym VARCHAR(66) NOT NULL,
+  last BIGINT NOT NULL,
+  updated BIGINT NOT NULL,
+  PRIMARY KEY (proposal_id, pseudonym)
+);
+

@@ -86,7 +86,20 @@ function envelope(i: number) {
     ],
     zkProof: `0x${'cc'.repeat(64)}`,
     voterSignature: `0x${'dd'.repeat(80)}`,
-    wrAttestation: '0x'
+    wrAttestation: '0x',
+    // Inside the envelope, because that is where ingest stores them: `choice` is
+    // the artifact the voter's signature covers, and the feed serves the
+    // credential from there rather than from a column beside it.
+    attestation: {
+      scheme: 'ATTESTATION_V1',
+      electionId: ID,
+      pseudonym: `0x${String(i).padStart(2, '0').repeat(32)}`,
+      vk: `0x${String(i).padStart(2, '0').repeat(48)}`,
+      weight: i + 1,
+      nonce: i + 1,
+      signature: `0x${String(i).padStart(2, '0').repeat(80)}`
+    },
+    voterAttestationSignature: `0x${'be'.repeat(80)}`
   };
 }
 
@@ -160,10 +173,9 @@ async function seed(): Promise<void> {
       vp_by_strategy: '[]',
       vp_state: 'final',
       vp_value: 0,
-      cb: 0,
-      te_weight: i + 1,
-      te_nonce: CREATED_AT[i],
-      te_attestation: `0x${String(i).padStart(2, '0').repeat(80)}`
+      cb: 0
+      // The voter's binding of this ballot to that credential. The feed refuses a
+      // ballot without it, because the credential alone does not show the voter
     });
   }
 }
@@ -278,9 +290,9 @@ describe('GET /api/proposal/:id/te_geg_ballots — materialization', () => {
 
   it('emits the stored credential rather than deriving one', async () => {
     const { ballots } = await read();
-    // te_weight was seeded as i+1, deliberately different from what a
-    // recomputation from vp would produce if the route ever went back to
-    // deriving it.
+    // The seeded weight is i+1, deliberately unrelated to `vp`, so a route that
+    // went back to recomputing the weight would fail here rather than agree by
+    // coincidence.
     expect(ballots.map(b => b.ballot.attestation.weight)).toEqual([
       1, 2, 3, 4, 5, 6, 7
     ]);
@@ -310,9 +322,11 @@ describe('GET /api/proposal/:id/te_geg_ballots — materialization', () => {
   // renumbers every ballot after it, so the committee's admitted set would point
   // at the wrong ballots.
   it('refuses the whole read when a ballot has no credential', async () => {
+    const stripped = { ...envelope(3) } as any;
+    delete stripped.attestation;
     await db.queryAsync(
-      'UPDATE votes SET te_attestation = NULL WHERE proposal = ? AND id = ?',
-      [ID, '0xvote0003']
+      'UPDATE votes SET choice = ? WHERE proposal = ? AND id = ?',
+      [JSON.stringify(stripped), ID, '0xvote0003']
     );
     try {
       const res = await fetch(`${HOST}/api/proposal/${ID}/te_geg_ballots`);
@@ -320,8 +334,8 @@ describe('GET /api/proposal/:id/te_geg_ballots — materialization', () => {
       expect(JSON.stringify(await res.json())).toMatch(/credential/i);
     } finally {
       await db.queryAsync(
-        'UPDATE votes SET te_attestation = ? WHERE proposal = ? AND id = ?',
-        [`0x${'03'.repeat(80)}`, ID, '0xvote0003']
+        'UPDATE votes SET choice = ? WHERE proposal = ? AND id = ?',
+        [JSON.stringify(envelope(3)), ID, '0xvote0003']
       );
     }
   });
@@ -402,16 +416,12 @@ describe('GET te_geg_ballots — above the page cap', () => {
       '[]',
       'final',
       0,
-      0,
-      1,
-      1000 + i,
-      `0x${'ee'.repeat(80)}`
+      0
     ]);
     await db.queryAsync(
       `INSERT INTO votes
          (id, ipfs, voter, created, space, proposal, choice, metadata, reason,
-          app, vp, vp_by_strategy, vp_state, vp_value, cb, te_weight, te_nonce,
-          te_attestation)
+          app, vp, vp_by_strategy, vp_state, vp_value, cb)
        VALUES ?`,
       [rows]
     );

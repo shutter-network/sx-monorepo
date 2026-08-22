@@ -35,14 +35,6 @@ ALTER TABLE proposals
   ADD COLUMN te_tally_stalled TINYINT(1) NOT NULL DEFAULT 0,
   ALGORITHM=INSTANT;
 
--- The eligibility credential, minted by the sequencer at ingest. Columns rather
--- than a side table because it is strictly 1:1 with the vote and shares its
--- lifetime -- see the comment in src/helpers/schema.sql.
-ALTER TABLE votes
-  ADD COLUMN te_weight BIGINT DEFAULT NULL,
-  ADD COLUMN te_nonce BIGINT DEFAULT NULL,
-  ADD COLUMN te_attestation VARCHAR(200) DEFAULT NULL,
-  ALGORITHM=INSTANT;
 
 -- Append-only: PRIMARY KEY enforces one share per (proposal, keyper, candidate).
 CREATE TABLE te_decryption_shares (
@@ -111,3 +103,11 @@ CREATE TABLE te_request_nonces (
   INDEX idx_te_nonce_accepted (accepted_at)
 );
 
+
+CREATE TABLE te_revote_nonces (
+  proposal_id VARCHAR(66) NOT NULL,
+  pseudonym VARCHAR(66) NOT NULL,
+  last BIGINT NOT NULL,
+  updated BIGINT NOT NULL,
+  PRIMARY KEY (proposal_id, pseudonym)
+);

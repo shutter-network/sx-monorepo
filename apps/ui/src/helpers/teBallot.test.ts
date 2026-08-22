@@ -1,10 +1,34 @@
 import { G2Point, initCurves } from '@shutter-network/urban-verified-crypto';
-import { beforeAll, describe, expect, it } from 'vitest';
+import { beforeAll, describe, expect, it, vi } from 'vitest';
 import {
   buildTeBallotEnvelope,
   buildTeWeightedBallotEnvelope,
   pseudonymFor
 } from './teBallot';
+import * as TeBinding from './teBinding';
+
+// Only the network call is stubbed. `bindingMessage` and the Schnorr signing
+// stay real, so these envelopes carry a genuine binding over a genuine ballot —
+// which is what makes the shape assertions below worth anything.
+vi.mock('./teBinding', async importActual => {
+  const actual = (await importActual()) as typeof TeBinding;
+  return {
+    ...actual,
+    requestBallotCredential: vi.fn(async ({ proposalId, vk }) => ({
+      attestation: {
+        scheme: 'ATTESTATION_V1',
+        electionId: proposalId,
+        pseudonym: `0x${'22'.repeat(32)}`,
+        vk,
+        weight: 3,
+        nonce: 1,
+        signature: `0x${'44'.repeat(80)}`
+      },
+      votingPower: 3,
+      maxWeight: 10_000
+    }))
+  };
+});
 
 describe('pseudonymFor', () => {
   it('is deterministic', () => {
@@ -56,6 +80,10 @@ beforeAll(async () => {
 
 describe('buildTeBallotEnvelope — input validation', () => {
   const BASE_ARGS = {
+    // Never reached: every case here is refused by config validation, which runs
+    // before the credential is requested. Present so the shape typechecks.
+    sequencerUrl: 'http://sequencer.invalid/api',
+    space: 'test.eth',
     voter: `0x${'11'.repeat(20)}`,
     proposalId: `0x${'22'.repeat(32)}`,
     mpk: `0x${'ab'.repeat(96)}`,
@@ -127,6 +155,10 @@ describe('buildTeBallotEnvelope — input validation', () => {
 
 describe('buildTeWeightedBallotEnvelope — input validation', () => {
   const BASE_ARGS = {
+    // Never reached: every case here is refused by config validation, which runs
+    // before the credential is requested. Present so the shape typechecks.
+    sequencerUrl: 'http://sequencer.invalid/api',
+    space: 'test.eth',
     voter: `0x${'11'.repeat(20)}`,
     proposalId: `0x${'22'.repeat(32)}`,
     mpk: `0x${'ab'.repeat(96)}`,
@@ -255,6 +287,8 @@ describe('buildTeWeightedBallotEnvelope — envelope shape (real crypto)', () =>
     'returns a valid envelope with all required fields',
     async () => {
       const envelope = await buildTeWeightedBallotEnvelope({
+        sequencerUrl: 'http://sequencer.invalid/api',
+        space: 'test.eth',
         voter: `0x${'11'.repeat(20)}`,
         proposalId: `0x${'22'.repeat(32)}`,
         mpk: VALID_MPK,
@@ -282,6 +316,8 @@ describe('buildTeWeightedBallotEnvelope — envelope shape (real crypto)', () =>
     async () => {
       const proposalId = `0x${'22'.repeat(32)}`;
       const envelope = await buildTeWeightedBallotEnvelope({
+        sequencerUrl: 'http://sequencer.invalid/api',
+        space: 'test.eth',
         voter: `0x${'11'.repeat(20)}`,
         proposalId,
         mpk: VALID_MPK,
@@ -299,6 +335,8 @@ describe('buildTeWeightedBallotEnvelope — envelope shape (real crypto)', () =>
       // Only candidate 1 has weight; candidates 2 and 3 get 0 — but we still
       // need a ciphertext for each (the ZK proof covers all candidates).
       const envelope = await buildTeWeightedBallotEnvelope({
+        sequencerUrl: 'http://sequencer.invalid/api',
+        space: 'test.eth',
         voter: `0x${'11'.repeat(20)}`,
         proposalId: `0x${'33'.repeat(32)}`,
         mpk: VALID_MPK,
@@ -320,10 +358,14 @@ describe('buildTeWeightedBallotEnvelope — envelope shape (real crypto)', () =>
         config: CONFIG
       };
       const a = await buildTeWeightedBallotEnvelope({
+        sequencerUrl: 'http://sequencer.invalid/api',
+        space: 'test.eth',
         ...base,
         choice: { '1': 60, '2': 40 }
       });
       const b = await buildTeWeightedBallotEnvelope({
+        sequencerUrl: 'http://sequencer.invalid/api',
+        space: 'test.eth',
         ...base,
         choice: { '1': 40, '2': 60 }
       });

@@ -47,7 +47,22 @@ function envelope(i: number) {
       c2: `0x${String(i * 10 + j)
         .padStart(2, '0')
         .repeat(96)}`
-    }))
+    })),
+    // The geg feed reads the credential and the binding out of the envelope, so
+    // a fixture without them is a ballot it refuses to serve.
+    attestation: {
+      scheme: 'ATTESTATION_V1',
+      electionId: ID,
+      pseudonym: `0x${String(i).padStart(2, '0').repeat(32)}`,
+      vk: `0x${String(i).padStart(2, '0').repeat(48)}`,
+      // Matches the row's `vp` below: the audit feed reports voting power and the
+      // committee feed reports the attested weight, and the positional check
+      // compares them, so a fixture where they disagree tests nothing.
+      weight: i + 1,
+      nonce: i + 1,
+      signature: `0x${'ab'.repeat(80)}`
+    },
+    voterAttestationSignature: `0x${'be'.repeat(80)}`
   });
 }
 
@@ -129,10 +144,9 @@ async function seed(): Promise<void> {
       vp_by_strategy: '[1]',
       vp_state: 'final',
       vp_value: 0,
-      cb: 0,
-      te_weight: i + 1,
-      te_nonce: 1000 + i,
-      te_attestation: `0x${'ab'.repeat(80)}`
+      cb: 0
+      // The voter's binding of this ballot to that credential. The feed refuses a
+      // ballot without it, because the credential alone does not show the voter
     });
   }
 }

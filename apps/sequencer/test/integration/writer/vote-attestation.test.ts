@@ -14,18 +14,18 @@ import {
   initCurves,
   schnorrVerify
 } from '@shutter-network/urban-verified-crypto';
-import snapshot from '@snapshot-labs/snapshot.js';
-import * as actions from '../../../src/helpers/actions';
 import {
   attestationMessage,
   eligibilityPublicKey,
   mintAttestation,
   resetIssuer
 } from '../../../src/helpers/gegAttestation';
+import { verifyBallotBinding } from '../../../src/helpers/gegBinding';
 import db, { sequencerDB } from '../../../src/helpers/mysql';
-import * as teHelper from '../../../src/helpers/te';
+import { pseudonymFor } from '../../../src/helpers/teAttestationIssuer';
 import * as scores from '../../../src/scores';
-import { action, verify } from '../../../src/writer/vote';
+import { action, verifyBallotCredential } from '../../../src/writer/vote';
+import { castBallot, CastBallotArgs } from '../../fixtures/teBallotBuilder';
 
 const SPACE = 'test.eth';
 // Deliberately not the address other suites use as a proposal author. `action()`
@@ -61,7 +61,11 @@ function envelope() {
   };
 }
 
-function body(proposalId: string, timestamp: number) {
+function body(
+  proposalId: string,
+  timestamp: number,
+  credentialEnvelope?: Record<string, unknown>
+) {
   return {
     address: VOTER,
     msg: JSON.stringify({
@@ -69,7 +73,11 @@ function body(proposalId: string, timestamp: number) {
       timestamp: String(timestamp),
       payload: {
         proposal: proposalId,
-        choice: envelope(),
+        // The credential rides inside `choice`, because that is what the voter
+        // signed. `action()` stores the blob verbatim and inspects nothing.
+        choice: credentialEnvelope
+          ? { ...envelope(), ...credentialEnvelope }
+          : envelope(),
         metadata: {},
         app: '',
         reason: ''
@@ -122,10 +130,15 @@ async function seedProposal(id: string, privacy: string) {
 
 async function voteRow(proposalId: string): Promise<any> {
   const rows = await db.queryAsync(
-    'SELECT id, created, te_weight, te_nonce, te_attestation FROM votes WHERE proposal = ? AND voter = ?',
+    'SELECT id, created, choice FROM votes WHERE proposal = ? AND voter = ?',
     [proposalId, VOTER]
   );
-  return rows[0];
+  if (!rows[0]) return undefined;
+  const choice =
+    typeof rows[0].choice === 'string'
+      ? JSON.parse(rows[0].choice)
+      : rows[0].choice;
+  return { ...rows[0], choice, credential: choice?.attestation };
 }
 
 describe('vote: the credential is written with the vote', () => {
@@ -163,98 +176,144 @@ describe('vote: the credential is written with the vote', () => {
       weight,
       nonce
     });
-    return { weight: Number(weight), nonce: Number(nonce), signature };
+    return {
+      weight: Number(weight),
+      nonce: Number(nonce),
+      signature,
+      // Opaque to `action()` — it writes the column, it does not check it. The
+      // check is `verify()`'s, and `geg-binding-verify.test.ts` covers the crypto.
+      bindingSignature: `0x${'be'.repeat(80)}`
+    };
   }
 
-  it('stores a credential that verifies against the frozen key', async () => {
+  /** The credential as it rides inside `choice`, signed by the issuer. */
+  async function credentialEnvelope(id: string, weight: bigint, nonce: bigint) {
+    const att = await credential(id, weight, nonce);
+    return {
+      attestation: {
+        scheme: 'ATTESTATION_V1',
+        electionId: id,
+        pseudonym: PSEUDONYM,
+        vk: VK,
+        weight: att.weight,
+        nonce: att.nonce,
+        signature: att.signature
+      },
+      voterAttestationSignature: `0x${'be'.repeat(80)}`
+    };
+  }
+
+  it('stores the credential verbatim, inside the signed blob', async () => {
     const id = `0x${'a1'.repeat(32)}`;
     await seedProposal(id, 'shutter-elgamal');
-    const nonce = 1_700_000_000;
-    const att = await credential(id, 7n, BigInt(nonce));
+    const nonce = 4;
+    const carried = await credentialEnvelope(id, 7n, BigInt(nonce));
 
-    await action(body(id, nonce), 'ipfs1', {}, '0xvote1', context(att));
+    await action(
+      body(id, 1_700_000_000, carried),
+      'ipfs1',
+      {},
+      '0xvote1',
+      context(await credential(id, 7n, BigInt(nonce)))
+    );
 
     const row = await voteRow(id);
-    expect(row.te_weight).toBe(7);
-    expect(row.te_nonce).toBe(nonce);
-    expect(row.te_attestation).toBe(att.signature);
+    // Verbatim: `action()` stores what the voter signed and derives nothing from
+    // it. A column copy would be a second source for bytes the committee checks
+    // a signature over.
+    expect(row.credential).toEqual(carried.attestation);
+    expect(row.choice.voterAttestationSignature).toBe(
+      carried.voterAttestationSignature
+    );
 
-    // The stored bytes are a credential the committee would accept, not merely a
-    // string that round-tripped through the database.
+    // And the stored bytes are a credential the committee would accept, not
+    // merely a string that round-tripped through the database.
     const issuer = G1Point.fromBytes(bytes(issuerKey));
-    const sig = bytes(row.te_attestation);
+    const sig = bytes(row.credential.signature);
     const R = G1Point.fromBytes(sig.subarray(0, 48));
-    let s = 0n;
-    for (const b of sig.subarray(48)) s = (s << 8n) | BigInt(b);
+    let sc = 0n;
+    for (const b of sig.subarray(48)) sc = (sc << 8n) | BigInt(b);
     const message = attestationMessage(
       bytes(id),
       bytes(PSEUDONYM),
       bytes(VK),
-      BigInt(row.te_weight),
-      BigInt(row.te_nonce)
+      BigInt(row.credential.weight),
+      BigInt(row.credential.nonce)
     );
-    expect(schnorrVerify(issuer, message, { R, s })).toBe(true);
+    expect(schnorrVerify(issuer, message, { R, s: sc })).toBe(true);
     issuer.destroyWasm();
     R.destroyWasm();
   });
 
-  // The case a side table would have got wrong. `created` changes on a re-vote,
-  // so the old credential's nonce is stale; keyed on the vote id it would be
-  // orphaned rather than replaced, and the feed would serve a nonce that does
-  // not match the row it sits on.
+  // A re-vote overwrites the row, so the credential goes with the ballot it
+  // belongs to. Keeping them in one blob is why a re-vote cannot leave a stale
+  // credential attached to a ballot that no longer exists.
   it('replaces the credential on a re-vote, carrying the new nonce', async () => {
     const id = `0x${'a2'.repeat(32)}`;
     await seedProposal(id, 'shutter-elgamal');
 
-    const first = 1_700_000_000;
     await action(
-      body(id, first),
+      body(id, 1_700_000_000, await credentialEnvelope(id, 3n, 1n)),
       'ipfs1',
       {},
       '0xvote1',
-      context(await credential(id, 3n, BigInt(first)))
+      context(await credential(id, 3n, 1n))
     );
 
-    const second = first + 60;
+    const second = 1_700_000_060;
     await action(
-      body(id, second),
+      body(id, second, await credentialEnvelope(id, 9n, 2n)),
       'ipfs2',
       {},
       '0xvote2',
-      context(await credential(id, 9n, BigInt(second)))
+      context(await credential(id, 9n, 2n))
     );
 
     const rows = await db.queryAsync(
-      'SELECT id, created, te_weight, te_nonce FROM votes WHERE proposal = ? AND voter = ?',
+      'SELECT id, created FROM votes WHERE proposal = ? AND voter = ?',
       [id, VOTER]
     );
     expect(rows).toHaveLength(1);
     expect(rows[0].id).toBe('0xvote2');
     expect(rows[0].created).toBe(second);
-    expect(rows[0].te_nonce).toBe(second);
-    expect(rows[0].te_weight).toBe(9);
-  });
 
-  // The nonce must equal `created`: the protocol ranks duplicate ballots by
-  // (nonce, sequenceNumber) under last-wins, which is how Snapshot's "newer vote
-  // wins" rule is expressed to the committee. A nonce that drifts from `created`
-  // silently reorders re-votes at tally time.
-  it('keeps the nonce equal to the vote timestamp', async () => {
-    const id = `0x${'a3'.repeat(32)}`;
-    await seedProposal(id, 'shutter-elgamal');
-    const ts = 1_700_000_123;
-    await action(
-      body(id, ts),
-      'ipfs1',
-      {},
-      '0xvote1',
-      context(await credential(id, 5n, BigInt(ts)))
-    );
     const row = await voteRow(id);
-    expect(row.te_nonce).toBe(row.created);
+    // The later credential, with the higher nonce — the counter the issuer
+    // allocated, not the vote's timestamp.
+    expect(row.credential.nonce).toBe(2);
+    expect(row.credential.weight).toBe(9);
   });
 
-  it('leaves the columns NULL on a public proposal', async () => {
+  // A quoted number is the L-5 failure class in a new place. `BigInt("10000")`
+  // works and `bindingMessage` coerces too, so a string weight verifies here and
+  // is then rejected by every keyper — geg's decoder requires a real integer.
+  // The columns used to launder this, because MySQL normalised it on the way in;
+  // with the credential served straight from `choice`, ingest has to refuse it.
+  it.each([
+    ['a quoted weight', { weight: '7' }],
+    ['a quoted nonce', { nonce: '4' }],
+    ['a fractional weight', { weight: 7.5 }]
+  ])('refuses %s rather than coercing it', async (_label, over) => {
+    const id = `0x${'a5'.repeat(32)}`;
+    const carried = await credentialEnvelope(id, 7n, 4n);
+    const msg = {
+      payload: {
+        choice: {
+          ...envelope(),
+          ...carried,
+          attestation: { ...carried.attestation, ...over }
+        }
+      }
+    };
+    await expect(
+      verifyBallotCredential(
+        { id, te_config: { numCandidates: 2, budget: 1 } },
+        msg
+      )
+    ).rejects.toThrow(/must be an integer/);
+  });
+
+  it('stores a plain choice on a public proposal', async () => {
     const id = `0x${'a4'.repeat(32)}`;
     await seedProposal(id, '');
     await action(
@@ -266,9 +325,10 @@ describe('vote: the credential is written with the vote', () => {
       { ...context(null), attestation: null }
     );
     const row = await voteRow(id);
-    expect(row.te_weight).toBeNull();
-    expect(row.te_nonce).toBeNull();
-    expect(row.te_attestation).toBeNull();
+    // Nothing credential-shaped on a public ballot: the envelope carries none,
+    // and there are no columns left that could hold one.
+    expect(row.credential).toBeUndefined();
+    expect(row.choice.voterAttestationSignature).toBeUndefined();
   });
 });
 
@@ -281,132 +341,85 @@ describe('vote: the credential is written with the vote', () => {
  * building a real encrypted ballot to reach the minting code would test the SDK
  * rather than this branch.
  */
-describe('vote verify(): minting and the clamp', () => {
-  const PROPOSAL = `0x${'b1'.repeat(32)}`;
+/**
+ * `verify()` no longer mints — it checks what the voter presented.
+ *
+ * The clamp, the dust floor and the nonce moved to `/te_attestation`, where they
+ * are applied *before* the voter signs (see `teAttestationIssuer.test.ts`). What
+ * is left here is the ingest contract: a ballot is accepted only when the
+ * issuer's signature authorises the weight **and** the voter's binding ties that
+ * credential to this ballot. Either alone leaves the pairing forgeable by
+ * whoever assembles it.
+ */
+describe('vote verify(): the credential is checked, not minted', () => {
+  const ID = `0x${'d1'.repeat(32)}`;
+  const PSEUDO_FOR = (voter: string) => pseudonymFor(voter, ID);
 
-  beforeAll(() => {
+  beforeAll(async () => {
     process.env.TE_ELIGIBILITY_PRIVATE_KEY = ISSUER_SK;
     resetIssuer();
-  });
+    await initCurves();
+    await eligibilityPublicKey();
+  }, 60_000);
 
-  afterEach(() => {
-    jest.restoreAllMocks();
-  });
-
-  function proposalFixture(privacy: string, budget: number) {
-    return {
-      id: PROPOSAL,
-      space: SPACE,
-      network: '1',
-      type: budget === 1 ? 'basic' : 'weighted',
-      strategies: [],
-      snapshot: 1,
-      start: 1,
-      end: 2_000_000_000,
-      privacy,
-      choices: ['A', 'B'],
-      validation: { name: 'any' },
-      te_config: {
-        numCandidates: 2,
-        budget,
-        mode: 'exact',
-        variant: 'A'
-      } as any,
-      te_mpk: `0x${'00'.repeat(96)}`
-    };
+  async function ballotFor(over: Partial<CastBallotArgs> = {}) {
+    return castBallot({
+      electionId: ID,
+      pseudonym: PSEUDO_FOR(VOTER),
+      nonce: 1,
+      weight: 5,
+      ...over
+    });
   }
 
-  async function runVerify(privacy: string, budget: number, vp: number) {
-    jest
-      .spyOn(actions, 'getProposal')
-      .mockResolvedValue(proposalFixture(privacy, budget) as any);
-    jest
-      .spyOn(teHelper, 'verifyTeBallot')
-      .mockResolvedValue({ ok: true } as any);
-    jest.spyOn(snapshot.utils, 'getVp').mockResolvedValue({
-      vp,
-      vp_by_strategy: [vp],
-      vp_state: 'final'
-    } as any);
-    jest.spyOn(snapshot.utils, 'validateSchema').mockReturnValue(true);
+  it('accepts a ballot bound by the voter to its credential', async () => {
+    const b = await ballotFor();
+    await expect(
+      verifyBallotBinding({
+        envelope: b.envelope,
+        attestation: b.attestation,
+        signature: b.signature
+      })
+    ).resolves.toBe(true);
+  }, 60_000);
 
-    // A public proposal validates `choice` against its own type, so it cannot be
-    // handed a ballot envelope — that is the shape a private proposal expects.
-    const msg =
-      privacy === 'shutter-elgamal'
-        ? body(PROPOSAL, 1_700_000_000)
-        : {
-            address: VOTER,
-            msg: JSON.stringify({
-              space: SPACE,
-              timestamp: '1700000000',
-              payload: {
-                proposal: PROPOSAL,
-                choice: 1,
-                metadata: {},
-                app: '',
-                reason: ''
-              }
-            })
-          };
-    return verify(msg);
-  }
+  // The substitution the binding exists to stop: a credential lifted from the
+  // voter's own later ballot onto their earlier one, which is how an assembler
+  // would choose which of their ballots the committee counts.
+  it("refuses a credential moved from the voter's other ballot", async () => {
+    const first = await ballotFor({ nonce: 1 });
+    const second = await ballotFor({ nonce: 2 });
+    await expect(
+      verifyBallotBinding({
+        envelope: first.envelope,
+        attestation: second.attestation,
+        signature: first.signature
+      })
+    ).resolves.toBe(false);
+  }, 60_000);
 
-  it('mints a credential for a private proposal', async () => {
-    const ctx: any = await runVerify('shutter-elgamal', 100, 42);
-    expect(ctx.attestation).not.toBeNull();
-    expect(ctx.attestation.weight).toBe(42);
-    expect(ctx.attestation.nonce).toBe(1_700_000_000);
-    expect(ctx.attestation.signature).toMatch(/^0x[0-9a-f]{160}$/);
-  });
+  // A binding signed over a credential the ballot does not ship with — the
+  // forgery built the way an attacker would build it, not by corrupting bytes.
+  it('refuses a binding signed over a different credential', async () => {
+    const other = await ballotFor({ nonce: 9, weight: 9 });
+    const b = await ballotFor({ bindTo: other.attestation });
+    await expect(
+      verifyBallotBinding({
+        envelope: b.envelope,
+        attestation: b.attestation,
+        signature: b.signature
+      })
+    ).resolves.toBe(false);
+  }, 60_000);
 
-  // Over-cap voting power is counted AT the cap. The committee rejects an
-  // attested weight above maxWeight outright, so attesting the raw figure would
-  // drop the whale from the tally entirely rather than counting it at the limit.
-  it('clamps a weighted proposal at 10,000', async () => {
-    const ctx: any = await runVerify('shutter-elgamal', 100, 25_000);
-    expect(ctx.attestation.weight).toBe(10_000);
-  });
-
-  it('clamps a basic proposal at 1,000,000', async () => {
-    const ctx: any = await runVerify('shutter-elgamal', 1, 5_000_000);
-    expect(ctx.attestation.weight).toBe(1_000_000);
-  });
-
-  it('rounds to a whole number', async () => {
-    const ctx: any = await runVerify('shutter-elgamal', 100, 1.4);
-    expect(ctx.attestation.weight).toBe(1);
-  });
-
-  it.each([
-    ['an object, as getProposal returns it', false],
-    ['a raw JSON string', true]
-  ])('reads the budget when te_config is %s', async (_label, asString) => {
-    const fixture = proposalFixture('shutter-elgamal', 100);
-    if (asString) fixture.te_config = JSON.stringify(fixture.te_config) as any;
-    jest.spyOn(actions, 'getProposal').mockResolvedValue(fixture as any);
-    jest
-      .spyOn(teHelper, 'verifyTeBallot')
-      .mockResolvedValue({ ok: true } as any);
-    jest.spyOn(snapshot.utils, 'getVp').mockResolvedValue({
-      vp: 42,
-      vp_by_strategy: [42],
-      vp_state: 'final'
-    } as any);
-    jest.spyOn(snapshot.utils, 'validateSchema').mockReturnValue(true);
-
-    const ctx: any = await verify(body(PROPOSAL, 1_700_000_000));
-    expect(ctx.attestation.weight).toBe(42);
-  });
-
-  it('mints nothing for a public proposal', async () => {
-    const ctx: any = await runVerify('', 1, 42);
-    expect(ctx.attestation).toBeNull();
-  });
-
-  it('still refuses dust before it reaches minting', async () => {
-    await expect(runVerify('shutter-elgamal', 100, 0.3)).rejects.toMatch(
-      /voting power too low/
-    );
-  });
+  it('refuses a weight the voter never signed', async () => {
+    const b = await ballotFor();
+    await expect(
+      verifyBallotBinding({
+        envelope: b.envelope,
+        attestation: { ...b.attestation, weight: 50 },
+        signature: b.signature
+      })
+    ).resolves.toBe(false);
+  }, 60_000);
 });
