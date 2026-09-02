@@ -238,7 +238,7 @@ export async function mintAttestation(args: MintArgs): Promise<string> {
  * turns that into an immediate rejection.
  *
  * Both halves are checked because both are what `verify_attestation` checks on
- * the committee side: the signature, and `1 <= weight <= maxWeight`. A signature
+ * the committee side: the signature, and `weight >= 1`. A signature
  * that verifies at an out-of-range weight is still an `INVALID_ATTESTATION`
  * exclusion.
  *
@@ -248,9 +248,12 @@ export async function mintAttestation(args: MintArgs): Promise<string> {
  * framing pin this too.
  */
 export async function verifyAttestation(
-  args: MintArgs & { signature: string; maxWeight: bigint }
+  args: MintArgs & { signature: string }
 ): Promise<boolean> {
-  if (args.weight < 1n || args.weight > args.maxWeight) return false;
+  // No upper bound: the protocol's per-election `maxWeight` is gone. It only
+  // constrained anything while voting power was clamped — once it is not, the bound
+  // must sit at or above the largest legitimate holder, which bounds nothing useful.
+  if (args.weight < 1n) return false;
   if (args.nonce < 1n) return false;
 
   const { vk: issuerVk } = await getIssuer();

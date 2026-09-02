@@ -43,7 +43,8 @@ const digestOf = (env: any) =>
     aggregates: env.aggregates,
     admitted: env.admitted,
     exclusions: env.exclusions,
-    totalAdmittedWeight: env.totalAdmittedWeight
+    totalAdmittedWeight: env.totalAdmittedWeight,
+    totalScaledWeight: env.totalScaledWeight ?? env.totalAdmittedWeight
   }).toString('hex');
 
 describe('canonicalAggregate: equal digest implies equal stored text', () => {
@@ -79,6 +80,23 @@ describe('canonicalAggregate: equal digest implies equal stored text', () => {
     expect(digestOf({ ...bare, totalAdmittedWeight: 0 })).toBe(
       digestOf(envelope(0))
     );
+  });
+
+  // Mirrors `geg.envelopes.codecs`, which reads totalScaledWeight and falls back to
+  // totalAdmittedWeight rather than to 0. On an unscaled election the two are equal
+  // by construction, so the fallback is what lets a payload written before the field
+  // existed hash to the same digest. Defaulting to 0 would be a silent fork.
+  it('defaults a missing scaled weight to the admitted weight, as geg does', () => {
+    const c = canonicalAggregate(envelope(100), ELECTION);
+    expect(c.totalScaledWeight).toBe(100);
+  });
+
+  it('keeps an explicit scaled weight distinct from the admitted weight', () => {
+    const scaled: any = { ...envelope(100), totalScaledWeight: 50 };
+    const c = canonicalAggregate(scaled, ELECTION);
+    expect(c.totalScaledWeight).toBe(50);
+    expect(c.totalAdmittedWeight).toBe(100);
+    expect(digestOf(scaled)).not.toBe(digestOf(envelope(100)));
   });
 
   // Different weights must stay different — a canonicaliser that collapsed

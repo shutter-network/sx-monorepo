@@ -135,15 +135,25 @@ describe('issueBallotCredential', () => {
 });
 
 describe('issueBallotCredential — the weight rules, applied before signing', () => {
-  it('clamps voting power above the cap', async () => {
+  // The inverse of what this once asserted. It used to expect `weight === 10_000`
+  // for a 999,999 holder -- `maxWeight = floor(1e6 / budget)` -- which flattened the
+  // top of every cap table it touched: a holder of 25,000 and one of 25,000,000
+  // voted identically. There is no cap now; keeping the tally computable is the
+  // scale factor's job, and scaling divides everyone rather than truncating some.
+  it('carries voting power as held, with no cap', async () => {
     setVp(999_999);
     const r = await request();
-    // maxWeight = floor(1e6 / budget)
-    expect(r.attestation.weight).toBe(10_000);
-    expect(r.maxWeight).toBe(10_000);
-    // The unclamped figure is still reported, so the UI can say what was lost
-    // *before* the voter is asked to sign it.
+    expect(r.attestation.weight).toBe(999_999);
     expect(r.votingPower).toBe(999_999);
+  });
+
+  // A figure far above the old 1e6 ceiling, to pin that nothing clamps at any
+  // magnitude rather than that one particular cap was raised.
+  it('does not cap even far above the old 1e6 ceiling', async () => {
+    setVp(25_000_000);
+    const r = await request();
+    expect(r.attestation.weight).toBe(25_000_000);
+    expect(r.votingPower).toBe(25_000_000);
   });
 
   it('rounds fractional voting power', async () => {

@@ -29,6 +29,15 @@ const props = defineProps<{
 const { auth, web3 } = useWeb3();
 
 const stalled = ref(false);
+/**
+ * The coordinator's own account of the stall, when it gave one.
+ *
+ * Unsigned, unlike the stall flag beside it — the hub records it verbatim and
+ * nothing verifies it. Rendered as the coordinator's claim rather than as fact,
+ * and it drives nothing: the retry button is gated on an admin signature exactly
+ * as before, whatever this says.
+ */
+const stallReason = ref<string | null>(null);
 const busy = ref(false);
 const message = ref<{ kind: 'ok' | 'err'; text: string } | null>(null);
 
@@ -57,6 +66,7 @@ async function refresh() {
   try {
     const state = await fetchGegElection(props.apiBaseUrl, props.proposal.id);
     stalled.value = state.tallyStalled;
+    stallReason.value = state.tallyStallReason;
   } catch {
     // Transient: the notice is an aid, not a source of truth. Leaving the last
     // known state in place beats flickering it away on one failed poll.
@@ -118,6 +128,10 @@ onBeforeUnmount(() => clearInterval(timer));
         <li>the keypers responded but derived different totals;</li>
         <li>the count did not finish in the time the coordinator allows.</li>
       </ul>
+      <div v-if="stallReason" class="break-words">
+        The coordinator reports:
+        <span class="font-semibold">{{ stallReason }}</span>
+      </div>
     </div>
     <div v-if="isAdmin" class="flex flex-wrap items-center gap-2">
       <button

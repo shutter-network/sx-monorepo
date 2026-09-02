@@ -81,6 +81,23 @@ export interface TeCommitteeSnapshot {
    * choice, unlike the per-proposal `budget` the hub derives from `type`.
    */
   weightedBudget: number;
+  /**
+   * Conservative upper bound on this proposal's total voting power, resolved at
+   * creation (see `teVotingPowerBound.ts`).
+   *
+   * Frozen rather than re-read because `s` derives from it and must not move once
+   * voters can see it — and because a value that drifted between creation and tally
+   * would silently change what a ballot is worth.
+   */
+  maxTotalWeight: number;
+  /**
+   * The solver ceiling this proposal was sized against, captured from
+   * `TE_SOLVER_CEILING` at creation.
+   *
+   * Frozen so that raising the env var later cannot retroactively re-scale a live
+   * proposal: the ballots were cast under the `s` this pair implies.
+   */
+  solverCeiling: number;
 }
 
 export class TeConfigError extends Error {}
@@ -114,6 +131,37 @@ export function assertBallotShape(numCandidates: number, budget: number): void {
         `${Math.floor(MAX_PROOF_BRANCHES / (budget + 1))} choices)`
     );
   }
+}
+
+/**
+ * How large a BSGS search this deployment's coordinator can actually solve.
+ *
+ * `budget x Σ(admitted weights)`, and the single place that number is defined —
+ * geg deliberately no longer decides it, because feasibility depends on the
+ * machine the coordinator runs on and a library cannot see that. Sized from the
+ * table in `generalised-el-gamal/docs/COORDINATOR_SIZING.md`: cost is
+ * `2√bound x 11 µs` of wall clock and `218 B x √bound` of memory, so 1e12 is about
+ * 21 s and 220 MB, and quadrupling the bound doubles both.
+ *
+ * The default corresponds to roughly a 1 GB coordinator with headroom. Raise it
+ * only alongside the memory to match: overshooting means a tally that runs for
+ * hours or gets OOM-killed, which `recover_result` now refuses up front rather
+ * than discovering the hard way.
+ */
+export const DEFAULT_TE_SOLVER_CEILING = 1e12;
+
+export function teSolverCeiling(
+  env: NodeJS.ProcessEnv = process.env
+): number {
+  const raw = env.TE_SOLVER_CEILING;
+  if (raw === undefined || raw.trim() === '') return DEFAULT_TE_SOLVER_CEILING;
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value < 1) {
+    throw new TeConfigError(
+      `TE_SOLVER_CEILING must be a positive number, got ${JSON.stringify(raw)}`
+    );
+  }
+  return value;
 }
 
 const ADDRESS_RE = /^0x[0-9a-fA-F]{40}$/;
@@ -304,6 +352,10 @@ export async function buildCommitteeSnapshot(args: {
   votingStart: number;
   votingEnd: number;
   adminAddress: string;
+  /** Resolved by `resolveVotingPowerBound` at creation; see `maxTotalWeight`. */
+  maxTotalWeight: number;
+  /** Defaults to `TE_SOLVER_CEILING`; passed explicitly only by tests. */
+  solverCeiling?: number;
 }): Promise<TeCommitteeSnapshot> {
   const env = args.env ?? readTeEnv();
 
@@ -372,7 +424,9 @@ export async function buildCommitteeSnapshot(args: {
     adminAddress: args.adminAddress,
     votingStart: args.votingStart,
     votingEnd: args.votingEnd,
-    weightedBudget
+    weightedBudget,
+    maxTotalWeight: args.maxTotalWeight,
+    solverCeiling: args.solverCeiling ?? teSolverCeiling()
   };
 }
 
@@ -386,24 +440,24 @@ export async function buildCommitteeSnapshot(args: {
  * disagreement; regenerate them from the snapshot.
  */
 /**
- * The largest per-voter weight a budget allows: `floor(1e6 / budget)`.
+ * Parse a stored committee snapshot without validating it.
  *
- * **A second copy of `deriveMaxWeight` in `apps/hub/src/helpers/gegConfig.ts`.**
- * The hub still needs it to advertise `maxWeight` in the election config the
- * keypers verify against; the sequencer needs it to clamp before minting. If the
- * two ever disagree, the sequencer attests a weight the committee rejects and
- * every over-cap ballot is excluded as `INVALID_ATTESTATION` — so the parity is
- * asserted in `test/unit/helpers/teCommittee.test.ts` rather than assumed.
- *
- * The bound itself is the protocol's: `budget × maxWeight <= 1_000_000`, which
- * exists because the tally is recovered by a discrete-log search over a range
- * proportional to `budget × Σ weights`. Taking the largest value the protocol
- * permits is the least restrictive reading available.
+ * Used where a *missing or malformed* snapshot should degrade rather than throw —
+ * `ballotParamsColumn` falls back to `scale: 1`, which is the correct reading of a
+ * proposal that has no frozen bound.
  */
-export const MAX_BUDGET_TIMES_WEIGHT = 1_000_000;
-
-export function deriveMaxWeight(budget: number): number {
-  return Math.floor(MAX_BUDGET_TIMES_WEIGHT / budget);
+export function parseCommitteeSnapshotLoose(
+  teGegConfig: unknown
+): { maxTotalWeight?: number; solverCeiling?: number } | null {
+  try {
+    const snapshot =
+      typeof teGegConfig === 'string'
+        ? JSON.parse(teGegConfig)
+        : (teGegConfig as any);
+    return snapshot && typeof snapshot === 'object' ? snapshot : null;
+  } catch {
+    return null;
+  }
 }
 
 export function frozenWeightedBudget(teGegConfig: unknown): number {
@@ -420,17 +474,78 @@ export function frozenWeightedBudget(teGegConfig: unknown): number {
   return budget;
 }
 
+/** The deployment's weighted budget, for sizing the fallback before the snapshot exists. */
+export function weightedBudgetFromEnv(): number {
+  const v = Number(readTeEnv().weightedBudget ?? 100);
+  return Number.isFinite(v) && v >= 1 ? v : 100;
+}
+
+/**
+ * `V` when no strategy can supply one — an unrecognised strategy, or none at all.
+ *
+ * **Derived, never configured.** It is `floor(ceiling / budget)`: the largest total
+ * weight this deployment can tally without scaling. That is not an estimate of the
+ * space's real voting power, and it is not trying to be — for `ticket`, `whitelist`
+ * and most of Snapshot's strategies no upper bound is knowable, so the only
+ * defensible number is a statement about *our* capacity rather than a guess about
+ * theirs.
+ *
+ * There is deliberately no env var for this. An earlier version had
+ * `TE_VOTING_POWER_FALLBACK`, defaulting to a flat `1e12`, on the theory that
+ * over-estimating `V` is free. It is not: `s` is chosen so `budget x (V / s)` fits
+ * the ceiling, so an over-estimate does not sit unused — it *forces scaling*, and
+ * every voter's power is divided for no reason. At the shipped defaults (`V = 1e12`,
+ * ceiling `1e12`, budget 100) that produced `s = 128` on a space whose real turnout
+ * was a few tens of thousands: a 25,000 holder counted as 195.
+ *
+ * The knob could only ever be set wrong. Above this value it forces needless
+ * scaling; below it, it also forces needless scaling *and* narrows the alarm. The
+ * one number an operator should turn is `TE_SOLVER_CEILING`, which is a real
+ * statement about the coordinator's hardware — raising the fallback without raising
+ * the ceiling would just be a lie about capacity.
+ *
+ * `V` doubles as the ingest alarm's threshold (H9), and this value is the right one
+ * there too: the alarm fires exactly when accumulated weight reaches what the
+ * coordinator can actually solve.
+ */
+export function votingPowerFallback(budget: number): number {
+  return Math.max(1, Math.floor(teSolverCeiling() / Math.max(1, budget)));
+}
+
+export function deriveScale(
+  budget: number,
+  maxTotalWeight: number,
+  solverCeiling: number
+): number {
+  let scale = 1;
+  while (budget * Math.ceil(maxTotalWeight / scale) > solverCeiling) {
+    scale *= 2;
+  }
+  return scale;
+}
+
 export function ballotParamsColumn(
   choices: string[],
   type: string | null | undefined,
-  weightedBudget: number
+  weightedBudget: number,
+  snapshot?: { maxTotalWeight?: number; solverCeiling?: number } | null
 ): { te_config: string } {
+  const budget = type === 'weighted' ? weightedBudget : 1;
+  // Carried on the proposal so the voter can be told, before signing, what their
+  // power will actually count as. Without it the pre-signature notice silently reads
+  // "no scaling" on a scaled proposal — which is the exact surprise the notice
+  // exists to prevent.
+  const scale =
+    snapshot?.maxTotalWeight && snapshot?.solverCeiling
+      ? deriveScale(budget, snapshot.maxTotalWeight, snapshot.solverCeiling)
+      : 1;
   return {
     te_config: JSON.stringify({
       numCandidates: choices.length,
-      budget: type === 'weighted' ? weightedBudget : 1,
+      budget,
       mode: 'exact',
-      variant: 'A'
+      variant: 'A',
+      scale
     })
   };
 }

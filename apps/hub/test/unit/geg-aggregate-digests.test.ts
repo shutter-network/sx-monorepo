@@ -2,7 +2,7 @@
  * Cross-language parity for the aggregate write digest.
  *
  * Same contract as the DKG digest, one layer harder: this one ABI-encodes a
- * *nested* tuple — `((bytes,bytes)[], uint256[], (uint256,uint8)[], uint256)` —
+ * *nested* tuple — `((bytes,bytes)[], uint256[], (uint256,uint8)[], uint256, uint256)` —
  * as a single value rather than four field-wise encodes. Dynamic arrays of
  * dynamic elements are laid out as an offset table followed by padded data, so
  * a plausible-looking hand-rolled encoding produces a plausible-looking digest
@@ -35,6 +35,7 @@ type AggregateCase = {
     admitted: number[];
     exclusions: Array<{ sequenceNumber: number; reason: string }>;
     totalAdmittedWeight: number;
+    totalScaledWeight: number;
   };
   digest: string;
   signature: string;
@@ -54,7 +55,8 @@ function digestOf(c: AggregateCase): string {
     aggregates: c.aggregate.aggregates,
     admitted: c.aggregate.admitted,
     exclusions: c.aggregate.exclusions,
-    totalAdmittedWeight: c.aggregate.totalAdmittedWeight
+    totalAdmittedWeight: c.aggregate.totalAdmittedWeight,
+    totalScaledWeight: c.aggregate.totalScaledWeight
   }).toString('hex')}`;
 }
 
@@ -125,6 +127,21 @@ describe('GEG-AGGREGATE-v1 digest', () => {
       const changed = {
         ...base,
         aggregate: { ...base.aggregate, totalAdmittedWeight: 1235 }
+      };
+      expect(digestOf(changed)).not.toBe(base.digest);
+    });
+
+    // The field whose absence caused every keyper's aggregate to be rejected as
+    // "from non-member": geg signed five fields, the hub hashed four, and recovery
+    // returned a valid-looking address belonging to nobody. The fixture keeps
+    // totalScaledWeight != totalAdmittedWeight here so dropping it cannot coincide.
+    it('binds the total scaled weight', () => {
+      const changed = {
+        ...base,
+        aggregate: {
+          ...base.aggregate,
+          totalScaledWeight: base.aggregate.totalScaledWeight + 1
+        }
       };
       expect(digestOf(changed)).not.toBe(base.digest);
     });

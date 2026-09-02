@@ -136,6 +136,20 @@ CREATE TABLE proposals (
   -- clear it, so a coordinator restart can never quietly resurrect an election
   -- that a human has not looked at.
   te_tally_stalled TINYINT(1) NOT NULL DEFAULT 0,
+  -- The coordinator's own account of *why* it stalled, for an operator to read.
+  --
+  -- Deliberately NOT part of the signed `tally_stall` digest, unlike the flag
+  -- above. It is a hint, not an artifact: it cannot make an unverifiable tally
+  -- look verifiable, and the split that actually decides what an operator does --
+  -- keyper problem or coordinator problem -- is derived client-side from share
+  -- counts nobody can forge (`diagnoseTally`). Surfaced as a claim ("the
+  -- coordinator reports...") rather than as fact.
+  --
+  -- If this value ever gates an automated action -- auto-retry, auto-resume,
+  -- auto-scaling the coordinator -- it must be moved inside the signed digest
+  -- first. Unauthenticated input driving automation is a different risk class
+  -- from unauthenticated input driving a human's attention.
+  te_tally_stall_reason VARCHAR(200) DEFAULT NULL,
   PRIMARY KEY (id),
   INDEX ipfs (ipfs),
   INDEX author (author),

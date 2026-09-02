@@ -33,6 +33,13 @@ ALTER TABLE proposals
   ADD COLUMN te_dkg_status VARCHAR(24) DEFAULT NULL,
   ADD COLUMN te_geg_config JSON DEFAULT NULL,
   ADD COLUMN te_tally_stalled TINYINT(1) NOT NULL DEFAULT 0,
+  -- The coordinator's own account of why it stalled, for an operator to read.
+  -- Advisory and deliberately outside the signed `tally_stall` digest: it is a
+  -- hint, not an artifact. It cannot make an unverifiable tally look verifiable,
+  -- and the split an operator acts on -- keyper problem vs coordinator problem --
+  -- is derived client-side from public share counts (`diagnoseTally`), not read
+  -- from here. If it ever gates an automated action it must be signed first.
+  ADD COLUMN te_tally_stall_reason VARCHAR(200) DEFAULT NULL,
   ALGORITHM=INSTANT;
 
 

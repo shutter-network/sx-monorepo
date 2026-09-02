@@ -33,6 +33,7 @@ import {
 } from './helpers/gegConfig';
 import {
   aggregateDigest,
+  aggregateDigestPreScale,
   decryptionShareDigest,
   dkgResultDigest,
   GegDigestError,
@@ -87,7 +88,7 @@ async function loadProposal(proposalId: string): Promise<any | null> {
   const rows = await (db as any).queryAsync(
     `SELECT id, privacy, type, choices, start, end, author, space, te_mpk,
             te_committee_pks, te_geg_config, te_config, te_aggregate,
-            te_dkg_status, te_tally_stalled
+            te_dkg_status, te_tally_stalled, te_tally_stall_reason
        FROM proposals WHERE id = ? LIMIT 1`,
     [proposalId]
   );
@@ -192,6 +193,11 @@ router.get('/proposal/:id/te_geg_election', async (req, res) => {
       // Drives the coordinator's state machine: a stalled election is one it
       // has given up driving, and it will not resume until this clears.
       tallyStalled: Boolean(proposal.te_tally_stalled),
+      // The coordinator's own account, passed through unverified and labelled as
+      // such by the UI. Advisory: the flag above is signed, this is not, and the
+      // keyper-vs-coordinator split an operator actually acts on is derived
+      // client-side from share counts (see teVerify's `diagnoseTally`).
+      tallyStallReason: proposal.te_tally_stall_reason ?? null,
       finalizedKey
     });
   } catch (err: any) {
@@ -652,7 +658,8 @@ router.post('/proposal/:id/te_aggregate', async (req, res) => {
         aggregates: canonical.aggregates,
         admitted: canonical.admitted,
         exclusions: canonical.exclusions,
-        totalAdmittedWeight: canonical.totalAdmittedWeight
+        totalAdmittedWeight: canonical.totalAdmittedWeight,
+        totalScaledWeight: canonical.totalScaledWeight
       });
     } catch (err: any) {
       return sendError(res, err?.message || 'bad_request', 400);
@@ -665,6 +672,38 @@ router.post('/proposal/:id/te_aggregate', async (req, res) => {
         )
       : -1;
     if (index === -1) {
+      // Before blaming the roster, check whether this signature verifies under the
+      // pre-scale tuple. A shape mismatch recovers to a valid-looking address that
+      // is in no roster, so the two failures are indistinguishable from the signer
+      // alone — and the roster is the misleading one to name.
+      let preScaleSigner: string | null = null;
+      try {
+        preScaleSigner = recoverDigestSigner(
+          aggregateDigestPreScale({
+            electionId: proposalId,
+            aggregates: canonical.aggregates,
+            admitted: canonical.admitted,
+            exclusions: canonical.exclusions,
+            totalAdmittedWeight: canonical.totalAdmittedWeight
+          }),
+          keyperSig
+        );
+      } catch {
+        preScaleSigner = null;
+      }
+      const preScaleMember =
+        preScaleSigner &&
+        snapshot.keypers.some(
+          k => k.address.toLowerCase() === preScaleSigner!.toLowerCase()
+        );
+      if (preScaleMember) {
+        log.warn(
+          `[geg] ${proposalId}: aggregate from ${preScaleSigner} signed under the ` +
+            `pre-scale digest format (4-field tally tuple); this keyper is running a ` +
+            `build from before weight scaling`
+        );
+        return sendError(res, 'aggregate_pre_scale_digest', 409);
+      }
       log.warn(
         `[geg] ${proposalId}: aggregate from non-member ${signer ?? 'unrecoverable'}`
       );
@@ -1350,6 +1389,14 @@ router.post('/proposal/:id/te_tally_stalled', async (req, res) => {
     if (typeof stalled !== 'boolean') {
       return sendError(res, 'stalled: expected a boolean', 400);
     }
+    // Optional, unsigned, and truncated rather than rejected on length: a stall
+    // must never fail to record because its explanation was malformed. The flag is
+    // what carries authority; this only tells an operator where to look.
+    const rawReason = req.body?.reason;
+    const reason =
+      stalled && typeof rawReason === 'string' && rawReason.trim()
+        ? rawReason.trim().slice(0, 200)
+        : null;
     if (typeof sig !== 'string') {
       return sendError(res, 'signature: expected a string', 400);
     }
@@ -1424,8 +1471,10 @@ router.post('/proposal/:id/te_tally_stalled', async (req, res) => {
     );
 
     await (db as any).queryAsync(
-      'UPDATE proposals SET te_tally_stalled = ? WHERE id = ? LIMIT 1',
-      [stalled ? 1 : 0, proposalId]
+      'UPDATE proposals SET te_tally_stalled = ?, te_tally_stall_reason = ? WHERE id = ? LIMIT 1',
+      // Resume clears the reason with the flag: a stale explanation attached to a
+      // running tally is worse than none.
+      [stalled ? 1 : 0, reason, proposalId]
     );
     log.info(
       `[geg] ${proposalId}: tally ${stalled ? 'marked stalled' : 'resumed by admin'}`

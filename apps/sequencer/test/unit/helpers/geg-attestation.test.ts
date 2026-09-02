@@ -145,12 +145,6 @@ describe('ATTESTATION_V1 parity with the protocol corpus', () => {
     expect(signatureVerifies(v)).toBe(false); // but never under ATTESTATION_V1
   });
 
-  it('signs an over-max-weight credential correctly, leaving the cap to admission', () => {
-    const v = vector('attestation_v1_over_max_weight');
-    expect(BigInt(v.inputs.weight)).toBeGreaterThan(BigInt(v.inputs.maxWeight));
-    expect(v.expected.verify).toBe(false); // the keypers refuse it
-    expect(signatureVerifies(v)).toBe(true); // the signature itself is sound
-  });
 
   // The other direction. Verifying our own credential with our own verifier
   // would pass under any self-consistent framing, so what closes the loop is
@@ -174,13 +168,12 @@ describe('ATTESTATION_V1 parity with the protocol corpus', () => {
     voter.vk.destroyWasm();
 
     const cases = [
-      { name: 'v1_weight1_nonce1', weight: 1n, nonce: 1n, maxWeight: 10n },
-      { name: 'v1_weight5_nonce1', weight: 5n, nonce: 1n, maxWeight: 10n },
+      { name: 'v1_weight1_nonce1', weight: 1n, nonce: 1n },
+      { name: 'v1_weight5_nonce1', weight: 5n, nonce: 1n },
       {
         name: 'v1_weight_at_cap',
         weight: 9007199254740991n,
-        nonce: 1770000000n,
-        maxWeight: 9007199254740991n
+        nonce: 1770000000n
       }
     ];
 
@@ -218,7 +211,6 @@ describe('ATTESTATION_V1 parity with the protocol corpus', () => {
           vk,
           weight: c.weight.toString(),
           nonce: c.nonce.toString(),
-          maxWeight: c.maxWeight.toString(),
           signature,
           expected: { verify: true }
         });
@@ -276,7 +268,7 @@ describe('verifyAttestation — the ingest self-check', () => {
     const args = base();
     const signature = await mintAttestation(args);
     await expect(
-      verifyAttestation({ ...args, signature, maxWeight: 10_000n })
+      verifyAttestation({ ...args, signature })
     ).resolves.toBe(true);
   });
 
@@ -307,29 +299,27 @@ describe('verifyAttestation — the ingest self-check', () => {
       verifyAttestation({
         ...args,
         ...override,
-        signature,
-        maxWeight: 10_000n
+        signature
       })
     ).resolves.toBe(false);
   });
 
-  // The range check is half of what the committee's verify_attestation does, so
-  // a valid signature over an out-of-range weight must still fail here — that is
-  // an INVALID_ATTESTATION exclusion at tally.
-  it('rejects a validly signed weight above maxWeight', async () => {
-    const args = { ...base(), weight: 10_001n };
+  // There is no upper bound left to enforce: the protocol's per-election
+  // `maxWeight` is gone, so a large weight is simply a large weight. The lower
+  // bound survives, and is what a malformed credential trips.
+  it('accepts a validly signed weight of any size', async () => {
+    const args = { ...base(), weight: 1_000_000_000n };
     const signature = await mintAttestation(args);
-    await expect(
-      verifyAttestation({ ...args, signature, maxWeight: 10_000n })
-    ).resolves.toBe(false);
+    await expect(verifyAttestation({ ...args, signature })).resolves.toBe(true);
   });
 
-  it('accepts a weight exactly at maxWeight', async () => {
-    const args = { ...base(), weight: 10_000n };
-    const signature = await mintAttestation(args);
-    await expect(
-      verifyAttestation({ ...args, signature, maxWeight: 10_000n })
-    ).resolves.toBe(true);
+  // The lower bound is enforced where a credential is created, so it cannot be
+  // reached through `verifyAttestation` with a genuinely minted one — asserting it
+  // at the mint side is the reachable form of the same guarantee.
+  it('refuses to mint a weight below 1', async () => {
+    await expect(mintAttestation({ ...base(), weight: 0n })).rejects.toThrow(
+      /weight must be >= 1/
+    );
   });
 
   // Malformed input must return false rather than throw: this runs inside the
@@ -340,7 +330,7 @@ describe('verifyAttestation — the ingest self-check', () => {
     ['empty', '0x']
   ])('returns false for a %s signature', async (_label, signature) => {
     await expect(
-      verifyAttestation({ ...base(), signature, maxWeight: 10_000n })
+      verifyAttestation({ ...base(), signature })
     ).resolves.toBe(false);
   });
 
@@ -352,7 +342,7 @@ describe('verifyAttestation — the ingest self-check', () => {
     resetIssuer();
     try {
       await expect(
-        verifyAttestation({ ...args, signature, maxWeight: 10_000n })
+        verifyAttestation({ ...args, signature })
       ).resolves.toBe(false);
     } finally {
       process.env.TE_ELIGIBILITY_PRIVATE_KEY = ISSUER_SK;

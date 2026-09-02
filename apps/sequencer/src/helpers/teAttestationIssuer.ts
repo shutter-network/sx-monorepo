@@ -7,9 +7,9 @@ import {
   verifyAttestation
 } from './gegAttestation';
 import log from './log';
+import { parseCommitteeSnapshotLoose } from './teCommittee';
 import db from './mysql';
 import { isDustVotingPower, isWithinGegVotingWindow } from './te';
-import { deriveMaxWeight } from './teCommittee';
 import { jsonParse } from './utils';
 
 const scoreAPIUrl = process.env.SCORE_API_URL || 'https://score.snapshot.org';
@@ -92,7 +92,6 @@ export interface IssueResult {
   attestation: IssuedCredential;
   /** What the voter actually holds, before the cap — shown so the clamp is visible. */
   votingPower: number;
-  maxWeight: number;
 }
 
 export async function issueBallotCredential(args: {
@@ -167,9 +166,44 @@ export async function issueBallotCredential(args: {
     );
   }
 
-  const maxWeight = BigInt(deriveMaxWeight(budget));
-  const rounded = BigInt(Math.round(vp.vp));
-  const weight = rounded > maxWeight ? maxWeight : rounded;
+  // The credential carries voting power **as held**, not capped.
+  //
+  // This used to clamp at `floor(1e6 / budget)` — 10,000 at the default weighted
+  // budget — so a holder of 25,000 and one of 25,000,000 voted identically, which
+  // flattened the top of every cap table it touched. Keeping the tally computable is
+  // now the scale factor's job (`scale` in the election config), and scaling divides
+  // everyone rather than truncating some, so every ratio survives.
+  const weight = BigInt(Math.round(vp.vp));
+
+  // Alarm, not a gate (H9).
+  //
+  // `V` is an estimate frozen at creation, and `s` was chosen from it. If real
+  // turnout exceeds it, the tally is sized for a smaller bound than it will actually
+  // face — recoverable by giving the coordinator more memory, but only if someone
+  // knows before the tally runs. Refusing the vote instead would disenfranchise a
+  // voter for an operator's estimate being wrong, so this reports and lets them vote.
+  try {
+    const bound = parseCommitteeSnapshotLoose(proposal.te_geg_config)
+      ?.maxTotalWeight;
+    if (bound) {
+      const [row] = await db.queryAsync(
+        'SELECT COALESCE(SUM(vp), 0) AS total FROM votes WHERE proposal = ?',
+        [proposalId]
+      );
+      const attested = Number(row?.total ?? 0) + Number(weight);
+      if (attested > bound) {
+        log.warn(
+          `[te-vpbound] ${proposalId}: attested weight ${attested} has passed the ` +
+            `frozen bound ${bound}. The scale was chosen from that bound, so the ` +
+            `tally may exceed what the coordinator is sized for — raise ` +
+            `TE_SOLVER_CEILING and its memory before the tally runs.`
+        );
+      }
+    }
+  } catch (err: any) {
+    // Diagnostics must never block issuance.
+    log.warn(`[te-vpbound] ${proposalId}: bound check skipped: ${err?.message || err}`);
+  }
 
   const pseudonym = pseudonymFor(voter, proposalId);
   const nonce = BigInt(await nextRevoteNonce(proposalId, pseudonym));
@@ -184,8 +218,7 @@ export async function issueBallotCredential(args: {
     if (
       !(await verifyAttestation({
         ...mintArgs,
-        signature: credentialSig,
-        maxWeight
+        signature: credentialSig
       }))
     ) {
       throw new GegAttestationError(
@@ -201,7 +234,7 @@ export async function issueBallotCredential(args: {
   }
 
   log.info(
-    `[te-issue] proposal=${proposalId} weight=${weight} nonce=${nonce} clamped=${rounded > maxWeight}`
+    `[te-issue] proposal=${proposalId} weight=${weight} nonce=${nonce}`
   );
 
   return {
@@ -215,6 +248,5 @@ export async function issueBallotCredential(args: {
       signature: credentialSig
     },
     votingPower: vp.vp,
-    maxWeight: Number(maxWeight)
   };
 }

@@ -9,7 +9,7 @@
     "mode": "exact",
     "variant": "A",
     "weighted": true,
-    "maxWeight": 10,
+    
     "duplicatePolicy": "last-wins",
     "votingStart": 1000,
     "votingEnd": 2000,

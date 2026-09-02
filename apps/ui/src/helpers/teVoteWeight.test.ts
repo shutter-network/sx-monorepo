@@ -1,71 +1,79 @@
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { TE_MAX_WEIGHT, TE_MAX_WEIGHT_UNWEIGHTED } from './constants';
 import {
-  teMaxWeightForType,
+  scaleWeight,
   teVoteWeight,
   totalVotingPower
 } from './teVoteWeight';
 
-describe('teVoteWeight', () => {
-  // The boundaries this exists to tell the voter about, all three confirmed
-  // against a live election: 0.3 refused, 0.5 counted as 1, 25,000 capped at
-  // 10,000.
-  it.each([
-    [0.3, 'weighted', 'dust', 0],
-    [0.49999, 'weighted', 'dust', 0],
-    [0.5, 'weighted', 'ok', 1],
-    [1.4, 'weighted', 'ok', 1],
-    [1.5, 'weighted', 'ok', 2],
-    [1500, 'weighted', 'ok', 1500],
-    [10_000, 'weighted', 'ok', 10_000],
-    [10_001, 'weighted', 'clamped', 10_000],
-    [25_000, 'weighted', 'clamped', 10_000],
-    [25_000, 'basic', 'ok', 25_000],
-    [2_000_000, 'basic', 'clamped', 1_000_000]
-  ])(
-    'vp %p on a %s proposal is %s, counted as %p',
-    (vp, type, kind, counted) => {
-      const r = teVoteWeight(vp as number, type as string);
-      expect(r.kind).toBe(kind);
-      expect(r.counted).toBe(counted);
+/**
+ * The per-voter cap this file used to pin is gone (W1): voting power is counted as
+ * held. What is left to check is the floor, and the scale factor that replaced the
+ * cap — which divides everyone rather than truncating some.
+ */
+describe('scaleWeight', () => {
+  it('is the identity at scale 1 — the case essentially every space takes', () => {
+    for (const w of [0, 1, 9_999, 25_000, 2_000_000]) {
+      expect(scaleWeight(w, 1)).toBe(w);
     }
-  );
-
-  // A non-finite figure must read as dust rather than as countable: `NaN < 1`
-  // and `Infinity < 1` are both false, so a bare comparison would tell the voter
-  // their vote counts when the sequencer will refuse it.
-  it.each([[NaN], [Infinity], [-Infinity]])(
-    'treats non-finite vp %p as dust',
-    vp => {
-      expect(teVoteWeight(vp, 'weighted').kind).toBe('dust');
-    }
-  );
-
-  it('uses the budget-appropriate ceiling', () => {
-    expect(teMaxWeightForType('weighted')).toBe(TE_MAX_WEIGHT);
-    expect(teMaxWeightForType('basic')).toBe(TE_MAX_WEIGHT_UNWEIGHTED);
-    expect(teMaxWeightForType('single-choice')).toBe(TE_MAX_WEIGHT_UNWEIGHTED);
   });
 
-  // The ceiling is derived in three places — here, the hub's election config, and
-  // the sequencer's clamp. All three assert against one shared table, because
-  // comparing implementations to each other passes if they drift together.
-  it('matches the shared parity table', () => {
-    const table = JSON.parse(
-      readFileSync(
-        join(
-          __dirname,
-          '../../../../packages/geg-parity/vectors/max-weight.json'
-        ),
-        'utf8'
-      )
-    );
-    const weighted = table.cases.find((c: any) => c.budget === 100);
-    const basic = table.cases.find((c: any) => c.budget === 1);
-    expect(weighted.maxWeight).toBe(TE_MAX_WEIGHT);
-    expect(basic.maxWeight).toBe(TE_MAX_WEIGHT_UNWEIGHTED);
+  it('rounds half *up*, matching the committee exactly', () => {
+    // The cross-language landmine: `Math.round` is half-up in JS, `round` is
+    // half-to-even in Python. Integer `(w + s//2) // s` has no such split, and geg
+    // pins the identical boundary in test_aggregation.py.
+    expect(scaleWeight(1, 2)).toBe(1);
+    expect(scaleWeight(3, 2)).toBe(2);
+    expect(scaleWeight(5, 2)).toBe(3);
+    expect(scaleWeight(2, 4)).toBe(1);
+    expect(scaleWeight(1, 4)).toBe(0);
+  });
+});
+
+describe('teVoteWeight', () => {
+  it('counts voting power in full — no cap', () => {
+    // The whole point of the change: a holder of 25,000 used to be counted as
+    // 10,000 on a weighted proposal.
+    expect(teVoteWeight(25_000)).toEqual({ kind: 'ok', counted: 25_000, scale: 1 });
+    expect(teVoteWeight(2_000_000)).toEqual({
+      kind: 'ok',
+      counted: 2_000_000,
+      scale: 1
+    });
+  });
+
+  it('rounds to whole units', () => {
+    expect(teVoteWeight(3.4).counted).toBe(3);
+    expect(teVoteWeight(3.6).counted).toBe(4);
+  });
+
+  it('refuses dust, which the sequencer also refuses at ingest', () => {
+    for (const vp of [0, 0.4, Number.NaN]) {
+      expect(teVoteWeight(vp).kind).toBe('dust');
+    }
+    expect(teVoteWeight(0.5).kind).toBe('ok');
+  });
+
+  it('reports scaling when the proposal counts in larger units', () => {
+    expect(teVoteWeight(4096, 1024)).toEqual({
+      kind: 'scaled',
+      counted: 4,
+      scale: 1024
+    });
+  });
+
+  it('distinguishes a zero-scaled ballot from dust', () => {
+    // Different outcomes and different messages: dust is refused at ingest, while a
+    // zero-scaled ballot is admitted and recorded but moves nothing.
+    const r = teVoteWeight(100, 1024);
+    expect(r.kind).toBe('zero-scaled');
+    expect(r.counted).toBe(0);
+    expect(teVoteWeight(0.2, 1024).kind).toBe('dust');
+  });
+
+  it('treats an absent or nonsensical scale as no scaling', () => {
+    expect(teVoteWeight(500).scale).toBe(1);
+    expect(teVoteWeight(500, 0).scale).toBe(1);
+    expect(teVoteWeight(500, Number.NaN).scale).toBe(1);
   });
 });
 

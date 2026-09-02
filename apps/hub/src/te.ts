@@ -22,7 +22,7 @@
 
 import { capture } from '@snapshot-labs/snapshot-sentry';
 import express from 'express';
-import { deriveMaxWeight } from './helpers/gegConfig';
+import { deriveScale } from './helpers/gegConfig';
 import db from './helpers/mysql';
 import { sendError } from './helpers/utils';
 
@@ -30,7 +30,7 @@ const router = express.Router();
 
 async function loadProposal(proposalId: string): Promise<any | null> {
   const rows = await (db as any).queryAsync(
-    'SELECT id, privacy, te_mpk, te_config, te_committee_pks, te_keyper_addresses, te_threshold_t, te_threshold_n, te_aggregate FROM proposals WHERE id = ? LIMIT 1',
+    'SELECT id, privacy, te_mpk, te_config, te_geg_config, te_committee_pks, te_keyper_addresses, te_threshold_t, te_threshold_n, te_aggregate FROM proposals WHERE id = ? LIMIT 1',
     [proposalId]
   );
   return rows[0] || null;
@@ -94,8 +94,15 @@ router.get('/proposal/:id/te_aggregate', async (req, res) => {
 });
 
 // Every committed decryption share plus the public DKG outputs an auditor needs
-// to call the SDK's `recoverTally`. The shares and their DLEQ proofs are designed
+// to check the published result. The shares and their DLEQ proofs are designed
 // to be public, so there is nothing here to authenticate.
+//
+// `te_result` carries the committee's totals as **decimal strings**, which is how
+// `te_results` stores them, and it matters that they stay strings the whole way to
+// the verifier. A tally can exceed 2^53, past which a JSON number is no longer the
+// integer the keypers decrypted — and the check the auditor runs is an exact
+// equality in the group, so a value that is off by one rounding step does not
+// "nearly" verify, it fails.
 router.get('/proposal/:id/te_decryption_shares', async (req, res) => {
   const proposalId = req.params.id;
   try {
@@ -112,6 +119,22 @@ router.get('/proposal/:id/te_decryption_shares', async (req, res) => {
       'SELECT keyper_index, candidate, HEX(sigma) AS sigma_hex, HEX(proof_e) AS proof_e_hex, HEX(proof_z) AS proof_z_hex FROM te_decryption_shares WHERE proposal_id = ? ORDER BY candidate, keyper_index',
       [proposalId]
     );
+    const resultRows = await (db as any).queryAsync(
+      'SELECT totals_json, keyper_indices, bsgs_bound FROM te_results WHERE proposal_id = ? LIMIT 1',
+      [proposalId]
+    );
+    const publishedResult = resultRows[0]
+      ? {
+          totals: parseJsonField<string[]>(resultRows[0].totals_json, []).map(
+            String
+          ),
+          keyper_indices: parseJsonField<number[]>(
+            resultRows[0].keyper_indices,
+            []
+          ),
+          bsgs_bound: String(resultRows[0].bsgs_bound)
+        }
+      : null;
     return res.json({
       te_mpk: `0x${Buffer.from(proposal.te_mpk).toString('hex')}`,
       te_config: parseJsonField<any>(proposal.te_config, null),
@@ -123,6 +146,7 @@ router.get('/proposal/:id/te_decryption_shares', async (req, res) => {
         []
       ),
       aggregate,
+      te_result: publishedResult,
       shares: (rows as any[]).map(r => ({
         keyper_index: Number(r.keyper_index),
         candidate: Number(r.candidate),
@@ -163,14 +187,20 @@ router.get('/proposal/:id/te_ballots', async (req, res) => {
       [proposalId]
     );
     const teConfig = parseJsonField<any>(proposal.te_config, null);
-    const maxWeight = teConfig?.budget
-      ? deriveMaxWeight(Number(teConfig.budget))
-      : null;
+    // The unit the committee's aggregation counts in. A verifier must apply the same
+    // divisor or its recomputed aggregate will not match, so this travels with the
+    // ballots rather than being inferred.
+    const snapshot = parseJsonField<any>(proposal.te_geg_config, null);
+    const scale = deriveScale(
+      Number(teConfig?.budget ?? 1),
+      Number(snapshot?.maxTotalWeight ?? 0),
+      Number(snapshot?.solverCeiling ?? Infinity)
+    );
 
     return res.json({
       te_mpk: `0x${Buffer.from(proposal.te_mpk).toString('hex')}`,
       te_config: teConfig,
-      maxWeight,
+      scale,
       ballots: (rows as any[]).map((r, i) => ({
         sequenceNumber: i,
         voter: r.voter,

@@ -25,6 +25,10 @@ import { join } from 'node:path';
 import { Wallet } from '@ethersproject/wallet';
 import fetch from 'node-fetch';
 import db from '../../src/helpers/mysql';
+import {
+  ELIGIBILITY_KEY,
+  seedEligibilityKey
+} from '../fixtures/eligibilityKey';
 
 const HOST = `http://localhost:${process.env.PORT || 3030}`;
 const OUTSIDER = new Wallet(`0x${'55'.repeat(32)}`);
@@ -103,18 +107,13 @@ function envelope(i: number) {
   };
 }
 
-const ELIGIBILITY_KEY = `0x${'ab'.repeat(48)}`;
 
 async function seed(): Promise<void> {
   // The route refuses to serve a proposal whose frozen eligibility key no longer
   // matches the one in use, so the key the sequencer publishes has to exist and
   // agree with the fixture's committee snapshot. Without it every read is a 503
   // that looks like a routing fault.
-  await db.queryAsync(
-    `INSERT INTO te_eligibility_key (id, public_key, updated) VALUES (1, ?, ?)
-       ON DUPLICATE KEY UPDATE public_key = VALUES(public_key)`,
-    [ELIGIBILITY_KEY, 1]
-  );
+  await seedEligibilityKey();
   await db.queryAsync('DELETE FROM votes WHERE proposal = ?', [ID]);
   await db.queryAsync('DELETE FROM proposals WHERE id = ?', [ID]);
   await db.queryAsync('INSERT INTO proposals SET ?', {

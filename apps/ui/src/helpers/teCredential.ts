@@ -126,7 +126,6 @@ export interface IssuedCredentialResponse {
   attestation: BallotCredential;
   /** Voting power before the cap, so the UI can show what the clamp cost. */
   votingPower: number;
-  maxWeight: number;
 }
 
 /**

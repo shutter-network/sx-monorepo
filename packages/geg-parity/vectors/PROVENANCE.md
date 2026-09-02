@@ -10,11 +10,11 @@ node scripts/sync-geg-vectors.mjs /path/to/generalised-el-gamal
 |---|---|
 | Source repo | `generalised-el-gamal` |
 | Source path | `tests/vectors/` |
-| Commit | `a8017ec142e1f0deda6d3361f087be3de56e4289` |
-| Commit date / subject | 2026-08-21T20:27:24+05:30 feat: enhance tally-stalled functionality with nonce management |
-| Vectors | 25 across 11 categories |
+| Commit | `febfe12039a9d340f914b9ba63a601773e7dc6c0` |
+| Commit date / subject | 2026-08-22T12:56:19+05:30 feat(voting): bind each ballot to the credential it was cast with, and encrypt the coordinator's token store |
+| Vectors | 25 across 12 categories |
 
-- `attestation/` — 6
+- `attestation/` — 5
 - `ballot/` — 4
 - `binding/` — 1
 - `budget/` — 2
@@ -23,6 +23,7 @@ node scripts/sync-geg-vectors.mjs /path/to/generalised-el-gamal
 - `encrypt/` — 1
 - `flow/` — 1
 - `or/` — 1
+- `scale/` — 1
 - `schnorr/` — 2
 - `tally/` — 2
 

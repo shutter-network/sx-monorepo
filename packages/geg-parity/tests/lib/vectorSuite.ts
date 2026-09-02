@@ -74,7 +74,16 @@ export const TRANSITIVELY_COVERED_CATEGORIES: Record<string, string> = {
  */
 export const COVERED_BY_ANOTHER_SUITE: Record<string, string> = {
   attestation:
-    "apps/hub/test/unit/geg-attestation.test.ts — these vectors verify against hub's own credential construction"
+    "apps/hub/test/unit/geg-attestation.test.ts — these vectors verify against hub's own credential construction",
+  // Same reason as `attestation`: the published package exposes no binding
+  // module, so the vector is driven against the two implementations that build
+  // the binding message in production. Both read this exact vendored file.
+  binding:
+    'apps/ui/src/helpers/teBinding.test.ts and apps/sequencer/test/unit/helpers/geg-binding.test.ts — both build the binding message and verify against this file',
+  // Weight scaling is applied in the UI, not in the published SDK, so the vector is
+  // driven from there. geg replays the same file in test_conformance_vectors.py.
+  scale:
+    'apps/ui/src/helpers/teScale.parity.test.ts — drives the same file through the UI scaling helper'
 };
 
 export function loadCategory<T>(

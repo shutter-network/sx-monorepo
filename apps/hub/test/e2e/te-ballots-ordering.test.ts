@@ -23,6 +23,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import fetch from 'node-fetch';
 import { eligibilityPublicKey } from '../../src/helpers/eligibilityKey';
+import { seedEligibilityKey } from '../fixtures/eligibilityKey';
 import db from '../../src/helpers/mysql';
 
 const HOST = `http://localhost:${process.env.PORT || 3030}`;
@@ -67,6 +68,9 @@ function envelope(i: number) {
 }
 
 async function seed(): Promise<void> {
+  // Publish it first: `eligibilityPublicKey` reads the row, and depending on
+  // another suite to have written it makes this one order-dependent.
+  await seedEligibilityKey();
   const eligibilityKey = await eligibilityPublicKey();
   await db.queryAsync('DELETE FROM proposals WHERE id = ?', [ID]);
   await db.queryAsync('DELETE FROM votes WHERE proposal = ?', [ID]);

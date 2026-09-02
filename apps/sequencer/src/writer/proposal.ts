@@ -13,13 +13,38 @@ import { effectivePrivacy } from '../helpers/privacy';
 import { getProvider } from '../helpers/provider';
 import { validateSpaceSettings } from '../helpers/spaceValidation';
 import {
+  TeConfigError,
   assertBallotShape,
   ballotParamsColumn,
   buildCommitteeSnapshot,
   committeeColumns,
   readTeEnv,
-  TeConfigError
+  votingPowerFallback,
+  weightedBudgetFromEnv
 } from '../helpers/teCommittee';
+import { resolveVotingPowerBound } from '../helpers/teVotingPowerBound';
+
+/**
+ * Resolve `V` for a space's strategies at a proposal's snapshot block.
+ *
+ * A read failure is **not** absorbed into the fallback: the fallback exists for
+ * strategies we cannot interpret, while an RPC failure means we simply have not
+ * looked yet. Since `V` is fixed by the frozen snapshot block, refusing and letting
+ * the author retry returns the identical number, whereas guessing low is
+ * unrecoverable. The two were conflated in the original plan wording; they are
+ * different failures with different right answers.
+ */
+async function resolveVotingPowerBoundFor(
+  space: any,
+  payload: { snapshot?: string | number; budget?: number }
+) {
+  return resolveVotingPowerBound({
+    strategies: space?.strategies ?? [],
+    proposalNetwork: String(space?.network ?? '1'),
+    snapshotBlock: Number(payload?.snapshot ?? 0),
+    fallbackValue: votingPowerFallback(payload?.budget ?? 1)
+  });
+}
 import { getEligibilityKey } from '../helpers/teEligibility';
 import {
   captureError,
@@ -201,7 +226,16 @@ export async function verify(body): Promise<any> {
         eligibilityKey: await getEligibilityKey(),
         votingStart: parseInt(msg.payload.start),
         votingEnd: parseInt(msg.payload.end),
-        adminAddress: adminForConfig(space, body.address)
+        adminAddress: adminForConfig(space, body.address),
+        // A placeholder: `verify` only proves the committee is well-formed, and the
+        // real bound is resolved once in `action`.
+        //
+        // Deliberately *not* resolved here as well. This path is synchronous in
+        // front of the author, and `resolveVotingPowerBound` makes live RPC calls
+        // with retries — putting them here makes proposal validation block on chain
+        // latency, and doubles the reads for no gain. `action` runs inside the same
+        // request, so a failure there still reaches the author.
+        maxTotalWeight: 1
       });
       // The ballot's own shape is bounded too, and it depends on this proposal
       // rather than on the deployment: a weighted proposal encodes one proof
@@ -413,11 +447,24 @@ export async function action(body, ipfs, receipt, id): Promise<void> {
   // builds, so a throw here is a genuine fault and must abort the insert rather
   // than leave a private proposal with no committee.
   if (privacy === 'shutter-elgamal') {
+    // `spaceSettings`, not `space`: in `action` the latter is `msg.space`, a bare id
+    // string. Reading `.strategies`/`.admins` off it yields undefined rather than
+    // throwing, so every proposal silently took the fallback bound and the author as
+    // committee admin.
+    const bound = await resolveVotingPowerBoundFor(spaceSettings, {
+      snapshot: String(proposal.snapshot),
+      budget: msg.payload.type === 'weighted' ? weightedBudgetFromEnv() : 1
+    });
+    log.info(
+      `[te-vpbound] ${proposal.id}: V=${bound.value} via ${bound.source}` +
+        (bound.unrecognised ? ` (unrecognised: ${bound.unrecognised})` : '')
+    );
     const snapshot = await buildCommitteeSnapshot({
       eligibilityKey: await getEligibilityKey(),
       votingStart: proposal.start,
       votingEnd: proposal.end,
-      adminAddress: adminForConfig(space, proposal.author)
+      adminAddress: adminForConfig(spaceSettings, proposal.author),
+      maxTotalWeight: bound.value
     });
     Object.assign(
       proposal,
@@ -431,7 +478,8 @@ export async function action(body, ipfs, receipt, id): Promise<void> {
       ballotParamsColumn(
         msg.payload.choices,
         msg.payload.type,
-        snapshot.weightedBudget
+        snapshot.weightedBudget,
+        snapshot
       )
     );
   }

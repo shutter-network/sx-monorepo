@@ -8,12 +8,14 @@
  * `master:apps/sequencer/src/helpers/te.ts` — see
  * `scripts/geg/gen-legacy-equivalence.ts`.
  *
- * The corpus deliberately does **not** claim blanket equivalence. Legacy rounded
- * voting power and dropped what rounded to zero, but it never clamped. Current
- * behaviour clamps at `maxWeight`. A fixture asserting the two agree on a whale
- * would be pinning behaviour that was changed on purpose, and would have to be
- * deleted the first time it failed — so the over-cap case records both answers
- * instead of asserting one.
+ * The corpus was built while current behaviour clamped at `maxWeight` and legacy did
+ * not, so the whale case recorded *both* answers rather than asserting one. Removing
+ * the clamp (W1) collapsed that divergence: an unscaled election now reproduces
+ * legacy exactly, whale included, which is a stronger guarantee than the corpus was
+ * originally able to claim. The whale assertions below are inverted accordingly.
+ *
+ * `maxWeight` in the corpus is now read as a scale of 1 — no scaling — since that is
+ * the configuration under which the two agree.
  */
 
 import { readFileSync } from 'node:fs';
@@ -74,7 +76,7 @@ describe('legacy equivalence', () => {
       corpus.equivalent.aggregate as any
     );
     expect(result.aggregateMatches).toBe(true);
-    expect(result.clamped).toEqual([]);
+    expect(result.scaledToZero).toEqual([]);
   });
 
   // Rounding is part of what must not drift: 1.4 → 1 and 0.5 → 1 both count once,
@@ -87,34 +89,31 @@ describe('legacy equivalence', () => {
     expect(result.contributing).toBe(corpus.equivalent.ballots.length);
   });
 
-  // Documented divergence, asserted in both directions so neither can drift
-  // unnoticed: current must match its own answer, and must *not* match legacy's.
-  it('diverges from legacy on an over-cap ballot, by design', async () => {
-    const matchesCurrent = await aggregateBallots(
-      payload(corpus.divergent.ballots, corpus.maxWeight),
-      corpus.divergent.currentAggregate as any
-    );
-    expect(matchesCurrent.aggregateMatches).toBe(true);
-    expect(matchesCurrent.clamped).toHaveLength(1);
-    expect(matchesCurrent.clamped[0].countedAs).toBe(corpus.maxWeight);
-
-    const matchesLegacy = await aggregateBallots(
-      payload(corpus.divergent.ballots, corpus.maxWeight),
-      corpus.divergent.legacyAggregate as any
-    );
-    expect(matchesLegacy.aggregateMatches).toBe(false);
-  });
-
-  // With no ceiling supplied the panel counts the whale in full — which is what
-  // legacy did, and is why the two agree again once the cap is removed. This is
-  // the assertion that proves the divergence is the cap and nothing else.
-  it('reproduces legacy exactly when the cap is absent', async () => {
+  // The documented divergence is **gone**, and that is the headline.
+  //
+  // This corpus was built when current behaviour clamped at `maxWeight` and legacy
+  // did not, so the whale case recorded two different answers rather than asserting
+  // one. Removing the clamp (W1) collapses that: an unscaled election now reproduces
+  // legacy exactly, whale included. The assertion is inverted deliberately — it used
+  // to prove the divergence *was* the cap, and now proves there is nothing else left
+  // to diverge on.
+  it('reproduces legacy on the whale too, now that nothing is clamped', async () => {
     const result = await aggregateBallots(
-      payload(corpus.divergent.ballots, null),
+      payload(corpus.divergent.ballots, 1),
       corpus.divergent.legacyAggregate as any
     );
     expect(result.aggregateMatches).toBe(true);
-    expect(result.clamped).toEqual([]);
+    expect(result.scaledToZero).toEqual([]);
+  });
+
+  // And it must no longer reproduce the old clamped answer, or the clamp is somehow
+  // still being applied somewhere.
+  it('no longer reproduces the clamped aggregate', async () => {
+    const result = await aggregateBallots(
+      payload(corpus.divergent.ballots, 1),
+      corpus.divergent.currentAggregate as any
+    );
+    expect(result.aggregateMatches).toBe(false);
   });
 
   // The float boundary the digest encoding exists for: past 2^53 a JS number is no

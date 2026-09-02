@@ -2,11 +2,15 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import fetch from 'node-fetch';
 import {
+  deriveScale,
   ballotParamsColumn,
+  DEFAULT_TE_SOLVER_CEILING,
+  teSolverCeiling,
+  votingPowerFallback,
+  weightedBudgetFromEnv,
   buildCommitteeSnapshot,
   clearCommitteeCache,
   committeeColumns,
-  deriveMaxWeight,
   frozenWeightedBudget,
   parseKeypers,
   resolveCommittee,
@@ -55,6 +59,7 @@ const window = { votingStart: 1_770_000_000, votingEnd: 1_770_086_400 };
 
 function build(overrides: Partial<TeEnv> = {}) {
   return buildCommitteeSnapshot({
+      maxTotalWeight: 1e6,
     env: env(overrides),
     eligibilityKey: ELIGIBILITY_KEY,
     // Recorded into the config; the live authority is the space's admins, checked
@@ -146,7 +151,11 @@ describe('buildCommitteeSnapshot', () => {
       adminAddress: ADMIN,
       votingStart: window.votingStart,
       votingEnd: window.votingEnd,
-      weightedBudget: 100
+      weightedBudget: 100,
+      // Frozen alongside the committee: `s` derives from this pair, and a value
+      // that moved after creation would change what a ballot is worth mid-flight.
+      maxTotalWeight: 1e6,
+      solverCeiling: DEFAULT_TE_SOLVER_CEILING
     });
   });
 
@@ -247,6 +256,7 @@ describe('buildCommitteeSnapshot', () => {
   it('rejects a malformed eligibility key', async () => {
     await expect(
       buildCommitteeSnapshot({
+      maxTotalWeight: 1e6,
         env: env(),
         adminAddress: ADMIN,
         eligibilityKey: '0xdeadbeef',
@@ -258,6 +268,7 @@ describe('buildCommitteeSnapshot', () => {
   it('rejects a window that ends before it starts', async () => {
     await expect(
       buildCommitteeSnapshot({
+      maxTotalWeight: 1e6,
         env: env(),
         adminAddress: ADMIN,
         eligibilityKey: ELIGIBILITY_KEY,
@@ -267,6 +278,7 @@ describe('buildCommitteeSnapshot', () => {
     ).rejects.toThrow(/must be after/);
     await expect(
       buildCommitteeSnapshot({
+      maxTotalWeight: 1e6,
         env: env(),
         adminAddress: ADMIN,
         eligibilityKey: ELIGIBILITY_KEY,
@@ -389,53 +401,6 @@ describe('committeeColumns', () => {
   });
 });
 
-describe('deriveMaxWeight', () => {
-  test.each([
-    [1, 1_000_000],
-    [10, 100_000],
-    [100, 10_000],
-    [1000, 1_000]
-  ])('budget %p allows maxWeight %p', (budget, expected) => {
-    expect(deriveMaxWeight(budget as number)).toBe(expected);
-  });
-
-  // The protocol's bound is `budget x maxWeight <= 1e6`; the derivation must
-  // never produce a pair that violates it, including where the division is not
-  // exact and the floor is what keeps it inside.
-  test('never exceeds the protocol bound, across the budget range', () => {
-    for (let budget = 1; budget <= 2000; budget++) {
-      const maxWeight = deriveMaxWeight(budget);
-      expect(maxWeight).toBeGreaterThanOrEqual(1);
-      expect(budget * maxWeight).toBeLessThanOrEqual(1_000_000);
-    }
-  });
-
-  // The hub keeps its own copy, because it advertises maxWeight in the election
-  // config the committee verifies against while the sequencer clamps with it
-  // before minting. A drift means the sequencer attests weights the committee
-  // rejects as INVALID_ATTESTATION.
-  //
-  // Both sides assert against one shared table rather than importing each other:
-  // a cross-app TypeScript import escapes each package's rootDir, and comparing
-  // two implementations to each other would pass if both drifted together.
-  // `apps/hub/test/unit/geg-config.test.ts` asserts the same file.
-  test('matches the shared parity table', () => {
-    const table = JSON.parse(
-      readFileSync(
-        join(
-          __dirname,
-          '../../../../../packages/geg-parity/vectors/max-weight.json'
-        ),
-        'utf8'
-      )
-    );
-    expect(table.cases.length).toBeGreaterThan(0);
-    for (const c of table.cases) {
-      expect(deriveMaxWeight(c.budget)).toBe(c.maxWeight);
-    }
-  });
-});
-
 describe('frozenWeightedBudget / ballotParamsColumn', () => {
   const snapshot = (weightedBudget: unknown) =>
     JSON.stringify({ v: 1, weightedBudget, eligibilityKey: '0x00' });
@@ -483,5 +448,149 @@ describe('frozenWeightedBudget / ballotParamsColumn', () => {
     expect(
       JSON.parse(ballotParamsColumn(['a', 'b'], 'basic', 100).te_config).budget
     ).toBe(1);
+  });
+});
+
+describe('teSolverCeiling', () => {
+  /**
+   * The single definition of how large a search this deployment can solve.
+   *
+   * geg no longer decides this: feasibility depends on the coordinator's hardware,
+   * which a library cannot see (see W17 and docs/COORDINATOR_SIZING.md). That makes
+   * this the one place the number lives, so it has to reject garbage rather than
+   * coerce it — a silently-NaN ceiling would disable the guard entirely and only
+   * show up as a tally that never finishes.
+   */
+  it('defaults when unset or blank', () => {
+    expect(teSolverCeiling({} as any)).toBe(DEFAULT_TE_SOLVER_CEILING);
+    expect(teSolverCeiling({ TE_SOLVER_CEILING: '   ' } as any)).toBe(
+      DEFAULT_TE_SOLVER_CEILING
+    );
+  });
+
+  it('reads an explicit value, including exponent notation', () => {
+    expect(teSolverCeiling({ TE_SOLVER_CEILING: '2.5e13' } as any)).toBe(2.5e13);
+    expect(teSolverCeiling({ TE_SOLVER_CEILING: '1000' } as any)).toBe(1000);
+  });
+
+  it('refuses values that would disable the guard rather than raising it', () => {
+    for (const bad of ['abc', '0', '-1', 'Infinity']) {
+      expect(() => teSolverCeiling({ TE_SOLVER_CEILING: bad } as any)).toThrow(
+        /TE_SOLVER_CEILING/
+      );
+    }
+  });
+});
+
+describe('ballotParamsColumn carries the scale', () => {
+  /**
+   * The voter is told, before signing, what their power will count as. That notice
+   * reads `te_config.scale`, so if this column omits it the notice silently says
+   * "no scaling" on a scaled proposal — the exact surprise it exists to prevent.
+   */
+  const parse = (r: { te_config: string }) => JSON.parse(r.te_config);
+
+  test('is 1 when the proposal needs no scaling', () => {
+    const r = parse(
+      ballotParamsColumn(['a', 'b'], 'weighted', 100, {
+        maxTotalWeight: 1e9,
+        solverCeiling: 1e12
+      })
+    );
+    expect(r.scale).toBe(1);
+  });
+
+  test('follows the budget, which an author can still edit', () => {
+    // weighted spends 100x more of the bound than basic, so the same space needs a
+    // larger scale on a weighted proposal.
+    const snapshot = { maxTotalWeight: 5.9e14, solverCeiling: 1e12 };
+    const weighted = parse(ballotParamsColumn(['a'], 'weighted', 100, snapshot));
+    const basic = parse(ballotParamsColumn(['a'], 'basic', 100, snapshot));
+    expect(weighted.scale).toBeGreaterThan(basic.scale);
+    expect(basic.budget).toBe(1);
+  });
+
+  test('degrades to 1 when the snapshot is missing or unreadable', () => {
+    // A proposal with no frozen bound is not a scaled proposal, so 1 is the correct
+    // reading rather than a failure.
+    expect(parse(ballotParamsColumn(['a'], 'basic', 100)).scale).toBe(1);
+    expect(parse(ballotParamsColumn(['a'], 'basic', 100, null)).scale).toBe(1);
+  });
+
+  test('agrees with the hub, which emits the same number to the committee', () => {
+    // Two copies: this one faces the voter, the hub's faces the keypers. If they
+    // disagree, a voter is told one thing and counted by another.
+    const cases: [number, number, number][] = [
+      [100, 1e9, 1e12],
+      [100, 5.9e14, 1e12],
+      [1, 5.9e14, 1e12]
+    ];
+    for (const [budget, v, ceiling] of cases) {
+      const viaColumn = parse(
+        ballotParamsColumn(['a'], budget === 1 ? 'basic' : 'weighted', budget, {
+          maxTotalWeight: v,
+          solverCeiling: ceiling
+        })
+      ).scale;
+      expect(viaColumn).toBe(deriveScale(budget === 1 ? 1 : budget, v, ceiling));
+    }
+  });
+});
+
+describe('votingPowerFallback', () => {
+  const saved = { ...process.env };
+  afterEach(() => {
+    process.env = { ...saved };
+  });
+
+  // The live-run regression. A space whose strategies yield no bound used to fall
+  // back to a flat 1e12, which at budget 100 exceeds the 1e12 ceiling and forces
+  // s = 128 -- a 25,000-power holder was counted as 195. The fallback must be the
+  // largest V that still leaves the tally unscaled.
+  it('leaves an unrecognised-strategy space unscaled at every supported budget', () => {
+    delete process.env.TE_SOLVER_CEILING;
+    for (const budget of [1, 2, 10, 100, 255]) {
+      const V = votingPowerFallback(budget);
+      expect(deriveScale(budget, V, DEFAULT_TE_SOLVER_CEILING)).toBe(1);
+    }
+  });
+
+  it('tracks a non-default ceiling', () => {
+    process.env.TE_SOLVER_CEILING = '1e9';
+    expect(votingPowerFallback(100)).toBe(1e7);
+    expect(deriveScale(100, votingPowerFallback(100), 1e9)).toBe(1);
+  });
+
+  // Derived, not configured: there is deliberately no override. A knob here could
+  // only be set wrong -- above this value it forces needless scaling, below it, it
+  // forces needless scaling and narrows the H9 alarm. `TE_SOLVER_CEILING` is the
+  // only honest way to move this number, and this pins that it is the only input.
+  it('ignores any TE_VOTING_POWER_FALLBACK left in the environment', () => {
+    delete process.env.TE_SOLVER_CEILING;
+    process.env.TE_VOTING_POWER_FALLBACK = '5000';
+    expect(votingPowerFallback(100)).toBe(
+      Math.floor(DEFAULT_TE_SOLVER_CEILING / 100)
+    );
+  });
+
+  it('never returns a non-positive bound', () => {
+    process.env.TE_SOLVER_CEILING = '10';
+    expect(votingPowerFallback(1e6)).toBe(1);
+  });
+});
+
+describe('weightedBudgetFromEnv', () => {
+  const saved = { ...process.env };
+  afterEach(() => {
+    process.env = { ...saved };
+  });
+
+  it('reads the deployment budget and rejects nonsense', () => {
+    process.env.TE_WEIGHTED_BUDGET = '50';
+    expect(weightedBudgetFromEnv()).toBe(50);
+    process.env.TE_WEIGHTED_BUDGET = 'abc';
+    expect(weightedBudgetFromEnv()).toBe(100);
+    process.env.TE_WEIGHTED_BUDGET = '0';
+    expect(weightedBudgetFromEnv()).toBe(100);
   });
 });

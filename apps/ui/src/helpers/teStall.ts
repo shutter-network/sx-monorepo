@@ -10,6 +10,16 @@ import { requestDigest, requestNoncePayload } from './gegRequest';
 /** What the hub reports for a geg election. Only the fields the stall UI needs. */
 export type GegElectionState = {
   tallyStalled: boolean;
+  /**
+   * The coordinator's account of why, when it supplied one.
+   *
+   * Unsigned, unlike the flag beside it: it is a hint for an operator, not an
+   * artifact. Present it as the coordinator's claim rather than as established
+   * fact, and do not let it drive anything automatic — `teVerify`'s
+   * `diagnoseTally` derives the keyper-vs-coordinator split from public share
+   * counts, which is the part worth acting on.
+   */
+  tallyStallReason: string | null;
 };
 
 function endpoint(
@@ -29,7 +39,13 @@ export async function fetchGegElection(
   });
   if (!r.ok) throw new Error(`hub ${r.status}: ${await r.text()}`);
   const body = await r.json();
-  return { tallyStalled: Boolean(body?.tallyStalled) };
+  return {
+    tallyStalled: Boolean(body?.tallyStalled),
+    tallyStallReason:
+      typeof body?.tallyStallReason === 'string' && body.tallyStallReason
+        ? body.tallyStallReason
+        : null
+  };
 }
 
 /**

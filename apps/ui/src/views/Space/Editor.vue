@@ -8,8 +8,6 @@ import {
   BASIC_CHOICES,
   DOCS_URL,
   MIN_DKG_LEAD_TIME_S,
-  TE_MAX_WEIGHT,
-  TE_MAX_WEIGHT_UNWEIGHTED,
   VERIFIED_URL
 } from '@/helpers/constants';
 import { omit, prettyConcat } from '@/helpers/utils';
@@ -123,11 +121,8 @@ const privateVotingTooltip = computed(
     'threshold ElGamal and tallied homomorphically, so individual votes stay ' +
     'private forever. A committee of keypers publishes proven decryption shares ' +
     'to reveal only the final result.\n\n' +
-    'Maximum voting power per voter: ' +
-    `${TE_MAX_WEIGHT_UNWEIGHTED.toLocaleString()} with basic voting, ` +
-    `${TE_MAX_WEIGHT.toLocaleString()} with weighted voting. ` +
-    'Anyone holding more is counted at that limit, and holdings below 0.5 are ' +
-    'rejected upfront.'
+    'Voting power counts in full — there is no per-voter cap. Holdings below 0.5 ' +
+    'are rejected upfront.'
 );
 
 const privacy = computed({

@@ -77,7 +77,10 @@ const teWeightNotice = computed(() => {
   const vp = totalVotingPower(votingPower.value);
   if (vp === null) return null;
 
-  const result = teVoteWeight(vp, proposal.value.type);
+  // `scale` rides on the proposal's frozen TE config; absent means 1, i.e. no
+  // scaling, which is the case for essentially every space.
+  const scale = Number((proposal.value as any).te_config?.scale ?? 1);
+  const result = teVoteWeight(vp, scale);
   return result.kind === 'ok' ? null : result;
 });
 
@@ -389,13 +392,23 @@ watchEffect(() => {
                     <b>You can't vote on this proposal.</b> Private voting needs
                     at least 0.5 voting power.
                   </span>
+                  <span v-else-if="teWeightNotice.kind === 'zero-scaled'">
+                    <b>Your vote would not move this tally.</b> This proposal
+                    counts in units of
+                    <b
+                      class="text-skin-link"
+                      v-text="teWeightNotice.scale.toLocaleString()"
+                    />, and your voting power rounds to zero at that size. Your
+                    ballot will still be recorded.
+                  </span>
                   <span v-else>
                     Counted as
                     <b
                       class="text-skin-link"
                       v-text="teWeightNotice.counted.toLocaleString()"
-                    />, the maximum for this proposal. Private voting caps how
-                    much voting power any one voter can hold.
+                    />. This proposal counts in units of
+                    <b v-text="teWeightNotice.scale.toLocaleString()" />, so
+                    every voter's power is divided by the same amount.
                   </span>
                 </div>
                 <ProposalVote

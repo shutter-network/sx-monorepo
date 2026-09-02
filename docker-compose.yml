@@ -23,12 +23,17 @@
 #   SEQ_RELAYER_PK          Sequencer relayer private key
 #   SEQ_AUTH_SECRET         Sequencer auth secret
 #
-# Required for private voting (all four unset = public voting only, and every
+# Required for private voting (all three unset = public voting only, and every
 # private path stays dormant):
 #   TE_ELIGIBILITY_PRIVATE_KEY   the sequencer's credential-issuing key
 #   TE_KEYPERS                   one URL per committee member (addresses are
 #                                read from each keyper's /status, not configured)
 #   TE_RESULT_PUBLISHER_ADDRESS  the coordinator's address
+#
+# Worth setting deliberately rather than inheriting:
+#   TE_SOLVER_CEILING            what the coordinator can solve, and therefore the
+#                                `scale` every proposal counts in. The 1e12 default
+#                                is ~a 0.5 GB machine; see .env.example.
 #
 # Quick start:
 #   cp .env.example .env
@@ -135,6 +140,11 @@ services:
       # A private proposal must open at least this far ahead, or the key ceremony
       # cannot finish and the proposal is terminally failed when voting opens.
       MIN_DKG_LEAD_TIME_S: "${MIN_DKG_LEAD_TIME_S:-180}"
+      # How large a discrete-log search this deployment's coordinator can solve:
+      # `budget x sum(admitted weights)`. It decides the proposal's `scale`, so it is
+      # a statement about the coordinator's hardware, not a preference. Cost is ~2*sqrt(bound)*11us
+      # and ~218 bytes*sqrt(bound), so 1e12 is roughly 21s and 220MB.
+      TE_SOLVER_CEILING: "${TE_SOLVER_CEILING:-1e12}"
     ports:
       - "${SEQ_PORT:-3001}:3001"
     depends_on:

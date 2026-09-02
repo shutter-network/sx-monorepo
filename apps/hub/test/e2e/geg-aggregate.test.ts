@@ -72,7 +72,8 @@ function artifact(electionId: string, tweak = 0) {
     admitted: tweak === 0 ? [0, 1] : [0],
     exclusions:
       tweak === 0 ? [] : [{ sequenceNumber: 1, reason: 'INVALID_PROOF' }],
-    totalAdmittedWeight: tweak === 0 ? 2 : 1
+    totalAdmittedWeight: tweak === 0 ? 2 : 1,
+    totalScaledWeight: tweak === 0 ? 2 : 1
   };
 }
 
@@ -86,7 +87,8 @@ async function submit(
     aggregates: aggregate.aggregates,
     admitted: aggregate.admitted,
     exclusions: aggregate.exclusions,
-    totalAdmittedWeight: aggregate.totalAdmittedWeight
+    totalAdmittedWeight: aggregate.totalAdmittedWeight,
+    totalScaledWeight: aggregate.totalScaledWeight
   });
   const keyperSig = await wallet.signMessage(digest);
   const res = await fetch(`${HOST}/api/proposal/${proposalId}/te_aggregate`, {
@@ -210,7 +212,8 @@ describe('POST /api/proposal/:id/te_aggregate', () => {
     expect(agg).toMatchObject({
       admitted: [0, 1],
       exclusions: [],
-      totalAdmittedWeight: 2
+      totalAdmittedWeight: 2,
+      totalScaledWeight: 2
     });
   });
 

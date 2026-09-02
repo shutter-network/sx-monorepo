@@ -294,7 +294,10 @@ async function runShutterElgamalTally(proposal: any): Promise<boolean> {
   // that is accepted: `scores` is a float column and the published figure is a
   // presentation of the tally, not the artifact anyone verifies. The exact
   // integers stay in te_results for an auditor.
-  const numericScores = totals.map(t => Number(t) / budget);
+  // Totals are in the units the committee counted in, so a scaled election has to
+  // be multiplied back out to token units before it is published as a score.
+  const scale = Number(proposal.te_config?.scale ?? 1);
+  const numericScores = totals.map(t => (Number(t) * scale) / budget);
   const total = numericScores.reduce((a, b) => a + b, 0);
 
   const [{ n }] = await db.queryAsync(

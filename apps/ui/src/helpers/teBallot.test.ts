@@ -24,8 +24,7 @@ vi.mock('./teBinding', async importActual => {
         nonce: 1,
         signature: `0x${'44'.repeat(80)}`
       },
-      votingPower: 3,
-      maxWeight: 10_000
+      votingPower: 3
     }))
   };
 });

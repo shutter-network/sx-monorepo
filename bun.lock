@@ -275,6 +275,7 @@
       "dependencies": {
         "@ethersproject/bignumber": "^5.7.0",
         "@ethersproject/bytes": "^5.6.1",
+        "@ethersproject/contracts": "^5.8.0",
         "@ethersproject/hash": "^5.5.0",
         "@ethersproject/keccak256": "^5.7.0",
         "@ethersproject/providers": "^5.8.0",
@@ -484,7 +485,6 @@
       "name": "@snapshot-labs/geg-parity",
       "version": "0.1.0",
       "dependencies": {
-        "@ethersproject/keccak256": "^5.7.0",
         "@shutter-network/urban-verified-crypto": "0.2.0",
       },
       "devDependencies": {

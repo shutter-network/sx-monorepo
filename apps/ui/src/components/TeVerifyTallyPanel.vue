@@ -1,17 +1,19 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue';
+import { runVerify, VerifyCancelled } from '@/helpers/teVerifyClient';
 import {
-  aggregateBallots,
   AuditPayload,
   BallotAggregateResult,
   BallotsPayload,
   buildVerificationBundle,
+  diagnoseTally,
   fetchAuditPayload,
   fetchBallotsPayload,
   fingerprintHex,
   shortHex,
-  VerifyResult,
-  verifyTally
+  TallyDiagnosis,
+  VerifyProgress,
+  VerifyResult
 } from '@/helpers/teVerify';
 import { Proposal } from '@/types';
 
@@ -24,19 +26,50 @@ const props = defineProps<{
 type Status =
   | { kind: 'idle' }
   | { kind: 'fetching' }
-  | { kind: 'verifying' }
+  | { kind: 'verifying'; progress: VerifyProgress | null }
   | {
       kind: 'ok';
       tallies: bigint[];
       matches: boolean | null;
+      reason: string | null;
       ballots: BallotAggregateResult;
       audit: AuditPayload;
       ballotsPayload: BallotsPayload;
       tally: VerifyResult;
     }
+  /**
+   * No verified tally yet, and why — derived from public share counts rather than
+   * taken from anyone's word.
+   *
+   * This panel only renders once the proposal is `completed`, so reaching here
+   * means the published state and the committee's artifacts disagree. The
+   * coordinator's own stall explanation lives in `TeTallyStalledNotice`, which is
+   * what renders in the *not*-completed case; the two are mutually exclusive.
+   */
+  | {
+      kind: 'pending';
+      diagnosis: Exclude<TallyDiagnosis, { kind: 'published' }>;
+    }
   | { kind: 'err'; message: string };
 
 const status = ref<Status>({ kind: 'idle' });
+/** Set while a run is in flight, so the user can stop it. */
+const cancelRun = ref<(() => void) | null>(null);
+/**
+ * What the button says while working.
+ *
+ * The aggregate phase is the long one and its cost is proportional to ballots, so
+ * showing ballots-done is the only honest progress signal available — the tally
+ * check that follows is a couple of seconds regardless of size.
+ */
+const verifyingLabel = computed(() => {
+  if (status.value.kind !== 'verifying') return 'Verifying...';
+  const p = status.value.progress;
+  if (!p) return 'Verifying...';
+  if (p.phase === 'tally') return 'Checking the published tally...';
+  return `Recomputing the aggregate... ${p.done}/${p.total} ballots`;
+});
+
 const showDetail = ref(false);
 const showIntro = ref(false);
 
@@ -48,32 +81,50 @@ async function run() {
       fetchAuditPayload(props.apiBaseUrl, proposalId),
       fetchBallotsPayload(props.apiBaseUrl, proposalId)
     ]);
-    status.value = { kind: 'verifying' };
-    // Ballots are already verifyBallot-checked by the sequencer at ingestion
-    // (apps/sequencer/src/writer/vote.ts's verify()) before being persisted,
-    // so this only re-aggregates the already-trusted ciphertexts and
-    // compares the result to the published aggregate -- see
-    // aggregateBallots's own docstring for why the per-ballot proof isn't
-    // re-checked here.
-    const ballots = await aggregateBallots(ballotsPayload, payload.aggregate);
-    // Step 2: recover the tally from the public decryption shares.
-    const result = await verifyTally(
-      proposalId,
-      payload,
-      props.proposal.scores,
-      budget.value
+    // Why there is nothing to verify, worked out from public data before doing
+    // any work. Whether this is a keyper problem or a coordinator problem decides
+    // what an operator does next, and it is derivable, so it is derived.
+    const diagnosis = diagnoseTally(payload);
+    if (diagnosis.kind !== 'published') {
+      status.value = { kind: 'pending', diagnosis };
+      return;
+    }
+
+    status.value = { kind: 'verifying', progress: null };
+    // Off the main thread: an audit is tens of seconds of solid computation
+    // (~2.8 ms per ciphertext just to decompress), which on the main thread is a
+    // frozen tab. Ballots are already verifyBallot-checked by the sequencer at
+    // ingestion (apps/sequencer/src/writer/vote.ts's verify()), so this
+    // re-aggregates the already-trusted ciphertexts and compares against the
+    // published aggregate -- see aggregateBallots's docstring for why the
+    // per-ballot proof is not re-checked here.
+    const run = runVerify(
+      { proposalId, payload, ballotsPayload, budget: budget.value },
+      progress => {
+        if (status.value.kind === 'verifying') status.value = { kind: 'verifying', progress };
+      }
     );
+    cancelRun.value = run.cancel;
+    const { ballots, tally: result } = await run.result;
+
     status.value = {
       kind: 'ok',
       tallies: result.tallies,
-      matches: result.matchesPublished,
+      matches: result.verified,
+      reason: result.reason,
       ballots,
       audit: payload,
       ballotsPayload,
       tally: result
     };
   } catch (err: any) {
-    status.value = { kind: 'err', message: err?.message || String(err) };
+    // Stopping deliberately is not a failure to report as one.
+    status.value =
+      err instanceof VerifyCancelled
+        ? { kind: 'idle' }
+        : { kind: 'err', message: err?.message || String(err) };
+  } finally {
+    cancelRun.value = null;
   }
 }
 
@@ -114,19 +165,21 @@ const keyperRows = computed(() => {
     }));
 });
 
-const clampSummary = computed(() => {
+/**
+ * Ballots that were admitted but round to zero at this proposal's scale.
+ *
+ * Reported rather than left silent: they are in the admitted set and in no exclusion
+ * list, so without this they look like ballots that simply vanished.
+ */
+const scaledToZeroSummary = computed(() => {
   if (status.value.kind !== 'ok') return null;
-  const { clamped } = status.value.ballots;
-  if (!clamped.length) return null;
+  const { scaledToZero } = status.value.ballots;
+  if (!scaledToZero.length) return null;
 
-  const held = clamped.reduce((acc, c) => acc + c.vp, 0);
-  const counted = clamped.reduce((acc, c) => acc + c.countedAs, 0);
   return {
-    count: clamped.length,
-    held,
-    counted,
-    uncounted: held - counted,
-    cap: status.value.ballotsPayload.maxWeight ?? null
+    count: scaledToZero.length,
+    held: scaledToZero.reduce((acc, c) => acc + c.vp, 0),
+    scale: status.value.ballotsPayload.scale ?? 1
   };
 });
 
@@ -152,7 +205,7 @@ const numCandidates = computed(() =>
 );
 
 /**
- * Budget the SDK's ``recoverTally`` recovers in -- e.g. budget=100 for a
+ * Budget the committee tallies in -- e.g. budget=100 for a
  * weighted proposal means the raw recovered integer is the vote count
  * scaled by 100 (see verifyTally's own scaling against publishedScores),
  * so it has to be divided back down to read as an actual vote count.
@@ -235,33 +288,68 @@ function downloadBundle() {
         @click="run"
       >
         <span v-if="status.kind === 'fetching'">Fetching ballots...</span>
-        <span v-else-if="status.kind === 'verifying'">Verifying...</span>
+        <span v-else-if="status.kind === 'verifying'">{{ verifyingLabel }}</span>
         <span v-else>Verify tally</span>
+      </button>
+      <button
+        v-if="status.kind === 'verifying' && cancelRun"
+        type="button"
+        class="border rounded-lg px-3 py-1.5 hover:bg-skin-border"
+        @click="cancelRun()"
+      >
+        Stop
       </button>
       <span
         v-if="status.kind === 'ok' && status.matches === true"
-        class="text-skin-success flex items-center gap-1"
+        class="text-sm text-skin-success flex items-center gap-1"
       >
-        <IH-check-circle class="size-[16px]" />
-        Tally matches published scores.
+        <!-- `shrink-0`: this line wraps at panel width, and a flex item with no
+             shrink guard gets compressed along the main axis, so the tick renders
+             visibly smaller than the identical one below it. -->
+        <IH-check-circle class="size-[16px] shrink-0" />
+        Published tally verified against the decryption shares.
       </span>
       <span
         v-else-if="status.kind === 'ok' && status.matches === false"
-        class="text-skin-danger flex items-center gap-1"
+        class="text-sm text-skin-danger flex items-start gap-1"
       >
-        <IH-x-circle class="size-[16px] shrink-0" />
-        Mismatch: the recomputed tally differs from the published scores.
+        <IH-x-circle class="size-[16px] shrink-0 mt-[3px]" />
+        <span>
+          The published tally does not verify against the decryption shares.
+          <span v-if="status.reason" class="block break-all">{{
+            status.reason
+          }}</span>
+        </span>
       </span>
       <span
         v-else-if="status.kind === 'ok'"
-        class="text-skin-link flex items-center gap-1"
+        class="text-sm text-skin-link flex items-center gap-1"
       >
-        <IH-check-circle class="size-[16px]" />
-        Shares verified; recomputed totals available below.
+        <IH-check-circle class="size-[16px] shrink-0" />
+        Shares verified; published totals available below.
+      </span>
+      <span
+        v-else-if="status.kind === 'pending'"
+        class="text-sm text-skin-link flex items-start gap-1"
+      >
+        <IH-clock class="size-[16px] shrink-0 mt-[3px]" />
+        <span>
+          <template v-if="status.diagnosis.kind === 'awaiting-shares'">
+            The keyper committee has not published enough decryption shares yet
+            ({{ status.diagnosis.candidatesShort }}
+            {{ status.diagnosis.candidatesShort === 1 ? 'choice' : 'choices' }}
+            still short of {{ status.diagnosis.need }}). There is no tally to
+            verify until they do.
+          </template>
+          <template v-else>
+            Every decryption share is present, but the coordinator has not
+            published a result yet.
+          </template>
+        </span>
       </span>
       <span
         v-else-if="status.kind === 'err'"
-        class="text-skin-danger break-all"
+        class="text-sm text-skin-danger break-all"
       >
         {{ status.message }}
       </span>
@@ -336,37 +424,30 @@ function downloadBundle() {
       </div>
     </div>
     <div
-      v-if="clampSummary"
+      v-if="scaledToZeroSummary"
       class="text-sm text-skin-text border-l-2 border-skin-border pl-2"
     >
       <div>
-        {{ clampSummary.count }}
-        {{ clampSummary.count === 1 ? 'ballot was' : 'ballots were' }}
-        counted at the per-voter cap<template v-if="clampSummary.cap">
-          of
-          <span
-            class="text-skin-link"
-            v-text="clampSummary.cap.toLocaleString()" /></template
-        >.
-        {{ clampSummary.count === 1 ? 'It held' : 'Together they held' }}
+        {{ scaledToZeroSummary.count }}
+        {{ scaledToZeroSummary.count === 1 ? 'ballot' : 'ballots' }}
+        {{ scaledToZeroSummary.count === 1 ? 'was' : 'were' }} admitted but
+        {{ scaledToZeroSummary.count === 1 ? 'rounds' : 'round' }} to zero at
+        this proposal's scale of
         <span
           class="text-skin-link"
-          v-text="clampSummary.held.toLocaleString()"
-        />, counted as
+          v-text="scaledToZeroSummary.scale.toLocaleString()"
+        />.
+        {{ scaledToZeroSummary.count === 1 ? 'It held' : 'Together they held' }}
         <span
           class="text-skin-link"
-          v-text="clampSummary.counted.toLocaleString()"
-        />
-        , so
-        <span
-          class="text-skin-link"
-          v-text="clampSummary.uncounted.toLocaleString()"
-        />
-        of voting power is not reflected in the totals below.
+          v-text="scaledToZeroSummary.held.toLocaleString()"
+        />, which is not reflected in the totals below.
       </div>
       <div>
-        The cap is 1,000,000 divided by the budget, a limit of the tally's
-        recovery step, not a policy choice.
+        Scaling divides every voter's power by the same amount, so the
+        proportions between them are unchanged. It applies only when a space's
+        total supply would otherwise put the tally beyond what the committee's
+        coordinator can compute.
       </div>
     </div>
 

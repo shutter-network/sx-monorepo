@@ -130,13 +130,24 @@ export interface GegExclusion {
  * The digest a keyper signs over its aggregate.
  *
  * One ABI encode of the whole nested tuple
- * `((bytes,bytes)[], uint256[], (uint256,uint8)[], uint256)` — the ciphertext
- * pairs, the admitted sequence numbers, the exclusions as `(sequenceNumber,
- * reasonCode)`, and the total admitted weight — not four field-wise encodes.
+ * `((bytes,bytes)[], uint256[], (uint256,uint8)[], uint256, uint256)` — the
+ * ciphertext pairs, the admitted sequence numbers, the exclusions as
+ * `(sequenceNumber, reasonCode)`, the total admitted weight, and the total
+ * *scaled* weight — not five field-wise encodes.
  *
  * The admitted set is *part of what is signed*, which is the point of the
  * committee-owned aggregate: two keypers that summed the same ciphertexts over a
  * different set of ballots produce different digests and never reach a quorum.
+ *
+ * **This tuple must match `geg.core.write_auth._TALLY_ABI` field for field.** It is
+ * the second implementation of one signed format, and the two are only ever checked
+ * against each other by the parity vectors. When weight scaling added the trailing
+ * `totalScaledWeight`, geg was updated and this was not: keypers signed five fields,
+ * the hub hashed four, and `ecrecover` returned a well-formed but wrong address for
+ * every keyper. The hub reported it as `aggregate from non-member 0x…` and returned
+ * 403 — a message that points at the committee roster, which was correct, and says
+ * nothing about the digest, which was not. A shape change here is a wire-format
+ * change: bump the parity vectors in the same commit.
  */
 export function aggregateDigest(args: {
   electionId: string;
@@ -144,6 +155,7 @@ export function aggregateDigest(args: {
   admitted: number[];
   exclusions: GegExclusion[];
   totalAdmittedWeight: number | string | bigint;
+  totalScaledWeight: number | string | bigint;
 }): Buffer {
   const electionId = decodeSized(args.electionId, 'electionId', 32);
   if (!Array.isArray(args.aggregates)) {
@@ -184,25 +196,84 @@ export function aggregateDigest(args: {
   // at 1e6 a large electorate reaches that range legitimately. A digest that
   // throws for big elections and works for small ones is the worst shape of bug,
   // so the value never becomes a float on the way in.
-  let totalAdmittedWeight: string;
-  try {
-    totalAdmittedWeight = BigInt(args.totalAdmittedWeight).toString();
-  } catch {
-    throw new GegDigestError(
-      `totalAdmittedWeight: expected an integer (got ${args.totalAdmittedWeight})`
-    );
-  }
-  if (totalAdmittedWeight.startsWith('-')) {
-    throw new GegDigestError('totalAdmittedWeight: must not be negative');
-  }
+  const weightField = (
+    value: number | string | bigint,
+    name: string
+  ): string => {
+    let out: string;
+    try {
+      out = BigInt(value).toString();
+    } catch {
+      throw new GegDigestError(`${name}: expected an integer (got ${value})`);
+    }
+    if (out.startsWith('-')) {
+      throw new GegDigestError(`${name}: must not be negative`);
+    }
+    return out;
+  };
+  const totalAdmittedWeight = weightField(
+    args.totalAdmittedWeight,
+    'totalAdmittedWeight'
+  );
+  const totalScaledWeight = weightField(
+    args.totalScaledWeight,
+    'totalScaledWeight'
+  );
 
   const encoded = Buffer.from(
     defaultAbiCoder
       .encode(
         [
-          'tuple(tuple(bytes,bytes)[],uint256[],tuple(uint256,uint8)[],uint256)'
+          'tuple(tuple(bytes,bytes)[],uint256[],tuple(uint256,uint8)[],uint256,uint256)'
         ],
-        [[pairs, admitted, exclusions, totalAdmittedWeight]]
+        [[pairs, admitted, exclusions, totalAdmittedWeight, totalScaledWeight]]
+      )
+      .slice(2),
+    'hex'
+  );
+  const packed = Buffer.concat([AGGREGATE_DST, electionId, encoded]);
+  return Buffer.from(keccak256(packed).slice(2), 'hex');
+}
+
+/**
+ * The digest as it was *before* weight scaling added `totalScaledWeight`.
+ *
+ * Diagnostic only — never accept a signature over this. Its one job is to turn a
+ * wire-format mismatch into a message that names the mismatch. Recovery against the
+ * wrong tuple shape does not fail; it returns a perfectly well-formed address that
+ * happens to belong to nobody, so the only symptom is "not a registered keyper" and
+ * every obvious explanation (wrong keys, stale roster, unregistered keyper) is
+ * wrong. Checking the old shape on the failure path costs one keccak and answers
+ * the question directly.
+ */
+export function aggregateDigestPreScale(args: {
+  electionId: string;
+  aggregates: GegAggregateCiphertext[];
+  admitted: number[];
+  exclusions: GegExclusion[];
+  totalAdmittedWeight: number | string | bigint;
+}): Buffer {
+  const electionId = decodeSized(args.electionId, 'electionId', 32);
+  const pairs = args.aggregates.map((ct, i) => [
+    decodeSized(ct?.c1, `aggregates[${i}].c1`, 96),
+    decodeSized(ct?.c2, `aggregates[${i}].c2`, 96)
+  ]);
+  const exclusions = args.exclusions.map(x => [
+    x.sequenceNumber,
+    EXCLUSION_CODES[x.reason as string]
+  ]);
+  const encoded = Buffer.from(
+    defaultAbiCoder
+      .encode(
+        ['tuple(tuple(bytes,bytes)[],uint256[],tuple(uint256,uint8)[],uint256)'],
+        [
+          [
+            pairs,
+            args.admitted,
+            exclusions,
+            BigInt(args.totalAdmittedWeight).toString()
+          ]
+        ]
       )
       .slice(2),
     'hex'

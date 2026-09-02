@@ -4,12 +4,16 @@ import log from '../helpers/log';
 import { containsFlaggedLinks } from '../helpers/moderation';
 import db from '../helpers/mysql';
 import {
+  TeConfigError,
   ballotParamsColumn,
   buildCommitteeSnapshot,
   committeeColumns,
   frozenWeightedBudget,
-  TeConfigError
+  parseCommitteeSnapshotLoose,
+  votingPowerFallback,
+  weightedBudgetFromEnv
 } from '../helpers/teCommittee';
+import { resolveVotingPowerBound } from '../helpers/teVotingPowerBound';
 import { effectivePrivacy } from '../helpers/privacy';
 import { getEligibilityKey } from '../helpers/teEligibility';
 import { jsonParse, validateChoices } from '../helpers/utils';
@@ -147,7 +151,23 @@ export async function action(body, ipfs): Promise<void> {
         adminAddress:
           (Array.isArray(spaceSettings?.admins)
             ? spaceSettings.admins.find((a: any) => typeof a === 'string' && a)
-            : undefined) || existing.author
+            : undefined) || existing.author,
+        // A proposal that only just turned private is being registered now, so `V`
+        // is resolved now — against the snapshot block it was *created* with, which
+        // is the block its voting power will be read at.
+        maxTotalWeight: (
+          await resolveVotingPowerBound({
+            strategies: spaceSettings?.strategies ?? [],
+            proposalNetwork: String(spaceSettings?.network ?? '1'),
+            snapshotBlock: Number(existing.snapshot ?? 0),
+            // Sized against the budget this proposal will actually use, matching
+            // `action()` in proposal.ts. A weighted proposal's budget is the
+            // deployment's; a basic one is 1.
+            fallbackValue: votingPowerFallback(
+              msg.payload.type === 'weighted' ? weightedBudgetFromEnv() : 1
+            )
+          })
+        ).value
       });
       Object.assign(proposal, committeeColumns(snapshot));
       frozenBudget = snapshot.weightedBudget;
@@ -172,7 +192,14 @@ export async function action(body, ipfs): Promise<void> {
         frozenBudget ?? frozenWeightedBudget(existing?.te_geg_config);
       Object.assign(
         proposal,
-        ballotParamsColumn(msg.payload.choices, msg.payload.type, budget)
+        // The snapshot is the authority for both halves: an author editing `type`
+        // changes `budget`, and `scale` has to follow it.
+        ballotParamsColumn(
+          msg.payload.choices,
+          msg.payload.type,
+          budget,
+          parseCommitteeSnapshotLoose(existing?.te_geg_config)
+        )
       );
     } catch (err: any) {
       log.warn(

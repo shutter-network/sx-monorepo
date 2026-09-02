@@ -73,12 +73,21 @@ export function canonicalAggregate(raw: any, electionId: string) {
     }
   );
   const totalAdmittedWeight = canonicalWeight(raw.totalAdmittedWeight ?? 0);
+  // Mirrors `geg.envelopes.codecs`, which reads `totalScaledWeight` and falls back
+  // to `totalAdmittedWeight` when the field is absent. The fallback is what makes an
+  // unscaled election (`scale = 1`, where the two are equal by construction) decode
+  // identically on a payload written before the field existed. Defaulting to 0 here
+  // instead would silently produce a different digest from the signer's.
+  const totalScaledWeight = canonicalWeight(
+    raw.totalScaledWeight ?? raw.totalAdmittedWeight ?? 0
+  );
 
   return {
     electionId,
     aggregates,
     admitted,
     exclusions,
-    totalAdmittedWeight
+    totalAdmittedWeight,
+    totalScaledWeight
   };
 }

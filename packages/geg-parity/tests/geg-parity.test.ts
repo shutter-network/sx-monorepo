@@ -39,6 +39,7 @@ import {
   G2Point,
   initCurves,
   recoverTally,
+  verifyTallyAgainstTotals,
   scalarMulCt,
   Transcript,
   verifyBallot
@@ -336,6 +337,113 @@ describe('gate 0 — geg canonical vectors verify under the pinned build', () =>
           for (const s of perCandidate) s.sigma.destroyWasm();
         }
       }
+    });
+
+    // The same vector through the *checking* path rather than the solving one.
+    //
+    // This is the cross-implementation half of the guarantee: geg's
+    // `check_result` and the SDK's `verifyTallyAgainstTotals` must agree on what
+    // "this tally verifies" means, against bytes geg produced. Without it each
+    // implementation is only ever tested against itself, and a divergence would
+    // surface as a committee and a browser disagreeing about a real election.
+    // geg drives this same vector in `tests/test_conformance_vectors.py`.
+    describe('verifyTallyAgainstTotals', () => {
+      const withVector = <T>(fn: (args: any) => T): T => {
+        const ctSums: Ciphertext[] = aggregate.aggregates.map(ct => ({
+          c1: G2Point.fromBytes(hex(ct.c1, 'agg.c1')),
+          c2: G2Point.fromBytes(hex(ct.c2, 'agg.c2'))
+        }));
+        const committeePKs = finalizedKey.committeePKs.map(p =>
+          G2Point.fromBytes(hex(p, 'committeePK'))
+        );
+        const sharesPerCandidate = aggregate.aggregates.map((_, j) =>
+          vec.shares.map(s => ({
+            keyperIndex: s.keyperIndex,
+            sigma: G2Point.fromBytes(hex(s.entries[j]!.sigma, 'sigma')),
+            proof: decodeDLEQ(hex(s.entries[j]!.proof, 'proof'))
+          }))
+        );
+        try {
+          return fn({
+            ctSums,
+            sharesPerCandidate,
+            threshold: config.threshold.t - 1,
+            committeePKs,
+            upperBound: BigInt(result.bsgsBound),
+            transcriptFor: (j: number) => {
+              const t = new Transcript('SHUTTER-VOTE-DECRYPT-v1');
+              t.append('electionId', electionId);
+              t.append('candidate', u16BE(j));
+              return t;
+            }
+          });
+        } finally {
+          for (const ct of ctSums) {
+            ct.c1.destroyWasm();
+            ct.c2.destroyWasm();
+          }
+          for (const pk of committeePKs) pk.destroyWasm();
+          for (const perCandidate of sharesPerCandidate) {
+            for (const s of perCandidate) s.sigma.destroyWasm();
+          }
+        }
+      };
+
+      const totals = () => result.totals.map((t: any) => BigInt(t));
+
+      it("accepts the vector's published totals", () => {
+        const out = withVector(args =>
+          verifyTallyAgainstTotals({ ...args, claimedTotals: totals() })
+        );
+        expect(out).toEqual({ ok: true, reason: null });
+      });
+
+      it('rejects a single perturbed total', () => {
+        // Moving one vote between candidates keeps the sum intact, so only the
+        // per-candidate group equality separates this from the truth.
+        const t = totals();
+        t[0] = t[0]! + 1n;
+        t[1] = t[1]! - 1n;
+        const out = withVector(args =>
+          verifyTallyAgainstTotals({ ...args, claimedTotals: t })
+        );
+        expect(out.ok).toBe(false);
+        expect(out.reason).toContain('does not decrypt the aggregate');
+      });
+
+      it('rejects totals that no longer sum to the declared bound', () => {
+        const t = totals();
+        t[0] = t[0]! + 1n;
+        const out = withVector(args =>
+          verifyTallyAgainstTotals({ ...args, claimedTotals: t })
+        );
+        expect(out.ok).toBe(false);
+        expect(out.reason).toMatch(/^result:/);
+      });
+
+      it('rejects a total pushed outside the bound', () => {
+        const t = totals();
+        t[0] = BigInt(result.bsgsBound) + 1n;
+        const out = withVector(args =>
+          verifyTallyAgainstTotals({ ...args, claimedTotals: t })
+        );
+        expect(out.ok).toBe(false);
+        expect(out.reason).toContain('outside');
+      });
+
+      it('rejects a share set short of the quorum', () => {
+        const out = withVector(args =>
+          verifyTallyAgainstTotals({
+            ...args,
+            sharesPerCandidate: args.sharesPerCandidate.map((p: any[]) =>
+              p.slice(0, config.threshold.t - 1)
+            ),
+            claimedTotals: totals()
+          })
+        );
+        expect(out.ok).toBe(false);
+        expect(out.reason).toMatch(/^shares:/);
+      });
     });
   });
 

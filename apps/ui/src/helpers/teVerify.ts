@@ -1,16 +1,40 @@
 /**
- * Phase 8. Client-side tally audit.
+ * Client-side tally audit.
  *
- * Calls the hub's public GET endpoint for decryption shares + the
- * proposal's TE configuration, then runs the SDK's ``recoverTally``
- * locally so that any auditor can independently confirm the published
- * scores. Every share's DLEQ proof is verified inside ``recoverTally``;
- * the wrapper here is essentially "fetch the public bytes and feed
- * them to the SDK in the same shape the sequencer used".
+ * Fetches the hub's public bytes — encrypted ballots, the committee aggregate,
+ * the decryption shares, the proposal's TE configuration — and re-derives the
+ * result from them locally, so an auditor confirms the published scores without
+ * trusting the party that published them.
  *
- * Returned value: the per-candidate integer tallies. Comparison to the
- * proposal's published scores is done by the calling component so that
- * the UI can highlight any mismatch in the right place.
+ * Two stages, both independent of the committee:
+ *
+ *   1. ``aggregateBallots`` re-sums the encrypted ballots (each scaled by its
+ *      voting power) and compares the result to the aggregate the keypers signed.
+ *      This is the step that ties the tally to ballots actually cast, and it is
+ *      also where the client establishes ``derivedBound = budget x Σ(weights it
+ *      counted itself)``.
+ *
+ *   2. ``verifyTally`` verifies every share's DLEQ proof, Lagrange-combines the
+ *      quorum subset into a τ per candidate, and checks each published total by
+ *      **multiplication**: `total · P₂ == τ`. See that function for why this is
+ *      exactly as conclusive as searching for the discrete log, and why the range
+ *      and sum checks around it are load-bearing rather than belt-and-braces.
+ *
+ * **The client never solves the discrete log.** It does not call the SDK's
+ * ``recoverTally``, and it deliberately refuses to recover a result the committee
+ * has not published: search is O(√bound) in time *and* memory, and this WASM build
+ * aborts above bound ~2.5e9 — which a 1,000-voter weighted proposal exceeds. The
+ * committee supplies a candidate answer; a wrong one fails with certainty.
+ *
+ * **What this does not check.** Everything here is in *scaled* units and is
+ * self-consistent by construction, so an audit passes whether or not the
+ * proposal's `scale` was chosen sensibly. This answers "did the committee tally
+ * the ballots honestly?", never "was this proposal configured correctly?" — that
+ * belongs to proposal creation (see H12/H13 in the weight-scaling plan).
+ *
+ * Returned value: the per-candidate integer tallies plus the outcome of each
+ * check. Comparison to the proposal's published scores is done by the calling
+ * component so the UI can highlight a mismatch in the right place.
  */
 import { arrayify } from '@ethersproject/bytes';
 import { keccak256 } from '@ethersproject/keccak256';
@@ -21,9 +45,9 @@ import {
   decodeDLEQ,
   G2Point,
   PartialDecryption,
-  recoverTally,
-  scalarMulCt,
-  Transcript
+  msmCt,
+  Transcript,
+  verifyTallyAgainstTotals
 } from '@shutter-network/urban-verified-crypto';
 import { ensureCurvesInit } from './teBallot';
 
@@ -82,6 +106,19 @@ export interface AuditPayload {
     proof_e: string;
     proof_z: string;
   }>;
+  /**
+   * The committee's published result, or `null` before one exists.
+   *
+   * `totals` are decimal **strings**, deliberately: a tally can exceed 2^53, past
+   * which a JSON number stops being the integer the keypers decrypted, and the
+   * check below is an exact group equality — a value off by one rounding step
+   * fails outright rather than nearly passing.
+   */
+  te_result?: {
+    totals: string[];
+    keyper_indices: number[];
+    bsgs_bound: string;
+  } | null;
 }
 
 /** One encrypted ballot as served by ``GET /proposal/:id/te_ballots``. */
@@ -104,7 +141,14 @@ export interface AuditBallot {
 export interface BallotsPayload {
   te_mpk: string;
   te_config: BallotVerifyParams | null;
-  maxWeight?: number | null;
+  /**
+   * The unit this proposal's tally counts in; 1 means no scaling.
+   *
+   * Applied here exactly as the committee applies it, or the recomputed aggregate
+   * will not match and an honest committee is reported as having published a false
+   * one.
+   */
+  scale?: number | null;
   ballots: AuditBallot[];
 }
 
@@ -122,10 +166,19 @@ export interface BallotAggregateResult {
   exclusions: Array<{ sequenceNumber: number; reason: string }>;
   admittedSetResolved: boolean;
   /**
-   * Ballots counted at the ceiling rather than at their voting power, with what
-   * each one actually held. Empty on most elections.
+   * Ballots whose weight rounds to zero at this proposal's scale: admitted and
+   * recorded, but contributing nothing. Empty unless `scale > 1`, which is itself
+   * rare.
    */
-  clamped: Array<{ voter: string; vp: number; countedAs: number }>;
+  scaledToZero: Array<{ voter: string; vp: number }>;
+  /**
+   * Σ of the weights this client actually counted.
+   *
+   * Derived here rather than read from the committee's artifact on purpose: it is
+   * what bounds the published totals, and a bound taken from the same party whose
+   * totals are being checked would check nothing.
+   */
+  totalWeight: bigint;
 }
 
 /**
@@ -136,10 +189,23 @@ export interface BallotAggregateResult {
 const IDENTITY_G2 = `0x${'c0'.padEnd(192, '0')}`;
 
 export interface VerifyResult {
+  /** The committee's published per-candidate totals, as exact integers. */
   tallies: bigint[];
-  matchesPublished: boolean | null;
+  /** Whether those totals verify against the aggregate and the decryption shares. */
+  verified: boolean;
+  /** Why they did not, when `verified` is false; `null` otherwise. */
+  reason: string | null;
   shareCount: number;
   thresholdMet: boolean;
+  /** `budget × Σ(counted weights)`, derived from the ballots this client read. */
+  derivedBound: bigint;
+  /**
+   * Whether the committee's published `bsgs_bound` equals the locally derived one.
+   * Advisory: the equality check above already establishes the totals. A mismatch
+   * narrows a discrepancy to "published against a different admitted set" instead
+   * of leaving it as a bare disagreement. `null` when no result is published.
+   */
+  boundMatchesPublished: boolean | null;
 }
 
 /**
@@ -206,7 +272,8 @@ function ctToHex(ct: Ciphertext): { c1: string; c2: string } {
  */
 export async function aggregateBallots(
   payload: BallotsPayload,
-  expectedAggregate: AuditPayload['aggregate']
+  expectedAggregate: AuditPayload['aggregate'],
+  onProgress?: (done: number, total: number) => void
 ): Promise<BallotAggregateResult> {
   await ensureCurvesInit();
 
@@ -216,12 +283,55 @@ export async function aggregateBallots(
   const numCandidates = expectedAggregate.num_candidates;
   const acc: (Ciphertext | null)[] = new Array(numCandidates).fill(null);
   let contributing = 0;
-  const clamped: BallotAggregateResult['clamped'] = [];
+  let totalWeight = 0n;
+  const scaledToZero: BallotAggregateResult['scaledToZero'] = [];
 
-  const maxWeight =
-    typeof payload.maxWeight === 'number' && payload.maxWeight > 0
-      ? BigInt(payload.maxWeight)
-      : null;
+  const scale =
+    typeof payload.scale === 'number' && payload.scale > 1
+      ? BigInt(Math.floor(payload.scale))
+      : 1n;
+
+  /**
+   * Ballots weighted per multi-scalar multiplication rather than one scalar
+   * multiplication each — the difference between roughly 6 ms per ballot per
+   * candidate and a fraction of that (see the SDK's `crypto/msm.ts`).
+   *
+   * Chunked because the whole point set for a chunk has to be resident at once,
+   * and the WASM heap is a fixed 16 MB. At 256 ballots the live set peaks at
+   * `256 x candidates x 2` points — about 2.9 MB even at the 20-candidate maximum,
+   * which leaves the bucket table and everything else comfortable. Summing chunk
+   * partials is exact: addition is associative, so the total is byte-identical to
+   * weighting and adding every ballot in one pass.
+   */
+  const CHUNK_BALLOTS = 256;
+  const pendingWeights: bigint[] = [];
+  const pendingCts: Ciphertext[][] = Array.from(
+    { length: expectedAggregate.num_candidates },
+    () => []
+  );
+
+  function flushChunk(): void {
+    if (pendingWeights.length === 0) return;
+    for (let j = 0; j < pendingCts.length; j++) {
+      const partial = msmCt(pendingWeights, pendingCts[j]!);
+      if (acc[j] === null) {
+        acc[j] = partial;
+      } else {
+        const prev = acc[j]!;
+        acc[j] = addCt(prev, partial);
+        prev.c1.destroyWasm();
+        prev.c2.destroyWasm();
+        partial.c1.destroyWasm();
+        partial.c2.destroyWasm();
+      }
+      for (const ct of pendingCts[j]!) {
+        ct.c1.destroyWasm();
+        ct.c2.destroyWasm();
+      }
+      pendingCts[j] = [];
+    }
+    pendingWeights.length = 0;
+  }
 
   const admitted = Array.isArray(expectedAggregate.admitted)
     ? new Set(expectedAggregate.admitted)
@@ -239,7 +349,9 @@ export async function aggregateBallots(
     admitted === null || [...admitted].every(n => present.has(n));
 
   try {
+    let processed = 0;
     for (const b of payload.ballots) {
+      processed++;
       const env = b.choice;
       if (!env) continue;
       if (admitted !== null) {
@@ -250,36 +362,32 @@ export async function aggregateBallots(
       }
 
       const raw = BigInt(Math.round(b.vp));
-      const w = maxWeight !== null && raw > maxWeight ? maxWeight : raw;
-      if (w <= 0n) continue;
-      if (w !== raw) {
-        clamped.push({ voter: b.voter, vp: b.vp, countedAs: Number(w) });
+      // Integer half-up, byte-matching geg's `(w + s//2) // s`. `Math.round(w/s)`
+      // would agree in JavaScript and disagree in Python at exactly `.5`.
+      const w = scale > 1n ? (raw + scale / 2n) / scale : raw;
+      if (raw > 0n && w === 0n) {
+        // Admitted, recorded, and worth nothing at this scale — reported so the
+        // audit panel can say so rather than leaving it to look like an omission.
+        scaledToZero.push({ voter: b.voter, vp: b.vp });
       }
+      if (w <= 0n) continue;
       contributing++;
+      totalWeight += w;
 
+      pendingWeights.push(w);
       const cts: Ciphertext[] = env.ciphertexts.map(c => ({
         c1: G2Point.fromBytes(arrayify(c.c1)),
         c2: G2Point.fromBytes(arrayify(c.c2))
       }));
-      for (let j = 0; j < numCandidates; j++) {
-        const raw = cts[j];
-        const weighted = w === 1n ? raw : scalarMulCt(w, raw);
-        if (w !== 1n) {
-          raw.c1.destroyWasm();
-          raw.c2.destroyWasm();
-        }
-        if (acc[j] === null) {
-          acc[j] = weighted;
-        } else {
-          const prev = acc[j]!;
-          acc[j] = addCt(prev, weighted);
-          prev.c1.destroyWasm();
-          prev.c2.destroyWasm();
-          weighted.c1.destroyWasm();
-          weighted.c2.destroyWasm();
-        }
+      for (let j = 0; j < numCandidates; j++) pendingCts[j]!.push(cts[j]!);
+
+      if (pendingWeights.length >= CHUNK_BALLOTS) {
+        flushChunk();
+        onProgress?.(processed, payload.ballots.length);
       }
     }
+    flushChunk();
+    onProgress?.(payload.ballots.length, payload.ballots.length);
 
     // Compare the recomputed aggregate to the published one byte-for-byte.
     let aggregateMatches = true;
@@ -301,10 +409,11 @@ export async function aggregateBallots(
     return {
       total: payload.ballots.length,
       contributing,
-      clamped,
+      scaledToZero,
       aggregateMatches,
       exclusions,
-      admittedSetResolved
+      admittedSetResolved,
+      totalWeight
     };
   } finally {
     for (const ct of acc) {
@@ -317,19 +426,75 @@ export async function aggregateBallots(
 }
 
 /**
- * Trustless-audit step 2: recover the tally from the public decryption
- * shares and (optionally) compare it to the published scores.
+ * Why there is no verified tally yet — worked out from public data, not read.
  *
- * Throws synchronously on shape mismatches (missing aggregate, fewer
- * than ``t+1`` shares for some candidate, malformed hex). Otherwise
- * returns the recovered tallies and an optional comparison flag if
- * ``publishedScores`` is supplied.
+ * The split that decides what an operator does is **derived, not trusted**: share
+ * counts and the presence of a result are public and unforgeable by whoever serves
+ * them, because the shares carry DLEQ proofs and the result has to satisfy an
+ * equality this client checks itself.
+ *
+ *   - `awaiting-shares`      — the committee has not produced a quorum. A keyper
+ *                              availability problem; chasing the coordinator will
+ *                              not help.
+ *   - `awaiting-coordinator` — the shares are all there and no result has been
+ *                              published. The coordinator's problem.
+ *
+ * The coordinator's own `tallyStallReason` refines the second case only, and is
+ * unsigned — render it as a claim ("the coordinator reports…"), never as fact. It
+ * cannot make an unverifiable tally look verifiable, so an unauthenticated hint is
+ * an acceptable trade here; that stops being true the moment it gates an automated
+ * action rather than a human's attention.
+ */
+export type TallyDiagnosis =
+  | { kind: 'published' }
+  | { kind: 'awaiting-shares'; candidatesShort: number; need: number }
+  | { kind: 'awaiting-coordinator' };
+
+export function diagnoseTally(payload: AuditPayload): TallyDiagnosis {
+  const need = payload.te_threshold_t;
+  const numCandidates = payload.aggregate?.num_candidates ?? 0;
+
+  const perCandidate = new Array(numCandidates).fill(0);
+  for (const s of payload.shares) {
+    if (s.candidate >= 0 && s.candidate < numCandidates)
+      perCandidate[s.candidate]++;
+  }
+  const candidatesShort = perCandidate.filter(n => n < need).length;
+  if (candidatesShort > 0)
+    return { kind: 'awaiting-shares', candidatesShort, need };
+
+  const totals = payload.te_result?.totals;
+  if (!totals || totals.length === 0) return { kind: 'awaiting-coordinator' };
+  return { kind: 'published' };
+}
+
+/**
+ * Trustless-audit step 2: check the committee's published totals against the
+ * aggregate and the decryption shares.
+ *
+ * **Checked, not re-solved.** Every share's DLEQ is verified here, the quorum
+ * subset is Lagrange-combined here, and each published total is multiplied by the
+ * generator and compared to the τ this client derived itself. That is exactly as
+ * conclusive as searching for the discrete log — it is unique, so only the true
+ * total satisfies the equality — and it is the difference between ~6 ms per
+ * candidate and a baby-step table this WASM build cannot allocate: `recoverTally`
+ * aborts outright somewhere above bound 2.5e9, which a 1,000-voter weighted
+ * proposal reaches. The only thing taken from the committee is a candidate answer,
+ * and a wrong one fails with certainty.
+ *
+ * ``derivedBound`` must be `budget × Σ(weights this client counted)` — from
+ * ``aggregateBallots``, never from the committee's own artifact. It range-checks
+ * the totals, which is what stops a published `T + q` (the same group element as
+ * `T`) passing the equality as a nonsense 256-bit integer.
+ *
+ * Throws synchronously on shape mismatches (missing aggregate, malformed hex).
+ * A tally that simply fails to verify is *not* an exception: it comes back as
+ * ``verified: false`` with a reason, so the UI can say which check failed.
  */
 export async function verifyTally(
   proposalId: string,
   payload: AuditPayload,
-  publishedScores?: number[],
-  budget = 1
+  derivedBound: bigint
 ): Promise<VerifyResult> {
   await ensureCurvesInit();
 
@@ -388,26 +553,29 @@ export async function verifyTally(
     }
 
     const electionIdBytes = arrayify(proposalId);
-    // Published scores are divided by budget (e.g. 0.6, 0.4 for a 60/40 weighted
-    // split). Scale them back to raw integers for BSGS upper bound and comparison.
-    const rawPublished = (publishedScores || []).map(s =>
-      BigInt(Math.round(s * budget))
-    );
-    const sumPublished = rawPublished.reduce((s, n) => s + n, 0n);
-    // Upper bound for BSGS: actual sum of published scores + 1.
-    // When sumPublished = 0 (zero-vote election), upperBound = 1 and the
-    // baby-step table has a single entry (the identity), so the lookup is
-    // trivial. The caller must ensure scores are final before calling this
-    // function; verifying against unfinalised (all-zero) scores is meaningless.
-    const upperBound = sumPublished + 1n;
+    const published = payload.te_result;
+    if (!published || published.totals.length === 0) {
+      // Nothing to check against. Deliberately not an occasion to solve it here:
+      // recovering a withheld result is an escalation someone chooses, on a machine
+      // sized for it, not something a browser tab does on a page load.
+      throw new Error(
+        'The committee has not published a result for this proposal yet, so there ' +
+          'is nothing to verify against.'
+      );
+    }
 
-    const tallies = recoverTally({
+    // Exact integers, parsed from decimal strings. Anything that has been through a
+    // float is not the number the keypers decrypted once a tally passes 2^53.
+    const tallies = published.totals.map(t => BigInt(t));
+
+    const { ok, reason } = verifyTallyAgainstTotals({
       ctSums,
       sharesPerCandidate,
       // SDK boundary: it takes the fault count and combines one more share.
       threshold: te_threshold_t - 1,
       committeePKs,
-      upperBound,
+      claimedTotals: tallies,
+      upperBound: derivedBound,
       transcriptFor: (j: number) => {
         const t = new Transcript(DECRYPT_TRANSCRIPT_LABEL);
         t.append('electionId', electionIdBytes);
@@ -416,18 +584,23 @@ export async function verifyTally(
       }
     });
 
-    let matchesPublished: boolean | null = null;
-    if (publishedScores && rawPublished.length > 0) {
-      matchesPublished =
-        rawPublished.length === tallies.length &&
-        tallies.every((v, i) => v === rawPublished[i]);
+    // Advisory only — the equality above already establishes the totals. This just
+    // turns "something disagrees" into "they tallied a different admitted set".
+    let boundMatchesPublished: boolean | null = null;
+    try {
+      boundMatchesPublished = BigInt(published.bsgs_bound) === derivedBound;
+    } catch {
+      boundMatchesPublished = false;
     }
 
     return {
       tallies,
-      matchesPublished,
+      verified: ok,
+      reason,
       shareCount: shares.length,
-      thresholdMet
+      thresholdMet,
+      derivedBound,
+      boundMatchesPublished
     };
   } finally {
     for (const ct of ctSums) {
@@ -443,6 +616,64 @@ export async function verifyTally(
       }
     }
   }
+}
+
+/** How far along a verification is, for a progress indicator. */
+export interface VerifyProgress {
+  phase: 'aggregate' | 'tally';
+  done: number;
+  total: number;
+}
+
+export interface VerifyAllResult {
+  ballots: BallotAggregateResult;
+  tally: VerifyResult;
+  /** Derived locally from the ballots — never taken from the committee. */
+  derivedBound: bigint;
+}
+
+/**
+ * Both halves of an audit, in one call: recompute the aggregate from the raw
+ * ballots, then check the committee's published totals against it.
+ *
+ * Exists as a single function so the Web Worker entry point can be a thin
+ * wrapper around it (`teVerifyWorker.ts`). Everything here is pure computation
+ * over already-fetched payloads — no network, no DOM — which is what makes it
+ * both worker-safe and testable in node.
+ *
+ * `onProgress` is called between chunks. The aggregate phase dominates by a wide
+ * margin: at the time of writing each ciphertext costs ~2.8 ms to decompress
+ * (the subgroup check inside `G2Point.fromBytes`), so a 1,000-ballot 5-choice
+ * proposal spends ~28 s there against ~3 s on the weighted sum and ~2 s on the
+ * tally check. That is precisely why this runs off the main thread.
+ */
+export async function verifyAll(
+  args: {
+    proposalId: string;
+    payload: AuditPayload;
+    ballotsPayload: BallotsPayload;
+    budget: number;
+  },
+  onProgress?: (p: VerifyProgress) => void
+): Promise<VerifyAllResult> {
+  const { proposalId, payload, ballotsPayload, budget } = args;
+
+  const ballots = await aggregateBallots(
+    ballotsPayload,
+    payload.aggregate,
+    (done, total) => onProgress?.({ phase: 'aggregate', done, total })
+  );
+
+  // The bound comes from the ballots this client just counted, never from the
+  // committee's own artifact — a bound supplied by the party whose totals are
+  // being checked would check nothing.
+  const derivedBound = ballots.totalWeight * BigInt(budget);
+
+  onProgress?.({ phase: 'tally', done: 0, total: 1 });
+  const tally = await verifyTally(proposalId, payload, derivedBound);
+  onProgress?.({ phase: 'tally', done: 1, total: 1 });
+
+  return { ballots, tally, derivedBound };
 }
 
 /**
@@ -487,9 +718,12 @@ export function buildVerificationBundle(args: {
       // them and reach a different answer for a correct election.
       exclusions: args.ballotResult.exclusions,
       admittedSetResolved: args.ballotResult.admittedSetResolved,
-      recoveredTallies: args.tallyResult.tallies.map(t => t.toString()),
+      publishedTallies: args.tallyResult.tallies.map(t => t.toString()),
       thresholdMet: args.tallyResult.thresholdMet,
-      matchesPublishedScores: args.tallyResult.matchesPublished
+      talliesVerified: args.tallyResult.verified,
+      failureReason: args.tallyResult.reason,
+      derivedBound: args.tallyResult.derivedBound.toString(),
+      boundMatchesPublished: args.tallyResult.boundMatchesPublished
     }
   };
 }

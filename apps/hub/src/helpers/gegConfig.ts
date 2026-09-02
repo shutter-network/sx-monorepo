@@ -29,28 +29,34 @@
  */
 
 /**
- * Ceiling the protocol puts on `budget × maxWeight`.
+ * The unit this proposal's tally counts in.
  *
- * The tally recovers each total by baby-step giant-step over a search space of
- * `budget × Σ admitted weights`, holding a table of `sqrt(bound)` points — memory
- * is the wall. The protocol refuses a config above this line, so it is not a
- * preference we can opt out of.
- */
-export const MAX_BUDGET_TIMES_WEIGHT = 1_000_000;
-
-/**
- * The largest per-voter weight this budget allows.
+ * The recovery bound is `budget × Σ(admitted weights)` and BSGS cost grows as its
+ * square root, so a token with a very large supply could put a tally out of reach.
+ * Dividing every weight by `s` keeps the bound inside what the coordinator can
+ * solve while preserving **every ratio in the cap table** — the clamp this replaces
+ * instead flattened the top of it, counting a 25,000 holder and a 25,000,000 holder
+ * identically.
  *
- * **This clamps governance outcomes, and it is not a free choice.** Snapshot
- * voting power is uncapped; the protocol's ceiling is not. Voting power above the
- * cap is counted *at* the cap rather than dropped, so a whale still votes, with
- * less weight than it holds. Taking the largest value the protocol permits for
- * the budget is the least restrictive reading available — a single-choice
- * proposal (budget 1) allows 1e6, a weighted one at budget 100 allows 1e4 — but
- * the deployment should decide this deliberately rather than inherit it.
+ * The smallest power of two that fits, so no proposal loses more precision than its
+ * ceiling forces. `1` — no scaling at all — is the answer for essentially every
+ * real space: at the default ceiling a space needs `budget × totalSupply > 1e12`
+ * before this moves off 1.
+ *
+ * Derived live rather than frozen, alongside `budget`, because an author may edit
+ * `type` until voting opens: flipping weighted → basic changes `budget` by 100×, and
+ * a stored `s` would then be 100× too small.
  */
-export function deriveMaxWeight(budget: number): number {
-  return Math.floor(MAX_BUDGET_TIMES_WEIGHT / budget);
+export function deriveScale(
+  budget: number,
+  maxTotalWeight: number,
+  solverCeiling: number
+): number {
+  let scale = 1;
+  while (budget * Math.ceil(maxTotalWeight / scale) > solverCeiling) {
+    scale *= 2;
+  }
+  return scale;
 }
 
 export const PROTOCOL_VERSION = 'SHUTTER-VOTE-v1';
@@ -67,6 +73,10 @@ export interface TeCommitteeSnapshot {
   votingStart: number;
   votingEnd: number;
   weightedBudget: number;
+  /** Conservative bound on total voting power, frozen at creation. */
+  maxTotalWeight: number;
+  /** The solver ceiling this proposal was sized against, frozen at creation. */
+  solverCeiling: number;
 }
 
 /** The protocol's election config, in its exact wire shape. */
@@ -77,7 +87,8 @@ export interface GegElectionConfig {
   mode: 'exact' | 'atMost';
   variant: 'A' | 'B';
   weighted: boolean;
-  maxWeight: number;
+  /** Divisor applied to every weight at aggregation; 1 means no scaling. */
+  scale: number;
   duplicatePolicy: 'first-wins' | 'last-wins';
   votingStart: number;
   votingEnd: number;
@@ -179,7 +190,13 @@ export function composeElectionConfig(args: {
     electionId: proposalId,
     ...params,
     weighted: true,
-    maxWeight: deriveMaxWeight(params.budget),
+    // Derived here, not read from the snapshot: `budget` is itself derived live from
+    // the proposal's editable `type`, and `s` has to follow it (see `deriveScale`).
+    scale: deriveScale(
+      params.budget,
+      snapshot.maxTotalWeight,
+      snapshot.solverCeiling
+    ),
     duplicatePolicy: 'last-wins',
     votingStart: snapshot.votingStart,
     votingEnd: snapshot.votingEnd,

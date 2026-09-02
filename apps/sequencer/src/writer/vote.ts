@@ -13,7 +13,6 @@ import {
   isWithinGegVotingWindow,
   verifyTeBallot
 } from '../helpers/te';
-import { deriveMaxWeight } from '../helpers/teCommittee';
 import { captureError, hasStrategyOverride, jsonParse } from '../helpers/utils';
 import { updateProposalAndVotes } from '../scores';
 
@@ -221,8 +220,6 @@ export async function verifyBallotCredential(
       `proposal ${proposal.id} has no usable ballot budget`
     );
   }
-  const maxWeight = BigInt(deriveMaxWeight(budget));
-
   const envelope = jsonParse(JSON.stringify(msg.payload.choice), null);
   const credential = envelope?.attestation;
   const bindingSignature = envelope?.voterAttestationSignature;
@@ -266,8 +263,7 @@ export async function verifyBallotCredential(
     vk: credential.vk,
     weight,
     nonce,
-    signature: credential.signature,
-    maxWeight
+    signature: credential.signature
   });
   if (!ok) throw new GegAttestationError('credential signature is not valid');
 

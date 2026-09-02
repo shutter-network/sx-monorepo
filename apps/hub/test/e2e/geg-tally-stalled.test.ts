@@ -21,6 +21,7 @@
 import { Wallet } from '@ethersproject/wallet';
 import fetch from 'node-fetch';
 import { eligibilityPublicKey } from '../../src/helpers/eligibilityKey';
+import { seedEligibilityKey } from '../fixtures/eligibilityKey';
 import {
   requestDigest,
   requestNoncePayload
@@ -36,7 +37,11 @@ const KEYPER = new Wallet(`0x${'c3'.repeat(32)}`);
 // fixture where they are the same address cannot tell the two rules apart.
 const AUTHOR = new Wallet(`0x${'e5'.repeat(32)}`);
 
-const ID = '0xbbbb000000000000000000000000000000000000000000000000000000000001';
+// Distinct from every other e2e suite's proposal id. `geg-ballots-materialization`
+// used to share `0xbbbb...0001` with this file, so each suite's setup and teardown
+// deleted the other's row — whichever ran second pulled the ground out from under
+// the first, and which tests failed depended on jest's ordering.
+const ID = '0xbbbc000000000000000000000000000000000000000000000000000000000001';
 
 /**
  * A stall/resume signature carries the moment it was made, and the hub spends
@@ -96,14 +101,35 @@ async function reportedByElectionRead(): Promise<boolean> {
   return (await res.json()).tallyStalled;
 }
 
-describe('POST /api/proposal/:id/te_tally_stalled', () => {
-  beforeAll(async () => {
-    // The resume authority is the proposal's space admins, read live.
-    await db.queryAsync('DELETE FROM spaces WHERE id = ?', ['test.eth']);
-    await db.queryAsync('INSERT INTO spaces SET ?', {
-      id: 'test.eth',
+/**
+ * This suite owns its space outright rather than borrowing `test.eth`.
+ *
+ * It has to create, mutate and delete the space row — the resume authority is read
+ * live from `settings.admins`, and two tests rewrite that list. `test.eth` is a
+ * name five other e2e suites put proposals under, so deleting it in `afterAll`
+ * (and again in `beforeAll`) tore down a fixture the neighbours were using and made
+ * them pass or fail on jest's suite order.
+ */
+const SPACE = 'stall-fixture.eth';
+
+/**
+ * Create or restore the fixture space, with `admins` set to `addresses`.
+ *
+ * Called from `beforeEach`, not just once, for two reasons. Several tests below
+ * rewrite `settings.admins` to prove the authority is read live, and re-asserting
+ * it here means none of them can leak a mutated list into the next test. And
+ * upstream's `space.test.ts` runs `DELETE from spaces` **unqualified** in its own
+ * setup and teardown, so any fixture seeded once and left alone can be wiped out
+ * from under this suite — after which `resumeAuthorities` falls back to the
+ * proposal author and every resume assertion fails with a puzzling 403.
+ */
+async function upsertSpace(addresses: string[]): Promise<void> {
+  await db.queryAsync(
+    `INSERT INTO spaces SET ? ON DUPLICATE KEY UPDATE settings = VALUES(settings)`,
+    {
+      id: SPACE,
       name: 'Stall fixture space',
-      settings: JSON.stringify({ admins: [ADMIN.address] }),
+      settings: JSON.stringify({ admins: addresses }),
       verified: 0,
       deleted: 0,
       flagged: 0,
@@ -114,11 +140,30 @@ describe('POST /api/proposal/:id/te_tally_stalled', () => {
       follower_count: 0,
       created: 1,
       updated: 1
-    });
+    }
+  );
+}
+
+describe('POST /api/proposal/:id/te_tally_stalled', () => {
+  beforeAll(async () => {
+    await upsertSpace([ADMIN.address]);
+    // Clear this proposal's spent-nonce ledger.
+    //
+    // `issuedAtCursor` starts from the wall clock, so two runs against the same
+    // database seconds apart reuse timestamps the earlier run already spent, and
+    // the replay guard refuses them. The suite passes today only because
+    // `test:setup` happens to drop the database first; owning the ledger makes it
+    // re-runnable on its own, which is what let this go unnoticed.
+    await db.queryAsync('DELETE FROM te_request_nonces WHERE proposal_id = ?', [
+      ID
+    ]);
     // The frozen key has to be the one in use: the election read asserts they
     // match and 503s otherwise, which would look like a stall bug. The hub no
-    // longer holds the key — it fetches the public half from the sequencer — so
-    // this resolves through that fetch.
+    // longer holds the key — it reads the published public half — so this suite
+    // publishes it first. Seeding here rather than inheriting it from whichever
+    // suite happens to run earlier is the point: without it these tests pass or
+    // fail on jest's ordering.
+    await seedEligibilityKey();
     const eligibilityKey = await eligibilityPublicKey();
     await db.queryAsync('DELETE FROM proposals WHERE id = ?', [ID]);
     await db.queryAsync('INSERT INTO proposals SET ?', {
@@ -126,7 +171,7 @@ describe('POST /api/proposal/:id/te_tally_stalled', () => {
       ipfs: 'bafkreistallfixture',
       author: AUTHOR.address,
       created: 1,
-      space: 'test.eth',
+      space: SPACE,
       network: '1',
       symbol: '',
       type: 'weighted',
@@ -176,12 +221,15 @@ describe('POST /api/proposal/:id/te_tally_stalled', () => {
   });
 
   afterAll(async () => {
-    await db.queryAsync('DELETE FROM spaces WHERE id = ?', ['test.eth']);
+    await db.queryAsync('DELETE FROM spaces WHERE id = ?', [SPACE]);
     await db.queryAsync('DELETE FROM proposals WHERE id = ?', [ID]);
     await db.endAsync();
   });
 
   beforeEach(async () => {
+    // Re-assert the space every test: neighbouring suites truncate `spaces`, and
+    // tests in this file deliberately mutate its admin list.
+    await upsertSpace([ADMIN.address]);
     await db.queryAsync(
       'UPDATE proposals SET te_tally_stalled = 0 WHERE id = ?',
       [ID]
@@ -247,13 +295,13 @@ describe('POST /api/proposal/:id/te_tally_stalled', () => {
     const LATE = new Wallet(`0x${'d4'.repeat(32)}`);
     await db.queryAsync('UPDATE spaces SET settings = ? WHERE id = ?', [
       JSON.stringify({ admins: [ADMIN.address, LATE.address] }),
-      'test.eth'
+      SPACE
     ]);
     await postSigned(true, 'resultPublisherSig', PUBLISHER, 'tally_stall');
     expect(await postSigned(false, 'adminSig', LATE, 'tally_resume')).toBe(204);
     await db.queryAsync('UPDATE spaces SET settings = ? WHERE id = ?', [
       JSON.stringify({ admins: [ADMIN.address] }),
-      'test.eth'
+      SPACE
     ]);
   });
 
@@ -261,7 +309,7 @@ describe('POST /api/proposal/:id/te_tally_stalled', () => {
   it('refuses an admin who has since been removed from the space', async () => {
     await db.queryAsync('UPDATE spaces SET settings = ? WHERE id = ?', [
       JSON.stringify({ admins: [] }),
-      'test.eth'
+      SPACE
     ]);
     await postSigned(true, 'resultPublisherSig', PUBLISHER, 'tally_stall');
     // The author is the fallback, and ADMIN is not the author.
@@ -271,7 +319,7 @@ describe('POST /api/proposal/:id/te_tally_stalled', () => {
     expect(await stalledFlag()).toBe(1);
     await db.queryAsync('UPDATE spaces SET settings = ? WHERE id = ?', [
       JSON.stringify({ admins: [ADMIN.address] }),
-      'test.eth'
+      SPACE
     ]);
   });
 
@@ -279,7 +327,7 @@ describe('POST /api/proposal/:id/te_tally_stalled', () => {
   it('falls back to the proposal author when the space lists no admins', async () => {
     await db.queryAsync('UPDATE spaces SET settings = ? WHERE id = ?', [
       JSON.stringify({ admins: [] }),
-      'test.eth'
+      SPACE
     ]);
     await postSigned(true, 'resultPublisherSig', PUBLISHER, 'tally_stall');
     expect(await postSigned(false, 'adminSig', AUTHOR, 'tally_resume')).toBe(
@@ -287,7 +335,7 @@ describe('POST /api/proposal/:id/te_tally_stalled', () => {
     );
     await db.queryAsync('UPDATE spaces SET settings = ? WHERE id = ?', [
       JSON.stringify({ admins: [ADMIN.address] }),
-      'test.eth'
+      SPACE
     ]);
   });
 
