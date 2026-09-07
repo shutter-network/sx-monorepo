@@ -129,12 +129,19 @@ async function main() {
       vk,
       votes,
       params: PARAMS,
-      wrAttestation: new Uint8Array(0)
+      attestation: {
+          electionId: new Uint8Array(32).fill(1),
+          pseudonym: new Uint8Array(32).fill(2),
+          vk: new Uint8Array(48).fill(3),
+          weight: 1n,
+          nonce: 1n,
+          signature: new Uint8Array(80)
+        }
     });
 
     // Never emit a ballot the ingest path would reject; a bad ballot here would
     // surface later as an unexplained admission exclusion.
-    const check = verifyBallot(built, PARAMS, mpk, () => true);
+    const check = verifyBallot(built, PARAMS, mpk, new Uint8Array(48));
     if (!check.ok)
       throw new Error(`voter ${i}: self-check failed: ${check.reason}`);
     process.stderr.write('ok\n');

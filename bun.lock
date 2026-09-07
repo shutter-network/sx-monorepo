@@ -175,7 +175,7 @@
         "@ethersproject/keccak256": "^5.7.0",
         "@ethersproject/wallet": "^5.7.0",
         "@graphql-tools/schema": "^10.0.0",
-        "@shutter-network/urban-verified-crypto": "0.2.0",
+        "@shutter-network/urban-verified-crypto": "0.3.0",
         "@snapshot-labs/keycard": "^0.5.1",
         "@snapshot-labs/snapshot-metrics": "^1.4.3",
         "@snapshot-labs/snapshot-sentry": "^3.0.1",
@@ -282,7 +282,7 @@
         "@ethersproject/strings": "^5.7.0",
         "@ethersproject/wallet": "^5.6.2",
         "@shutter-network/shutter-crypto": "^1.0.0",
-        "@shutter-network/urban-verified-crypto": "0.2.0",
+        "@shutter-network/urban-verified-crypto": "0.3.0",
         "@snapshot-labs/pineapple": "^1.2.1",
         "@snapshot-labs/snapshot-metrics": "^1.4.2",
         "@snapshot-labs/snapshot-sentry": "^3.0.1",
@@ -363,7 +363,7 @@
         "@headlessui-float/vue": "^0.15.0",
         "@headlessui/vue": "^1.7.23",
         "@reown/walletkit": "^1.2.11",
-        "@shutter-network/urban-verified-crypto": "0.2.0",
+        "@shutter-network/urban-verified-crypto": "0.3.0",
         "@snapshot-labs/highlight": "^0.1.0-beta.2",
         "@snapshot-labs/lock": "0.3.2",
         "@snapshot-labs/pineapple": "^1.2.1",
@@ -485,7 +485,7 @@
       "name": "@snapshot-labs/geg-parity",
       "version": "0.1.0",
       "dependencies": {
-        "@shutter-network/urban-verified-crypto": "0.2.0",
+        "@shutter-network/urban-verified-crypto": "0.3.0",
       },
       "devDependencies": {
         "@types/jest": "^29.5.14",
@@ -1733,7 +1733,7 @@
 
     "@shutter-network/shutter-crypto": ["@shutter-network/shutter-crypto@1.0.1", "", { "dependencies": { "browser-or-node": "^2.0.0" } }, "sha512-bA8uFUkjBaec0ui8za7cEEvspcUTi5DdsO/U8mq2MkgdVu+JRoNuQOhS0hVbh77FXOhXVIZXNf6iHxRIk/IjJQ=="],
 
-    "@shutter-network/urban-verified-crypto": ["@shutter-network/urban-verified-crypto@0.2.0", "", { "dependencies": { "browser-or-node": "^3.0.0", "buffer": "^6.0.3", "viem": "^2.23.2" } }, "sha512-4UCCrPtKJM6c0b7qdinHqLdYhidGYlkF6YQXInJ6icHqpWBLCIyA7YbuEog+NoCKkr1Hqa3xXRZYUqu11m7uCA=="],
+    "@shutter-network/urban-verified-crypto": ["@shutter-network/urban-verified-crypto@0.3.0", "", { "dependencies": { "browser-or-node": "^3.0.0", "buffer": "^6.0.3", "viem": "^2.23.2" } }, "sha512-9Mr45DXjQwbnzY1KLYqE5fK2tU+eemHpQp9zgLFgEHJ7v+xu83LGf2e2oXLN1jqSssjfHcdXhKywcrVnRd+s2Q=="],
 
     "@sinclair/typebox": ["@sinclair/typebox@0.27.10", "", {}, "sha512-MTBk/3jGLNB2tVxv6uLlFh1iu64iYOQ2PbdOSK3NW8JZsmlaOh2q6sdtKowBhfw8QFLmYNzTW4/oK4uATIi6ZA=="],
 

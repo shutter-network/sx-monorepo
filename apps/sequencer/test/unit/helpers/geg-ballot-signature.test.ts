@@ -3,7 +3,7 @@
  *
  * The parity vectors prove the *message* matches geg's Python. This proves the
  * two halves we own actually meet: a signature produced the way the UI produces
- * one is accepted by `verifyBallotBinding`, and the substitution it exists to
+ * one is accepted by `verifyBallotSignature`, and the substitution it exists to
  * stop is refused.
  */
 
@@ -22,10 +22,7 @@ import {
   mintAttestation,
   resetIssuer
 } from '../../../src/helpers/gegAttestation';
-import {
-  bindingMessage,
-  verifyBallotBinding
-} from '../../../src/helpers/gegBinding';
+import { verifyBallotSignature } from '../../../src/helpers/gegBinding';
 
 const ID = `0x${'f2'.repeat(32)}`;
 const BUDGET = 3;
@@ -42,22 +39,6 @@ async function castBallot(opts: {
   const vkHex = toHex(vk.toBytes());
   const mpkKey = schnorrKeygen();
   const mpk = G2Point.generator();
-
-  const built = buildBallot({
-    mpk,
-    electionId: Buffer.from(ID.slice(2), 'hex'),
-    pseudonym: Buffer.from(opts.pseudonym.slice(2), 'hex'),
-    sk,
-    vk,
-    votes: [BigInt(BUDGET), 0n, 0n],
-    params: {
-      numCandidates: NUM_CANDIDATES,
-      budget: BUDGET,
-      mode: 'exact',
-      variant: 'A'
-    },
-    wrAttestation: new Uint8Array(0)
-  });
 
   const weight = BigInt(opts.weight ?? 1);
   const attestation = {
@@ -76,6 +57,32 @@ async function castBallot(opts: {
     })
   };
 
+  const toSdk = (a: typeof attestation) => ({
+    electionId: Buffer.from(a.electionId.slice(2), 'hex'),
+    pseudonym: Buffer.from(a.pseudonym.slice(2), 'hex'),
+    vk: Buffer.from(a.vk.slice(2), 'hex'),
+    weight: BigInt(a.weight),
+    nonce: BigInt(a.nonce),
+    signature: Buffer.from(a.signature.slice(2), 'hex')
+  });
+
+  // The credential must exist before the ballot: the voter's signature covers it.
+  const built = buildBallot({
+    mpk,
+    electionId: Buffer.from(ID.slice(2), 'hex'),
+    pseudonym: Buffer.from(opts.pseudonym.slice(2), 'hex'),
+    sk,
+    vk,
+    votes: [BigInt(BUDGET), 0n, 0n],
+    params: {
+      numCandidates: NUM_CANDIDATES,
+      budget: BUDGET,
+      mode: 'exact',
+      variant: 'A'
+    },
+    attestation: toSdk((opts as any).bindTo ?? attestation)
+  });
+
   const envelope = {
     electionId: ID,
     pseudonym: toHex(built.pseudonym),
@@ -88,32 +95,7 @@ async function castBallot(opts: {
     voterSignature: toHex(built.voterSignature)
   };
 
-  const ballotDigest = keccak256(
-    canonicalBallotMessage({
-      electionId: Buffer.from(ID.slice(2), 'hex'),
-      pseudonym: built.pseudonym,
-      ciphertexts: built.ciphertexts,
-      zkProof: built.zkProof
-    })
-  );
-  const signature = toHex(
-    encodeSchnorr(
-      schnorrSign(
-        sk,
-        vk,
-        bindingMessage({
-          electionId: ID,
-          pseudonym: envelope.pseudonym,
-          vk: vkHex,
-          ballotDigest,
-          attestation
-        })
-      )
-    )
-  );
-
-  void mpkKey;
-  return { envelope, attestation, signature };
+  return { envelope, attestation };
 }
 
 const PSEUDO = `0x${'a1'.repeat(32)}`;
@@ -125,22 +107,23 @@ beforeAll(async () => {
   await eligibilityPublicKey();
 }, 60_000);
 
-describe('verifyBallotBinding', () => {
-  it('accepts a binding signed the way the browser signs it', async () => {
+describe('verifyBallotSignature', () => {
+  it('accepts a ballot signed the way the browser signs it', async () => {
     const b = await castBallot({ pseudonym: PSEUDO, nonce: 1 });
-    expect(await verifyBallotBinding(b)).toBe(true);
+    expect(await verifyBallotSignature(b)).toBe(true);
   }, 60_000);
 
-  // The substitution the binding exists to stop, at the sx layer: a credential
-  // lifted from the voter's own later ballot onto their earlier one.
+  // The substitution this check exists to stop, at the sx layer: a credential
+  // lifted from the voter's own later ballot onto their earlier one. Under v1 a
+  // separate binding signature caught this; now the ballot's own signature does,
+  // because the credential is inside what it covers.
   it("refuses a credential moved from the voter's other ballot", async () => {
     const first = await castBallot({ pseudonym: PSEUDO, nonce: 1 });
     const second = await castBallot({ pseudonym: PSEUDO, nonce: 2 });
     expect(
-      await verifyBallotBinding({
+      await verifyBallotSignature({
         envelope: first.envelope,
-        attestation: second.attestation,
-        signature: first.signature
+        attestation: second.attestation
       })
     ).toBe(false);
   }, 60_000);
@@ -148,7 +131,7 @@ describe('verifyBallotBinding', () => {
   it('refuses a weight the voter did not sign', async () => {
     const b = await castBallot({ pseudonym: PSEUDO, nonce: 1, weight: 5 });
     expect(
-      await verifyBallotBinding({
+      await verifyBallotSignature({
         ...b,
         attestation: { ...b.attestation, weight: 50 }
       })
@@ -158,7 +141,7 @@ describe('verifyBallotBinding', () => {
   it('refuses a nonce the voter did not sign', async () => {
     const b = await castBallot({ pseudonym: PSEUDO, nonce: 1 });
     expect(
-      await verifyBallotBinding({
+      await verifyBallotSignature({
         ...b,
         attestation: { ...b.attestation, nonce: 99 }
       })
@@ -170,7 +153,7 @@ describe('verifyBallotBinding', () => {
     const ciphertexts = [...b.envelope.ciphertexts];
     ciphertexts[0] = { ...ciphertexts[0], c1: `0x${'99'.repeat(96)}` };
     expect(
-      await verifyBallotBinding({
+      await verifyBallotSignature({
         ...b,
         envelope: { ...b.envelope, ciphertexts }
       })
@@ -186,7 +169,13 @@ describe('verifyBallotBinding', () => {
     'returns false rather than throwing on a %s signature',
     async (_l, sig) => {
       const b = await castBallot({ pseudonym: PSEUDO, nonce: 1 });
-      expect(await verifyBallotBinding({ ...b, signature: sig })).toBe(false);
+      // The signature now lives on the envelope, not beside it.
+      expect(
+        await verifyBallotSignature({
+          ...b,
+          envelope: { ...b.envelope, voterSignature: sig }
+        })
+      ).toBe(false);
     },
     60_000
   );

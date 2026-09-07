@@ -344,12 +344,10 @@ router.get('/proposal/:id/te_geg_ballots', async (req, res) => {
       }
 
       const credential = envelope.attestation;
-      const voterBinding = envelope.voterAttestationSignature;
       const missing = [
         !credential?.signature && 'credential',
         !Number.isInteger(credential?.weight) && 'weight',
-        !Number.isInteger(credential?.nonce) && 'nonce',
-        typeof voterBinding !== 'string' && "voter's binding"
+        !Number.isInteger(credential?.nonce) && 'nonce'
       ].filter(Boolean);
       if (missing.length) {
         log.error(
@@ -377,9 +375,9 @@ router.get('/proposal/:id/te_geg_ballots', async (req, res) => {
           ciphertexts: envelope.ciphertexts,
           zkProof: envelope.zkProof,
           voterSignature: envelope.voterSignature,
-          // Emitted as the voter signed it. `scheme` is theirs too rather than a
-          // constant here, so a LEGACY credential stays legible to the committee
-          // instead of being relabelled on the way through.
+          // Emitted as the voter signed it — literally, since `voterSignature`
+          // above covers these bytes. `scheme` is carried through rather than
+          // asserted here, so the committee sees what the voter committed to.
           attestation: {
             scheme: credential.scheme ?? 'ATTESTATION_V1',
             electionId: credential.electionId,
@@ -388,11 +386,7 @@ router.get('/proposal/:id/te_geg_ballots', async (req, res) => {
             weight: credential.weight,
             nonce: credential.nonce,
             signature: credential.signature
-          },
-          // The voter's binding of this ballot to that credential. The committee
-          // refuses a ballot without it: the credential alone proves the weight
-          // was authorised, not that this voter cast this ballot with it.
-          voterAttestationSignature: voterBinding
+          }
         },
         sequenceNumber: seq,
         submittedAt: Number(row.created)

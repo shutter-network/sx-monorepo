@@ -102,8 +102,7 @@ function envelope(i: number) {
       weight: i + 1,
       nonce: i + 1,
       signature: `0x${String(i).padStart(2, '0').repeat(80)}`
-    },
-    voterAttestationSignature: `0x${'be'.repeat(80)}`
+    }
   };
 }
 
@@ -173,8 +172,6 @@ async function seed(): Promise<void> {
       vp_state: 'final',
       vp_value: 0,
       cb: 0
-      // The voter's binding of this ballot to that credential. The feed refuses a
-      // ballot without it, because the credential alone does not show the voter
     });
   }
 }

@@ -40,7 +40,6 @@ export interface TeBallotEnvelope {
   ciphertexts: Array<{ c1: string; c2: string }>; // each 0x-hex 96-byte compressed G2
   zkProof: string; // 0x-hex output of encodeBallotValidityProof
   voterSignature: string; // 0x-hex 80-byte encoded Schnorr sig
-  wrAttestation?: string; // 0x-hex; not used by the snapshot ingest path
 }
 
 function hexToBytes(hex: string, label: string): Uint8Array {
@@ -74,7 +73,9 @@ export interface TeProposalView {
 export async function verifyTeBallot(
   proposal: TeProposalView,
   voter: string,
-  choiceJsonString: string
+  choiceJsonString: string,
+  /** Compressed G1 of the eligibility issuer — the SDK verifies the credential now. */
+  eligibilityKey: string
 ): Promise<VerifyResult> {
   if (!proposal.te_config) {
     return { ok: false, reason: 'proposal_missing_te_config' };
@@ -92,13 +93,12 @@ export async function verifyTeBallot(
     return { ok: false, reason: 'choice_not_json_envelope' };
   }
 
-  if (
-    envelope.wrAttestation !== undefined &&
-    envelope.wrAttestation !== null &&
-    envelope.wrAttestation !== '0x' &&
-    envelope.wrAttestation !== ''
-  ) {
-    return { ok: false, reason: 'wr_attestation_not_supported' };
+  // The credential is required, and structured: it is part of what the voter signed,
+  // so a ballot without one cannot have a valid signature either. Refusing here names
+  // the cause instead of surfacing it as a signature failure.
+  const att = (envelope as any).attestation;
+  if (!att || typeof att !== 'object') {
+    return { ok: false, reason: 'ballot_carries_no_credential' };
   }
 
   // Pseudonym must equal keccak256(voter || proposalId). A mismatch is
@@ -128,7 +128,14 @@ export async function verifyTeBallot(
       ),
       zkProof: hexToBytes(envelope.zkProof, 'zkProof'),
       voterSignature: hexToBytes(envelope.voterSignature, 'voterSignature'),
-      wrAttestation: hexToBytes(envelope.wrAttestation || '0x', 'wrAttestation')
+      attestation: {
+        electionId: hexToBytes(att.electionId, 'attestation.electionId'),
+        pseudonym: hexToBytes(att.pseudonym, 'attestation.pseudonym'),
+        vk: hexToBytes(att.vk, 'attestation.vk'),
+        weight: BigInt(att.weight),
+        nonce: BigInt(att.nonce),
+        signature: hexToBytes(att.signature, 'attestation.signature')
+      }
     };
     await ensureCurvesInit();
     mpk = G2Point.fromBytes(hexToBytes(proposal.te_mpk, 'te_mpk'));
@@ -136,12 +143,16 @@ export async function verifyTeBallot(
     return { ok: false, reason: `bad_envelope: ${err?.message || err}` };
   }
 
-  // The WR slot is a constant ``() => true`` because the field it verifies is
-  // required to be empty above. It can't carry the structured attestation because
-  // the SDK's field is opaque bytes shaped for the legacy weightless scheme, no
-  // room for weight or nonce. This is the end state, not a stub.
+  // The SDK verifies the credential itself now, against the issuer's key — the
+  // caller-supplied predicate is gone, and with it the `() => true` that stood in
+  // for it while the slot was opaque bytes with no room for weight or nonce.
   try {
-    return verifyBallot(inputs, proposal.te_config, mpk, () => true);
+    return verifyBallot(
+      inputs,
+      proposal.te_config,
+      mpk,
+      hexToBytes(eligibilityKey, 'eligibilityKey')
+    );
   } finally {
     mpk.destroyWasm();
   }

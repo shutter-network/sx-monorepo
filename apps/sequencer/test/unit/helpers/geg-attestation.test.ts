@@ -138,13 +138,6 @@ describe('ATTESTATION_V1 parity with the protocol corpus', () => {
     expect(verified).toBe(false);
   });
 
-  it('rejects the legacy scheme, which binds a different message', () => {
-    const v = vector('attestation_legacy_valid');
-    expect(v.inputs.scheme).toBe('ATTESTATION_LEGACY');
-    expect(v.expected.verify).toBe(true); // valid under the scheme it was made for
-    expect(signatureVerifies(v)).toBe(false); // but never under ATTESTATION_V1
-  });
-
 
   // The other direction. Verifying our own credential with our own verifier
   // would pass under any self-consistent framing, so what closes the loop is

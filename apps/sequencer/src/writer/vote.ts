@@ -5,7 +5,8 @@ import {
   GegAttestationError,
   verifyAttestation
 } from '../helpers/gegAttestation';
-import { verifyBallotBinding } from '../helpers/gegBinding';
+import { verifyBallotSignature } from '../helpers/gegBinding';
+import { getEligibilityKey } from '../helpers/teEligibility';
 import log from '../helpers/log';
 import db from '../helpers/mysql';
 import {
@@ -80,7 +81,11 @@ export async function verify(body): Promise<any> {
     const result = await verifyTeBallot(
       proposal,
       body.address.toLowerCase(),
-      choiceJson
+      choiceJson,
+      // The credential is inside the ballot and covered by its signature, so the
+      // issuer's key is needed to check it here rather than a caller-supplied
+      // predicate.
+      await getEligibilityKey()
     );
     if (!result.ok) {
       return Promise.reject(`invalid private ballot: ${result.reason}`);
@@ -199,7 +204,6 @@ export interface TeAttestation {
   weight: number;
   nonce: number;
   signature: string;
-  bindingSignature: string;
 }
 
 // Exported for tests: the structural checks here run before any crypto, so
@@ -222,10 +226,9 @@ export async function verifyBallotCredential(
   }
   const envelope = jsonParse(JSON.stringify(msg.payload.choice), null);
   const credential = envelope?.attestation;
-  const bindingSignature = envelope?.voterAttestationSignature;
-  if (!credential || typeof bindingSignature !== 'string') {
+  if (!credential) {
     throw new GegAttestationError(
-      'ballot carries no credential and binding; request one from /te_attestation first'
+      'ballot carries no credential; request one from /te_attestation first'
     );
   }
 
@@ -267,27 +270,21 @@ export async function verifyBallotCredential(
   });
   if (!ok) throw new GegAttestationError('credential signature is not valid');
 
-  // The voter's signature over the ballot *and* the credential. This is what
-  // stops a credential being moved onto a different ballot of the same voter,
-  // and what makes the weight something the voter endorsed rather than
-  // something we asserted.
-  if (
-    !(await verifyBallotBinding({
-      envelope,
-      attestation: credential,
-      signature: bindingSignature
-    }))
-  ) {
+  // The voter's signature over the ballot — which since the v2 ballot message
+  // covers the credential. This is what stops a credential being moved onto a
+  // different ballot of the same voter, and what makes the weight something the
+  // voter endorsed rather than something we asserted. It used to take a second
+  // signature of its own; the ballot's own signature does it now.
+  if (!(await verifyBallotSignature({ envelope, attestation: credential }))) {
     throw new GegAttestationError(
-      'ballot is not bound to this credential by the voter'
+      'ballot signature does not cover this credential'
     );
   }
 
   return {
     weight: Number(weight),
     nonce: Number(nonce),
-    signature: credential.signature,
-    bindingSignature
+    signature: credential.signature
   };
 }
 
@@ -322,7 +319,7 @@ export async function action(body, ipfs, receipt, id, context): Promise<void> {
     vp_state: vpState,
     vp_value: 0,
     cb: CB.PENDING_COMPUTE
-    // No credential columns. The credential and the voter's binding live inside
+    // No credential columns. The credential lives inside
     // `choice`, which is the artifact the EIP-712 signature covers, and the hub's
     // feed serves them from there. A scalar copy beside it would be a second,
     // unsigned source for bytes the committee verifies a signature over.

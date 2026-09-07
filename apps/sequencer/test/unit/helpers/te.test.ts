@@ -5,6 +5,9 @@ import {
   verifyTeBallot
 } from '../../../src/helpers/te';
 
+/** Any well-formed issuer key; these cases fail before it is used. */
+const ELIG_KEY = `0x${'ab'.repeat(48)}`;
+
 describe('helpers/te', () => {
   describe('expectedPseudonym', () => {
     test('is deterministic for fixed inputs', () => {
@@ -49,7 +52,8 @@ describe('helpers/te', () => {
       const r = await verifyTeBallot(
         { ...proposal, te_config: null },
         '0x1111111111111111111111111111111111111111',
-        '{}'
+        '{}',
+        ELIG_KEY
       );
       expect(r).toEqual({ ok: false, reason: 'proposal_missing_te_config' });
     });
@@ -58,7 +62,8 @@ describe('helpers/te', () => {
       const r = await verifyTeBallot(
         { ...proposal, te_mpk: null },
         '0x1111111111111111111111111111111111111111',
-        '{}'
+        '{}',
+        ELIG_KEY
       );
       expect(r).toEqual({ ok: false, reason: 'proposal_dkg_not_finalized' });
     });
@@ -67,40 +72,43 @@ describe('helpers/te', () => {
       const r = await verifyTeBallot(
         proposal,
         '0x1111111111111111111111111111111111111111',
-        'not json'
+        'not json',
+        ELIG_KEY
       );
       expect(r).toEqual({ ok: false, reason: 'choice_not_json_envelope' });
     });
 
-    test.each([[`0x${'ab'.repeat(80)}`], ['0x00'], ['garbage']])(
-      'rejects a non-empty wrAttestation (%s)',
-      async wrAttestation => {
+    // Replaces the old `wrAttestation` guard. That field was an empty placeholder
+    // and the check refused a populated one; the credential now lives in the ballot
+    // and is required. Named explicitly because a missing credential would otherwise
+    // surface as a signature failure, which points at the wrong thing.
+    test.each([[undefined], [null], ['not an object']])(
+      'rejects a ballot carrying no credential (%s)',
+      async attestation => {
         const r = await verifyTeBallot(
           proposal,
           '0x1111111111111111111111111111111111111111',
-          JSON.stringify({ pseudonym: `0x${'00'.repeat(32)}`, wrAttestation })
+          JSON.stringify({ pseudonym: `0x${'00'.repeat(32)}`, attestation }),
+          ELIG_KEY
         );
-        expect(r).toEqual({
-          ok: false,
-          reason: 'wr_attestation_not_supported'
-        });
+        expect(r).toEqual({ ok: false, reason: 'ballot_carries_no_credential' });
       }
     );
 
-    // Absent and explicitly-empty are the two shapes a conforming client sends;
-    // neither may trip the check. They fall through to the pseudonym check,
-    // which is the next gate — proving the wrAttestation guard let them past.
-    test.each([[undefined], [null], ['0x'], ['']])(
-      'accepts an empty wrAttestation (%s)',
-      async wrAttestation => {
-        const r = await verifyTeBallot(
-          proposal,
-          '0x1111111111111111111111111111111111111111',
-          JSON.stringify({ pseudonym: `0x${'00'.repeat(32)}`, wrAttestation })
-        );
-        expect(r).toEqual({ ok: false, reason: 'pseudonym_mismatch' });
-      }
-    );
+    // A credential present but the pseudonym wrong: falls through to the next gate,
+    // proving the credential guard let it past.
+    test('a present credential falls through to the pseudonym check', async () => {
+      const r = await verifyTeBallot(
+        proposal,
+        '0x1111111111111111111111111111111111111111',
+        JSON.stringify({
+          pseudonym: `0x${'00'.repeat(32)}`,
+          attestation: { weight: 1, nonce: 1 }
+        }),
+        ELIG_KEY
+      );
+      expect(r).toEqual({ ok: false, reason: 'pseudonym_mismatch' });
+    });
 
     test('rejects pseudonym mismatch', async () => {
       const envelope = {
@@ -111,12 +119,13 @@ describe('helpers/te', () => {
         ciphertexts: [],
         zkProof: '0x',
         voterSignature: `0x${'00'.repeat(80)}`,
-        wrAttestation: '0x'
+        attestation: { weight: 1, nonce: 1 }
       };
       const r = await verifyTeBallot(
         proposal,
         '0x1111111111111111111111111111111111111111',
-        JSON.stringify(envelope)
+        JSON.stringify(envelope),
+        ELIG_KEY
       );
       expect(r).toEqual({ ok: false, reason: 'pseudonym_mismatch' });
     });

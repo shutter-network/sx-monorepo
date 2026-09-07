@@ -151,6 +151,18 @@ describe('gate 0 — geg canonical vectors verify under the pinned build', () =>
     const cts = vec.outputs.ciphertexts.map(
       ([c1, c2]) => [hex(c1, 'c1'), hex(c2, 'c2')] as [Uint8Array, Uint8Array]
     );
+    /** The credential pinned in the vector, which the preimage now covers. */
+    const pinnedAttestation = () => {
+      const a = (vec.inputs as any).attestation;
+      return {
+        electionId: hex(a.electionId, 'attestation.electionId'),
+        pseudonym: hex(a.pseudonym, 'attestation.pseudonym'),
+        vk: hex(a.vk, 'attestation.vk'),
+        weight: BigInt(a.weight),
+        nonce: BigInt(a.nonce),
+        signature: hex(a.signature, 'attestation.signature')
+      };
+    };
 
     // The canonical Schnorr preimage is the single most drift-prone byte string
     // in the protocol: every ballot signature depends on its exact layout, and a
@@ -160,7 +172,8 @@ describe('gate 0 — geg canonical vectors verify under the pinned build', () =>
         electionId: hex(vec.inputs.electionId, 'electionId'),
         pseudonym: hex(vec.inputs.pseudonym, 'pseudonym'),
         ciphertexts: cts,
-        zkProof: hex(vec.outputs.zkProof, 'zkProof')
+        zkProof: hex(vec.outputs.zkProof, 'zkProof'),
+        attestation: pinnedAttestation()
       });
       expect(bytesToHex(preimage)).toBe(
         bytesToHex(hex(vec.outputs.canonical_preimage, 'canonical_preimage'))
@@ -178,11 +191,11 @@ describe('gate 0 — geg canonical vectors verify under the pinned build', () =>
             ciphertexts: cts,
             zkProof: hex(vec.outputs.zkProof, 'zkProof'),
             voterSignature: hex(vec.outputs.voterSignature, 'voterSignature'),
-            wrAttestation: new Uint8Array(0)
+            attestation: pinnedAttestation()
           },
           vec.inputs.params,
           mpk,
-          () => true
+          hex((vec.inputs as any).eligibilityKey, 'eligibilityKey')
         );
         expect(r.ok).toBe(vec.expected.verifyBallot);
       } finally {
@@ -219,11 +232,21 @@ describe('gate 0 — geg canonical vectors verify under the pinned build', () =>
               ),
               zkProof: hex(b.zkProof, 'zkProof'),
               voterSignature: hex(b.voterSignature, 'voterSignature'),
-              wrAttestation: new Uint8Array(0)
+              attestation: {
+                electionId: hex(
+                  b.attestation.electionId,
+                  'attestation.electionId'
+                ),
+                pseudonym: hex(b.attestation.pseudonym, 'attestation.pseudonym'),
+                vk: hex(b.attestation.vk, 'attestation.vk'),
+                weight: BigInt(b.attestation.weight),
+                nonce: BigInt(b.attestation.nonce),
+                signature: hex(b.attestation.signature, 'attestation.signature')
+              }
             },
             config,
             mpk,
-            () => true
+            hex(config.eligibilityKey, 'config.eligibilityKey')
           );
           expect({ seq, ok: r.ok }).toEqual({ seq, ok: expectValid });
         });

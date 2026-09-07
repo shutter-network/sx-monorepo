@@ -8,7 +8,6 @@ import {
   schnorrSign
 } from '@shutter-network/urban-verified-crypto';
 import { mintAttestation } from '../../src/helpers/gegAttestation';
-import { bindingMessage } from '../../src/helpers/gegBinding';
 
 const toHex = (b: Uint8Array) => `0x${Buffer.from(b).toString('hex')}`;
 
@@ -32,24 +31,6 @@ export async function castBallot(opts: CastBallotArgs) {
   const vkHex = toHex(vk.toBytes());
   const mpk = G2Point.generator();
 
-  const built = buildBallot({
-    mpk,
-    electionId: Buffer.from(ID.slice(2), 'hex'),
-    pseudonym: Buffer.from(opts.pseudonym.slice(2), 'hex'),
-    sk,
-    vk,
-    votes: Array.from({ length: NUM_CANDIDATES }, (_, i) =>
-      i === 0 ? BigInt(BUDGET) : 0n
-    ),
-    params: {
-      numCandidates: NUM_CANDIDATES,
-      budget: BUDGET,
-      mode: 'exact',
-      variant: 'A'
-    },
-    wrAttestation: new Uint8Array(0)
-  });
-
   const weight = BigInt(opts.weight ?? 1);
   const attestation = {
     scheme: 'ATTESTATION_V1',
@@ -67,6 +48,37 @@ export async function castBallot(opts: CastBallotArgs) {
     })
   };
 
+  const toSdk = (a: typeof attestation) => ({
+    electionId: Buffer.from(a.electionId.slice(2), 'hex'),
+    pseudonym: Buffer.from(a.pseudonym.slice(2), 'hex'),
+    vk: Buffer.from(a.vk.slice(2), 'hex'),
+    weight: BigInt(a.weight),
+    nonce: BigInt(a.nonce),
+    signature: Buffer.from(a.signature.slice(2), 'hex')
+  });
+
+  // `bindTo` signs over a credential other than the one shipped — the forged
+  // pairing, built the way an attacker would rather than by corrupting bytes after
+  // the fact. Under v1 that needed a separate binding signature; now it just means
+  // the ballot was signed over a different credential than it carries.
+  const built = buildBallot({
+    mpk,
+    electionId: Buffer.from(ID.slice(2), 'hex'),
+    pseudonym: Buffer.from(opts.pseudonym.slice(2), 'hex'),
+    sk,
+    vk,
+    votes: Array.from({ length: NUM_CANDIDATES }, (_, i) =>
+      i === 0 ? BigInt(BUDGET) : 0n
+    ),
+    params: {
+      numCandidates: NUM_CANDIDATES,
+      budget: BUDGET,
+      mode: 'exact',
+      variant: 'A'
+    },
+    attestation: toSdk((opts.bindTo as any) ?? attestation)
+  });
+
   const envelope = {
     electionId: ID,
     pseudonym: toHex(built.pseudonym),
@@ -79,32 +91,5 @@ export async function castBallot(opts: CastBallotArgs) {
     voterSignature: toHex(built.voterSignature)
   };
 
-  const ballotDigest = keccak256(
-    canonicalBallotMessage({
-      electionId: Buffer.from(ID.slice(2), 'hex'),
-      pseudonym: built.pseudonym,
-      ciphertexts: built.ciphertexts,
-      zkProof: built.zkProof
-    })
-  );
-  const signature = toHex(
-    encodeSchnorr(
-      schnorrSign(
-        sk,
-        vk,
-        bindingMessage({
-          electionId: ID,
-          pseudonym: envelope.pseudonym,
-          vk: vkHex,
-          ballotDigest,
-          // `bindTo` signs over a credential other than the one shipped — the
-          // forged pairing, built the way an attacker would build it rather than
-          // by corrupting bytes after the fact.
-          attestation: opts.bindTo ?? attestation
-        })
-      )
-    )
-  );
-
-  return { envelope, attestation, signature };
+  return { envelope, attestation };
 }

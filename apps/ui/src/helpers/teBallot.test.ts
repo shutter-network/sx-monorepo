@@ -5,13 +5,13 @@ import {
   buildTeWeightedBallotEnvelope,
   pseudonymFor
 } from './teBallot';
-import * as TeBinding from './teBinding';
+import * as TeCredential from './teCredential';
 
-// Only the network call is stubbed. `bindingMessage` and the Schnorr signing
-// stay real, so these envelopes carry a genuine binding over a genuine ballot —
-// which is what makes the shape assertions below worth anything.
-vi.mock('./teBinding', async importActual => {
-  const actual = (await importActual()) as typeof TeBinding;
+// Only the network call is stubbed. The ballot build and its Schnorr signing stay
+// real, so these envelopes carry a genuine signature over a genuine ballot *and*
+// credential — which is what makes the assertions below worth anything.
+vi.mock('./teCredential', async importActual => {
+  const actual = (await importActual()) as typeof TeCredential;
   return {
     ...actual,
     requestBallotCredential: vi.fn(async ({ proposalId, vk }) => ({
@@ -300,7 +300,6 @@ describe('buildTeWeightedBallotEnvelope — envelope shape (real crypto)', () =>
       expect(envelope.vk).toMatch(/^0x[0-9a-f]+$/i);
       expect(envelope.zkProof).toMatch(/^0x[0-9a-f]+$/i);
       expect(envelope.voterSignature).toMatch(/^0x[0-9a-f]+$/i);
-      expect(envelope.wrAttestation).toBe('0x');
       expect(envelope.ciphertexts).toHaveLength(CONFIG.numCandidates);
       for (const ct of envelope.ciphertexts) {
         expect(ct.c1).toMatch(/^0x[0-9a-f]+$/i);

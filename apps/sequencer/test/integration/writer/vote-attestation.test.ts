@@ -20,7 +20,7 @@ import {
   mintAttestation,
   resetIssuer
 } from '../../../src/helpers/gegAttestation';
-import { verifyBallotBinding } from '../../../src/helpers/gegBinding';
+import { verifyBallotSignature } from '../../../src/helpers/gegBinding';
 import db, { sequencerDB } from '../../../src/helpers/mysql';
 import { pseudonymFor } from '../../../src/helpers/teAttestationIssuer';
 import * as scores from '../../../src/scores';
@@ -198,8 +198,7 @@ describe('vote: the credential is written with the vote', () => {
         weight: att.weight,
         nonce: att.nonce,
         signature: att.signature
-      },
-      voterAttestationSignature: `0x${'be'.repeat(80)}`
+      }
     };
   }
 
@@ -222,9 +221,8 @@ describe('vote: the credential is written with the vote', () => {
     // it. A column copy would be a second source for bytes the committee checks
     // a signature over.
     expect(row.credential).toEqual(carried.attestation);
-    expect(row.choice.voterAttestationSignature).toBe(
-      carried.voterAttestationSignature
-    );
+    // And in the signed blob itself, which is what the committee reads.
+    expect(row.choice.attestation).toEqual(carried.attestation);
 
     // And the stored bytes are a credential the committee would accept, not
     // merely a string that round-tripped through the database.
@@ -328,7 +326,7 @@ describe('vote: the credential is written with the vote', () => {
     // Nothing credential-shaped on a public ballot: the envelope carries none,
     // and there are no columns left that could hold one.
     expect(row.credential).toBeUndefined();
-    expect(row.choice.voterAttestationSignature).toBeUndefined();
+    expect(row.choice.attestation).toBeUndefined();
   });
 });
 
@@ -347,7 +345,7 @@ describe('vote: the credential is written with the vote', () => {
  * The clamp, the dust floor and the nonce moved to `/te_attestation`, where they
  * are applied *before* the voter signs (see `teAttestationIssuer.test.ts`). What
  * is left here is the ingest contract: a ballot is accepted only when the
- * issuer's signature authorises the weight **and** the voter's binding ties that
+ * issuer's signature authorises the weight **and** the voter's ballot signature ties that
  * credential to this ballot. Either alone leaves the pairing forgeable by
  * whoever assembles it.
  */
@@ -372,42 +370,40 @@ describe('vote verify(): the credential is checked, not minted', () => {
     });
   }
 
-  it('accepts a ballot bound by the voter to its credential', async () => {
+  it('accepts a ballot whose signature covers its credential', async () => {
     const b = await ballotFor();
     await expect(
-      verifyBallotBinding({
+      verifyBallotSignature({
         envelope: b.envelope,
-        attestation: b.attestation,
-        signature: b.signature
+        attestation: b.attestation
       })
     ).resolves.toBe(true);
   }, 60_000);
 
-  // The substitution the binding exists to stop: a credential lifted from the
+  // The substitution this check exists to stop: a credential lifted from the
   // voter's own later ballot onto their earlier one, which is how an assembler
-  // would choose which of their ballots the committee counts.
+  // would choose which of their ballots the committee counts. Caught by the
+  // ballot's own signature now that the credential is inside what it covers.
   it("refuses a credential moved from the voter's other ballot", async () => {
     const first = await ballotFor({ nonce: 1 });
     const second = await ballotFor({ nonce: 2 });
     await expect(
-      verifyBallotBinding({
+      verifyBallotSignature({
         envelope: first.envelope,
-        attestation: second.attestation,
-        signature: first.signature
+        attestation: second.attestation
       })
     ).resolves.toBe(false);
   }, 60_000);
 
-  // A binding signed over a credential the ballot does not ship with — the
-  // forgery built the way an attacker would build it, not by corrupting bytes.
-  it('refuses a binding signed over a different credential', async () => {
+  // A ballot signed over a credential it does not ship with — the forgery built
+  // the way an attacker would build it, not by corrupting bytes afterwards.
+  it('refuses a ballot signed over a different credential', async () => {
     const other = await ballotFor({ nonce: 9, weight: 9 });
     const b = await ballotFor({ bindTo: other.attestation });
     await expect(
-      verifyBallotBinding({
+      verifyBallotSignature({
         envelope: b.envelope,
-        attestation: b.attestation,
-        signature: b.signature
+        attestation: b.attestation
       })
     ).resolves.toBe(false);
   }, 60_000);
@@ -415,10 +411,9 @@ describe('vote verify(): the credential is checked, not minted', () => {
   it('refuses a weight the voter never signed', async () => {
     const b = await ballotFor();
     await expect(
-      verifyBallotBinding({
+      verifyBallotSignature({
         envelope: b.envelope,
-        attestation: { ...b.attestation, weight: 50 },
-        signature: b.signature
+        attestation: { ...b.attestation, weight: 50 }
       })
     ).resolves.toBe(false);
   }, 60_000);

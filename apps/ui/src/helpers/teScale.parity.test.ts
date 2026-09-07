@@ -18,7 +18,14 @@ import { scaleWeight } from './teVoteWeight';
  * honest committee appearing to have published a false aggregate, with nothing in the
  * error pointing at rounding.
  */
-const vector = JSON.parse(
+
+interface ScaleCase {
+  weight: number;
+  scale: number;
+  scaled: number;
+}
+
+const vector: { cases: ScaleCase[] } = JSON.parse(
   readFileSync(
     join(
       __dirname,
@@ -35,7 +42,7 @@ describe('scaleWeight — geg parity vector', () => {
 
   it.each(vector.cases)(
     'weight $weight at scale $scale counts as $scaled',
-    ({ weight, scale, scaled }: any) => {
+    ({ weight, scale, scaled }) => {
       expect(scaleWeight(weight, scale)).toBe(scaled);
     }
   );

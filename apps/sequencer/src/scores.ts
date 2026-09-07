@@ -251,27 +251,36 @@ export async function updateProposalAndVotes(
 }
 
 /**
- * Threshold-ElGamal tally worker.
+ * Threshold-ElGamal tally mirror.
  *
- * Idempotent. Called by ``updateProposalAndVotes`` once the proposal has
- * closed. Each invocation:
+ * Idempotent. Called by ``updateProposalAndVotes`` once the proposal has closed.
  *
- *   1. Recomputes the vp-weighted homomorphic aggregate from the verified
- *      ballots in the votes table and persists it as ``proposals.te_aggregate``.
- *      Hub serves this JSON to keypers via ``GET /api/proposal/:id/te_aggregate``.
- *   2. Pings every keyper URL so they re-pull the aggregate and submit
- *      shares (no-op for keypers that already submitted: hub side is
- *      ``INSERT IGNORE`` on PK ``(proposal, keyper, candidate)``).
- *   3. Reads back the share rows; if any candidate still has fewer than
- *      ``t+1`` valid shares, returns ``false`` and leaves ``scores_state``
- *      pending — the next scheduler tick will retry.
- *   4. Otherwise calls ``recoverTally`` (Lagrange + BSGS), writes the
- *      integer per-candidate totals into ``proposals.scores`` and marks
- *      the proposal final.
+ * **This does not tally anything.** It publishes, in Snapshot's own columns, a
+ * result the committee established elsewhere:
  *
- * ``scores_by_strategy`` is intentionally empty: per-voter strategy
- * breakdown leaks individual votes through homomorphic isolation, which
- * is the exact privacy property this mode preserves.
+ *   1. The keypers build the weighted aggregate themselves from the ballot feed
+ *      and post it signed to ``POST /api/proposal/:id/te_aggregate``, which the
+ *      hub admits only on a quorum of matching digests (``geg.ts``).
+ *   2. The tally aggregator solves the discrete log — Lagrange over ``t+1``
+ *      DLEQ-verified shares, then BSGS within ``budget × Σ(scaled weights)`` —
+ *      and the result publisher posts the totals to ``POST /te_result``, which
+ *      the hub stores in ``te_results`` behind a signature check.
+ *   3. This function reads that row. No row yet means the committee has not
+ *      finished: return ``false``, leave ``scores_state`` pending, and let the
+ *      next scheduler tick retry.
+ *
+ * So ``recoverTally`` is never called here, and BSGS never runs in this process.
+ * Exactly one party solves the discrete log; everyone downstream — the hub, this
+ * function, and the browser audit in ``ui/helpers/teVerify`` — only *checks* what
+ * that party published, which is the cheaper half of the same guarantee.
+ *
+ * The one piece of arithmetic that is ours is the units: ``te_results`` counts in
+ * scaled units multiplied by the budget, ``proposals.scores`` in token units,
+ * hence ``total × scale / budget`` below.
+ *
+ * ``scores_by_strategy`` is intentionally empty: per-voter strategy breakdown
+ * leaks individual votes through homomorphic isolation, which is the exact
+ * privacy property this mode preserves.
  */
 async function runShutterElgamalTally(proposal: any): Promise<boolean> {
   const rows = await db.queryAsync(
@@ -294,8 +303,6 @@ async function runShutterElgamalTally(proposal: any): Promise<boolean> {
   // that is accepted: `scores` is a float column and the published figure is a
   // presentation of the tally, not the artifact anyone verifies. The exact
   // integers stay in te_results for an auditor.
-  // Totals are in the units the committee counted in, so a scaled election has to
-  // be multiplied back out to token units before it is published as a score.
   const scale = Number(proposal.te_config?.scale ?? 1);
   const numericScores = totals.map(t => (Number(t) * scale) / budget);
   const total = numericScores.reduce((a, b) => a + b, 0);
