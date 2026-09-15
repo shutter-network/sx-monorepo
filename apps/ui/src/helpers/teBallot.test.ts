@@ -281,95 +281,64 @@ describe('buildTeWeightedBallotEnvelope — envelope shape (real crypto)', () =>
     budget: 100,
     numCandidates: 3
   };
+  const PROPOSAL_ID = `0x${'22'.repeat(32)}`;
 
-  it(
-    'returns a valid envelope with all required fields',
-    async () => {
-      const envelope = await buildTeWeightedBallotEnvelope({
-        sequencerUrl: 'http://sequencer.invalid/api',
-        space: 'test.eth',
-        voter: `0x${'11'.repeat(20)}`,
-        proposalId: `0x${'22'.repeat(32)}`,
-        mpk: VALID_MPK,
-        config: CONFIG,
-        choice: { '1': 60, '2': 40 }
-      });
+  // Two envelopes, built once, covering every assertion below.
+  //
+  // Each build is a real BLST ballot — fresh keys, three ciphertexts and the
+  // range/budget proof over all of them — which costs 10-20s. Building one per
+  // test made this file take 65s of a 69s CI run, monopolising its vitest worker
+  // long enough to starve the reporter's `onTaskUpdate` RPC: every test passed
+  // and the run still exited 1.
+  //
+  // `split` and `single` differ in their choice split over the same proposal,
+  // which is exactly what the last test needs, so nothing is weakened by sharing
+  // them — the two builds carry four assertions instead of five builds carrying
+  // the same four.
+  let split: Awaited<ReturnType<typeof buildTeWeightedBallotEnvelope>>;
+  let single: typeof split;
 
-      expect(envelope.electionId).toMatch(/^0x[0-9a-f]+$/i);
-      expect(envelope.pseudonym).toMatch(/^0x[0-9a-f]+$/i);
-      expect(envelope.vk).toMatch(/^0x[0-9a-f]+$/i);
-      expect(envelope.zkProof).toMatch(/^0x[0-9a-f]+$/i);
-      expect(envelope.voterSignature).toMatch(/^0x[0-9a-f]+$/i);
-      expect(envelope.ciphertexts).toHaveLength(CONFIG.numCandidates);
-      for (const ct of envelope.ciphertexts) {
-        expect(ct.c1).toMatch(/^0x[0-9a-f]+$/i);
-        expect(ct.c2).toMatch(/^0x[0-9a-f]+$/i);
-      }
-    },
-    CRYPTO_TIMEOUT
-  );
+  beforeAll(async () => {
+    const base = {
+      sequencerUrl: 'http://sequencer.invalid/api',
+      space: 'test.eth',
+      voter: `0x${'11'.repeat(20)}`,
+      proposalId: PROPOSAL_ID,
+      mpk: VALID_MPK,
+      config: CONFIG
+    };
+    split = await buildTeWeightedBallotEnvelope({
+      ...base,
+      choice: { '1': 60, '2': 40 }
+    });
+    single = await buildTeWeightedBallotEnvelope({ ...base, choice: { '1': 1 } });
+  }, CRYPTO_TIMEOUT);
 
-  it(
-    'electionId matches proposalId bytes',
-    async () => {
-      const proposalId = `0x${'22'.repeat(32)}`;
-      const envelope = await buildTeWeightedBallotEnvelope({
-        sequencerUrl: 'http://sequencer.invalid/api',
-        space: 'test.eth',
-        voter: `0x${'11'.repeat(20)}`,
-        proposalId,
-        mpk: VALID_MPK,
-        config: CONFIG,
-        choice: { '1': 100 }
-      });
-      expect(envelope.electionId.toLowerCase()).toBe(proposalId.toLowerCase());
-    },
-    CRYPTO_TIMEOUT
-  );
+  it('returns a valid envelope with all required fields', () => {
+    expect(split.electionId).toMatch(/^0x[0-9a-f]+$/i);
+    expect(split.pseudonym).toMatch(/^0x[0-9a-f]+$/i);
+    expect(split.vk).toMatch(/^0x[0-9a-f]+$/i);
+    expect(split.zkProof).toMatch(/^0x[0-9a-f]+$/i);
+    expect(split.voterSignature).toMatch(/^0x[0-9a-f]+$/i);
+    expect(split.ciphertexts).toHaveLength(CONFIG.numCandidates);
+    for (const ct of split.ciphertexts) {
+      expect(ct.c1).toMatch(/^0x[0-9a-f]+$/i);
+      expect(ct.c2).toMatch(/^0x[0-9a-f]+$/i);
+    }
+  });
 
-  it(
-    'produces numCandidates ciphertexts regardless of how many choices are specified',
-    async () => {
-      // Only candidate 1 has weight; candidates 2 and 3 get 0 — but we still
-      // need a ciphertext for each (the ZK proof covers all candidates).
-      const envelope = await buildTeWeightedBallotEnvelope({
-        sequencerUrl: 'http://sequencer.invalid/api',
-        space: 'test.eth',
-        voter: `0x${'11'.repeat(20)}`,
-        proposalId: `0x${'33'.repeat(32)}`,
-        mpk: VALID_MPK,
-        config: CONFIG,
-        choice: { '1': 1 }
-      });
-      expect(envelope.ciphertexts).toHaveLength(CONFIG.numCandidates);
-    },
-    CRYPTO_TIMEOUT
-  );
+  it('electionId matches proposalId bytes', () => {
+    expect(split.electionId.toLowerCase()).toBe(PROPOSAL_ID.toLowerCase());
+  });
 
-  it(
-    'two votes with different splits produce different ciphertexts',
-    async () => {
-      const base = {
-        voter: `0x${'11'.repeat(20)}`,
-        proposalId: `0x${'44'.repeat(32)}`,
-        mpk: VALID_MPK,
-        config: CONFIG
-      };
-      const a = await buildTeWeightedBallotEnvelope({
-        sequencerUrl: 'http://sequencer.invalid/api',
-        space: 'test.eth',
-        ...base,
-        choice: { '1': 60, '2': 40 }
-      });
-      const b = await buildTeWeightedBallotEnvelope({
-        sequencerUrl: 'http://sequencer.invalid/api',
-        space: 'test.eth',
-        ...base,
-        choice: { '1': 40, '2': 60 }
-      });
-      // Ciphertexts are randomised but different splits → different plaintexts.
-      expect(a.ciphertexts[0].c1).not.toBe(b.ciphertexts[0].c1);
-    },
-    CRYPTO_TIMEOUT
-  );
+  it('produces numCandidates ciphertexts regardless of how many choices are specified', () => {
+    // Only candidate 1 has weight; candidates 2 and 3 get 0 — but we still
+    // need a ciphertext for each (the ZK proof covers all candidates).
+    expect(single.ciphertexts).toHaveLength(CONFIG.numCandidates);
+  });
+
+  it('two votes with different splits produce different ciphertexts', () => {
+    // Ciphertexts are randomised but different splits → different plaintexts.
+    expect(split.ciphertexts[0].c1).not.toBe(single.ciphertexts[0].c1);
+  });
 });
