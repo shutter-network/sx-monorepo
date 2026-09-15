@@ -5,19 +5,28 @@ A copy-paste walkthrough: from an empty machine to a decrypted tally on screen.
 Everything here has been run as written. Where a value is a placeholder you must
 replace, it says so; everything else can be pasted verbatim.
 
-**It spans two repositories, and that is the point.** Snapshot runs the data layer.
-The keypers and coordinator are the [generalised-el-gamal][geg] protocol's own
-services with their own keys — a committee this repo could start is a committee
-this repo could impersonate.
+**One repository, two trust domains.** Everything starts from this repo — the
+[generalised-el-gamal][geg] protocol ships as a published image, so there is no
+second checkout. What stays separate is what matters: **the keypers**. Each runs as
+its own compose project with its own signing key, and the secrecy of a ballot rests
+on no quorum of them colluding. A committee this repo could start is a committee
+this repo could impersonate, so the keypers are deliberately not in
+`docker-compose.yml` and in a real deployment do not run on this machine at all.
+
+The coordinator *is* in `docker-compose.yml`, because it is the admin's own service:
+it relays writes and publishes the result. It cannot produce a decryption share, and
+the result it publishes is checkable by anyone — the UI re-derives the tally from the
+ballots and verifies the totals against the aggregate.
 
 [geg]: https://github.com/shutter-network/generalised-el-gamal
 
 ```
-sx-monorepo                     generalised-el-gamal
-  mysql        :3306              keyper1        :8101
-  hub          :3000              keyper2        :8102
-  sequencer    :3001              keyper3        :8103
-  te-data-layer:3002              coordinator    :8400
+sx-monorepo (docker compose)         separate projects, separate machines
+  mysql        :3306                   keyper1        :8101
+  hub          :3000                   keyper2        :8102
+  sequencer    :3001                   keyper3        :8103
+  te-data-layer:3002
+  coordinator  :8400
   UI (host)    :8080
 ```
 
@@ -28,7 +37,7 @@ sx-monorepo                     generalised-el-gamal
 - Docker Desktop running
 - [Bun](https://bun.sh)
 - A browser wallet (MetaMask) with an account you control — you will vote with it
-- Both repos checked out
+- This repo checked out. The protocol image is pulled from ghcr.
 
 One variable, used by the space SQL in step 3 and by `.env` in step 1 — set it
 in the terminal you will use throughout (step 3 adds a second, `TOKEN`):
@@ -45,135 +54,69 @@ power from a real ERC-20 balance, one that actually holds some of that token.
 
 ## 1. Environments
 
-Five files. Every value below is a **throwaway dev key** — deterministic repeated
-bytes so nobody mistakes them for real material. Paste them as they are for a local
-run; generate your own for anything else (each comment says how).
+Five files: `.env`, one per keyper, and the UI's. A script writes the first four,
+because they share identities that must agree; the UI's is three lines you paste.
 
-### 1a. Snapshot's side — `sx-monorepo/.env`
+### 1a. Identities — `.env` and `.env.keyper1..3`
 
-Compose reads `.env` and `docker-compose.yml` by default, so no flags are needed
-to start it later.
+One command writes all four files:
 
 ```bash
 cd sx-monorepo
-cat > .env <<'EOF'
-# --- Snapshot services -------------------------------------------------------
-# Signs sequencer receipts. Not a funded wallet.
-SEQ_RELAYER_PK=0x5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e
-HUB_RELAYER_PK=0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0
-SEQ_AUTH_SECRET=a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5
-WALLETCONNECT_PROJECT_ID=e6454bd61aba40b786e866a69bd4c5c6
-
-# --- committee ----------------------------------------------------------------
-# One URL per member, and nothing else. Addresses are not configured here: the
-# sequencer reads each keyper's signing address from its /status when it freezes the
-# committee onto a proposal, and refuses two URLs that report the same address. All
-# three must be reachable at creation — the DKG needs every member anyway, so an
-# absent keyper would only fail later, at voting_start, where it is terminal.
-#
-# http:// is fine on one machine. Use HTTPS in a real deployment: the address is
-# read over this channel, so TLS is what ties it to the host you meant.
-#
-# host.docker.internal, not localhost: these are dialled from inside containers.
-TE_KEYPERS=http://host.docker.internal:8101,http://host.docker.internal:8102,http://host.docker.internal:8103
-
-# The quorum: t of n act together. Must be a strict majority, so 2 of 3.
-TE_THRESHOLD_T=2
-# Denominator for weighted votes: 100 means you spread 100 points across choices.
-TE_WEIGHTED_BUDGET=100
-
-# --- roles ---------------------------------------------------------------------
-# The coordinator's ADDRESS (its key lives in the coordinator's own env, below).
-# The hub accepts a published result only from this address.
-TE_RESULT_PUBLISHER_ADDRESS=0x4ee73ECBf603370a1D5183E6A8525E4e9795cAD0
-
-
-# The sequencer signs one eligibility credential per private ballot, at the moment
-# the vote is accepted. Any 32-byte scalar. The hub does not hold this key -- it
-# fetches only the public half from the sequencer. Rotating it makes every
-# credential on every existing proposal fail to verify.
-TE_ELIGIBILITY_PRIVATE_KEY=0xe1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1
-
-# --- proposal gating ------------------------------------------------------------
-# A private proposal must open at least this far ahead or its key ceremony cannot
-# finish in time and the proposal is terminally dead. See step 5.
-MIN_DKG_LEAD_TIME_S=180
-EOF
+python3 scripts/geg/gen-env.py            # prints the plan, writes nothing
+python3 scripts/geg/gen-env.py --write
 ```
 
-Everything here works as pasted. Nothing needs your wallet address: the identity
-allowed to retry a stalled tally is the **space's admin list**, which you set in
-step 3, and it is read live rather than configured here.
+It mints a key per identity and derives every address from the key that owns it:
 
-### 1b. The coordinator — `generalised-el-gamal/deploy/.env.coordinator`
+| written | holds |
+| --- | --- |
+| `.env` | the hub and sequencer's own secrets, the committee as URLs, the coordinator's signing key and relay token, the eligibility issuer's key |
+| `.env.keyper1..3` | one signing key per committee member, plus that member's port and state directory |
 
-```bash
-cd generalised-el-gamal
-cat > deploy/.env.coordinator <<'EOF'
-# Where the data layer lives: Snapshot's translator, from inside this container.
-GEG_DATA_LAYER_URL=http://host.docker.internal:3002
+All four are `chmod 600` and gitignored.
 
-# Drives the ceremony and signs the published result. Its address must equal
-# TE_RESULT_PUBLISHER_ADDRESS on the Snapshot side, and COORDINATOR_IDENTITY in
-# every keyper env below. Derive with:
-#   python3 -c "from eth_account import Account; print(Account.from_key('0x..').address)"
-COORDINATOR_SIGNING_KEY=0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0
+**This is the step that used to go wrong.** One address is written in three places —
+`COORDINATOR_SIGNING_KEY` in `.env`, `TE_RESULT_PUBLISHER_ADDRESS` beside it, and
+`COORDINATOR_IDENTITY` in every keyper file — and when they drift the failure is an
+authorisation error naming neither side, hours later, on a proposal whose ballots are
+already cast. Deriving all three from one key is the whole reason this script exists.
 
-# Bearer token for the write relay. Fail-closed: unset means no keyper can write.
-COORDINATOR_API_TOKEN=7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c
+Two values still want a human. Both are carried through untouched on a re-run, so
+this applies to a first run, or after you delete `.env`:
 
-COORDINATOR_PORT=8400
-# Seconds between polls. Also the stall timeout: the attempt budget counts polls,
-# so 5 fruitless polls abandon a tally — 30 gives ~150s of tolerance for an
-# unreachable keyper. Do not raise it past MIN_DKG_LEAD_TIME_S / 2 or so; a
-# registered election waits up to one poll before its ceremony starts.
-COORDINATOR_POLL_S=30
-EOF
-```
+- **`WALLETCONNECT_PROJECT_ID`** is written as a placeholder. Fill it in, or leave it
+  and use an injected wallet like MetaMask.
+- **`TE_SOLVER_CEILING`** starts at `1e12`, which suits roughly a 0.5 GB coordinator.
+  It decides every proposal's `scale`, so it is a statement about your hardware — see
+  the RAM table in `.env.example` before changing it.
 
-### 1c. The keypers — three files
+Re-running is safe and is how you repair a file you edited by mistake: existing keys
+are read back off disk and only the derived values are recomputed. `--rotate` mints
+new ones instead, which **orphans every election already in flight** — a keyper that
+changes its key cannot finish an election it holds a share for.
 
-Each committee member gets its own signing key, its own port, and — critically —
-its **own state directory**. Two keypers sharing one directory overwrite each
-other's shares, and you only find out at tally time.
+`.env.example` is the annotated reference for every variable, including the ones this
+script does not set.
 
-```bash
-cd generalised-el-gamal
-for n in 1 2 3; do
-  case $n in
-    1) SK=0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1 ;;
-    2) SK=0xa2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2 ;;
-    3) SK=0xa3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3 ;;
-  esac
-  cat > deploy/.env.keyper$n <<EOF
-# This member's signing key. In a real deployment the operator generates this
-# themselves and it never leaves their machine; all three are here because one
-# machine is running the whole committee.
-KEYPER_SIGNING_KEY=$SK
+### 1b. What the committee files mean
 
-# The coordinator's address, pinned: no other identity may bootstrap this keyper.
-# Must match the address of COORDINATOR_SIGNING_KEY above.
-COORDINATOR_IDENTITY=0x4ee73ECBf603370a1D5183E6A8525E4e9795cAD0
+Worth knowing before you start anything, because two of these only fail at tally time:
 
-# Reads: Snapshot's translator. BASE URL ONLY — the keyper appends /port itself.
-# Adding the suffix here yields /port/port and every read 404s.
-GEG_API_URL=http://host.docker.internal:3002
-# Writes are relayed through the coordinator, the data layer's only writer.
-COORDINATOR_URL=http://host.docker.internal:8400
+- **Each keyper needs its own `KEYPER_STATE_DIR_HOST`.** Two sharing a directory
+  overwrite each other's shares, and nothing complains until a tally cannot reach
+  quorum. The script assigns `./keyper-state1`, `2`, `3`.
+- **`KEYPER_PORT` must match that keyper's entry in `TE_KEYPERS`.** The URLs are
+  dialled from inside the coordinator's container, which is why they are
+  `host.docker.internal` and not `localhost`.
+- **`TE_KEYPERS` carries URLs and no addresses.** The sequencer reads each keyper's
+  signing address from its own `/status` when it freezes the committee onto a
+  proposal, and refuses two URLs that answer with the same address. A second copy of
+  the address here would only be somewhere for it to go stale.
+- **`TE_THRESHOLD_T` is the quorum, not the fault tolerance** — the number of keypers
+  that must act together. It has to be a strict majority, so 2 of 3.
 
-# Must match this keyper's endpoint in TE_KEYPERS.
-KEYPER_PORT=810$n
-# Its own directory, or committee members overwrite each other's shares.
-KEYPER_STATE_DIR_HOST=../keyper-state$n
-# How long a share is kept past voting_end. There is no tally deadline, so this is
-# the real bound on how late a count can still succeed. 90 days.
-KEYPER_SECRET_TTL_S=7776000
-EOF
-done
-echo "wrote deploy/.env.keyper1..3"
-```
-
-### 1d. The UI — `sx-monorepo/apps/ui/.env`
+### 1c. The UI — `sx-monorepo/apps/ui/.env`
 
 ```bash
 cd sx-monorepo/apps/ui
@@ -204,8 +147,8 @@ features — token balances, ENS, richer wallet options. None are needed here.
 
 ## 2. Start everything
 
-Snapshot's services first, since the keypers and coordinator both dial the data
-layer:
+Snapshot's services and the coordinator together — the coordinator waits on the
+translator's healthcheck, so one command is enough:
 
 ```bash
 cd sx-monorepo
@@ -213,46 +156,55 @@ mkdir -p mysql-data
 docker compose up -d --build
 ```
 
-Then the committee and the coordinator. Each keyper runs as its own compose
-project, which is what keeps their state directories and containers separate:
+If this fails with `required variable COORDINATOR_SIGNING_KEY is missing`, step 1a
+has not been done. The coordinator is fail-closed on its two secrets, and compose
+refuses to start *any* service until both are in `.env`.
+
+Then the committee. Each keyper runs as its own compose project, which is what keeps
+their state directories and containers separate:
 
 ```bash
-cd generalised-el-gamal
 for n in 1 2 3; do
-  docker compose -p keyper$n -f deploy/docker-compose.keyper.yml \
-    --env-file deploy/.env.keyper$n up -d --build
+  docker compose -p keyper$n -f docker-compose.keyper.yml \
+    --env-file .env.keyper$n up -d
 done
-
-docker compose -p geg-coordinator -f deploy/docker-compose.coordinator.yml \
-  --env-file deploy/.env.coordinator up -d --build
 ```
 
-First run builds the images and takes a few minutes. They do **not** rebuild
-afterwards, so add `--build` if you change protocol code.
+The first run builds the Snapshot image and pulls the protocol image; both are cached
+afterwards. `--build` applies only to the Snapshot services — the coordinator and the
+keypers run a pinned published image, so you move them by changing the tag
+(`GEG_IMAGE`), not by rebuilding.
 
 Check it came up:
 
 ```bash
-docker ps --format "{{.Names}}\t{{.Status}}"
+docker ps --format "{{.Names}}\t{{.Status}}"            # 8 containers, all healthy
+curl -s localhost:8400/health                          # coordinator
 curl -s localhost:8101/status | python3 -m json.tool   # and 8102, 8103
 curl -s localhost:3002/elections                       # {"electionIds":[]}
 curl -s -o /dev/null -w "%{http_code}\n" localhost:3000/graphql   # 400 is correct
 ```
 
-You want three keypers reporting `"bootstrapped": true`. A bare GET on `/graphql`
-answering `400` is right — it only accepts POSTs.
+Each keyper's `/status` should report its own `address` — those three must be the
+addresses in `TE_KEYPERS`, or the sequencer will refuse to freeze a committee.
+
+On a first run they will all say **`"bootstrapped": false`, and that is correct.**
+A keyper is bootstrapped when the coordinator installs its tokens over
+`/auth/bootstrap`, and the coordinator only does that when it has an election to run
+a ceremony for — so the flag stays false until you create your first private
+proposal. It is persisted from then on, so after a restart with its state directory
+intact a keyper reports `true` immediately. `false` on a keyper that has already
+taken part in an election means its state was lost.
+
+A bare GET on `/graphql` answering `400` is right — it only accepts POSTs.
 
 **To stop everything, keeping all data:**
 
 ```bash
-cd generalised-el-gamal
-docker compose -p geg-coordinator -f deploy/docker-compose.coordinator.yml \
-  --env-file deploy/.env.coordinator stop
 for n in 1 2 3; do
-  docker compose -p keyper$n -f deploy/docker-compose.keyper.yml \
-    --env-file deploy/.env.keyper$n stop
+  docker compose -p keyper$n -f docker-compose.keyper.yml \
+    --env-file .env.keyper$n stop
 done
-cd ../sx-monorepo
 docker compose stop
 ```
 
@@ -385,7 +337,7 @@ In the UI: **New proposal**. Then, before you submit:
 Submit, then watch the ceremony:
 
 ```bash
-docker logs -f geg-coordinator-coordinator-1
+docker logs -f sx-monorepo-coordinator-1
 ```
 
 Within about 30 seconds (the coordinator's poll interval) you should see:
@@ -436,7 +388,7 @@ docker exec sx-monorepo-mysql-1 mysql -uroot -h127.0.0.1 snapshot_hub \
 Nothing to press. Past the end time, the coordinator drives two phases; watch:
 
 ```bash
-docker logs -f geg-coordinator-coordinator-1
+docker logs -f sx-monorepo-coordinator-1
 ```
 
 ```
@@ -498,10 +450,9 @@ stalls again:
 docker ps --format "{{.Names}}\t{{.Status}}" | grep keyper
 
 # Restart any that are down (safe to run for all three):
-cd generalised-el-gamal
 for n in 1 2 3; do
-  docker compose -p keyper$n -f deploy/docker-compose.keyper.yml \
-    --env-file deploy/.env.keyper$n up -d
+  docker compose -p keyper$n -f docker-compose.keyper.yml \
+    --env-file .env.keyper$n up -d
 done
 curl -s localhost:8101/status | python3 -m json.tool
 ```
@@ -510,7 +461,7 @@ The notice names three possible causes and asserts none, because the flag stored
 only a boolean. Which one it actually was is in the coordinator's log:
 
 ```bash
-docker logs geg-coordinator-coordinator-1 2>&1 | grep abandoned
+docker logs sx-monorepo-coordinator-1 2>&1 | grep abandoned
 ```
 
 ## Other things that go wrong
@@ -538,5 +489,6 @@ of these explains not just what it does but which failure it is shaped around:
 | `apps/ui/src/helpers/gegRequest.ts` | the digest the admin's retry is signed over |
 
 For the protocol itself — the coordinator, the keypers, and the port contract this
-repository implements — see `RUNNING.md` and the source in the
-generalised-el-gamal repository.
+repository implements — see the source in the generalised-el-gamal repository. You do
+not need it checked out to run any of the above; it is the reference for what the
+published image does.

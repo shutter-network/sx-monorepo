@@ -1,19 +1,28 @@
-# Private voting runs on the generalised-el-gamal protocol stack, which lives in
-# its own repository and is started separately — this file provides the Snapshot
-# half: the hub, the sequencer, and the translator that serves Snapshot's state
-# over the protocol's data-layer contract.
+# Private voting runs on the generalised-el-gamal protocol stack. Its source lives
+# in another repository, but nothing here builds it — the coordinator below and the
+# keypers in docker-compose.keyper.yml both run the published image, so this repo is
+# the only one you need checked out to operate the stack.
 #
-#   1. this stack:      docker compose up -d
-#   2. the coordinator: docker compose -f deploy/docker-compose.coordinator.yml \
-#                         --env-file deploy/.env.coordinator up -d      (geg repo)
-#   3. each keyper:     docker compose -p keyperN -f deploy/docker-compose.keyper.yml \
-#                         --env-file deploy/.env.keyperN up -d          (geg repo)
+#   1. Snapshot + coordinator:  docker compose up -d
+#   2. each keyper:             docker compose -p keyperN -f docker-compose.keyper.yml \
+#                                 --env-file .env.keyperN up -d
+#
+# The coordinator is part of this stack, and it is fail-closed: COORDINATOR_SIGNING_KEY
+# and COORDINATOR_API_TOKEN must both be set or `docker compose up -d` refuses to run
+# at all — including for the other services. That is deliberate. A coordinator that
+# booted without a signing key would fail much later, at result-publishing time, on a
+# proposal whose votes are already cast. Set both in .env before starting; see
+# .env.example, or run scripts/geg/gen-env.py --write.
 #
 # Who points where:
 #   coordinator → GEG_DATA_LAYER_URL → te-data-layer root   reads + writes; sole writer
 #   keyper      → GEG_API_URL        → te-data-layer /port  reads only; appends /port
 #   keyper      → COORDINATOR_URL    → coordinator :8400    keyper writes relay here
 #   sequencer   → TE_KEYPERS         → each keyper's URL, frozen into the proposal
+#
+# The coordinator shares this compose network, so it reaches the translator at
+# `http://te-data-layer:3002` directly. The keypers are separate compose projects
+# (and separate machines in a real deployment), so they still go through the host.
 #
 # The keyper URLs in TE_KEYPERS are dialled by the coordinator, so they must be
 # addresses reachable from *its* host — public URLs in a real deployment, and
@@ -23,12 +32,17 @@
 #   SEQ_RELAYER_PK          Sequencer relayer private key
 #   SEQ_AUTH_SECRET         Sequencer auth secret
 #
-# Required for private voting (all three unset = public voting only, and every
+# Required for private voting (all unset = public voting only, and every
 # private path stays dormant):
 #   TE_ELIGIBILITY_PRIVATE_KEY   the sequencer's credential-issuing key
 #   TE_KEYPERS                   one URL per committee member (addresses are
 #                                read from each keyper's /status, not configured)
 #   TE_RESULT_PUBLISHER_ADDRESS  the coordinator's address
+#   COORDINATOR_SIGNING_KEY      the coordinator's key. Its address MUST equal
+#                                TE_RESULT_PUBLISHER_ADDRESS above and
+#                                COORDINATOR_IDENTITY in every keyper env —
+#                                scripts/geg/gen-env.py derives all three from it.
+#   COORDINATOR_API_TOKEN        bearer token for the keyper write relay
 #
 # Worth setting deliberately rather than inheriting:
 #   TE_SOLVER_CEILING            what the coordinator can solve, and therefore the
@@ -177,4 +191,46 @@ services:
       interval: 5s
       timeout: 5s
       retries: 20
+    restart: unless-stopped
+
+  # The protocol's coordinator: it drives the DKG, relays the keypers' signed writes
+  # to the translator (it is the data layer's sole writer), and publishes the result.
+  #
+  # Fail-closed on its two secrets: unset, and compose refuses to start anything.
+  coordinator:
+    image: ${GEG_IMAGE:-ghcr.io/shutter-network/generalised-elgamal-voting:0.1.0}
+    command: ["python", "-m", "geg.services.coordinator"]
+    environment:
+      GEG_DATA_LAYER: database
+      # The translator's root surface, over this compose network. Keep the root
+      # reachable only by the coordinator — keypers are given the read-only /port
+      # mount instead, because the ballot write path is unauthenticated.
+      GEG_DATA_LAYER_URL: ${GEG_DATA_LAYER_URL:-http://te-data-layer:3002}
+      # Also the result-publisher identity: this key signs the published result, so
+      # its address must equal each proposal's frozen result_publisher_key — i.e.
+      # TE_RESULT_PUBLISHER_ADDRESS, which the sequencer reads from the same .env.
+      COORDINATOR_SIGNING_KEY: ${COORDINATOR_SIGNING_KEY:?set COORDINATOR_SIGNING_KEY (secp256k1 key; its address is the result publisher)}
+      # Bearer token for the write relay. Fail-closed: unset means no keyper can write.
+      COORDINATOR_API_TOKEN: ${COORDINATOR_API_TOKEN:?set COORDINATOR_API_TOKEN (relay bearer token)}
+      COORDINATOR_PORT: "8400"
+      # Seconds between data-layer polls: how quickly a new proposal starts its DKG,
+      # and how fast the tally advances once voting closes.
+      COORDINATOR_POLL_S: ${COORDINATOR_POLL_S:-30.0}
+      # The per-keyper bearer tokens this process mints live here, so a restart
+      # reuses them instead of re-bootstrapping the whole committee.
+      COORDINATOR_STATE_DIR: /coordinator-state
+    ports:
+      # Published because the keypers are separate compose projects — on separate
+      # hosts in a real deployment — and this is where their writes go.
+      - "${COORDINATOR_PORT:-8400}:8400"
+    volumes:
+      - ./coordinator-state:/coordinator-state
+    extra_hosts:
+      # The keyper endpoints frozen into each proposal are dialled from here, so they
+      # must resolve from this container: host-published ports locally, real URLs in
+      # production (where this is harmless).
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      te-data-layer:
+        condition: service_healthy
     restart: unless-stopped
