@@ -275,10 +275,21 @@ describe('buildTeWeightedBallotEnvelope — largest-remainder vote vector', () =
 const CRYPTO_TIMEOUT = 120_000;
 
 describe('buildTeWeightedBallotEnvelope — envelope shape (real crypto)', () => {
+  // Budget 10 rather than the production 100: the range proof's cost is linear
+  // in the budget, and these two envelopes take ~22s to build at 100 against
+  // ~2.6s at 10. Nothing here asserts anything budget-dependent — these are
+  // shape checks — and the largest-remainder arithmetic that *does* depend on
+  // the budget is covered by the pure `vote vector` tests above, which run no
+  // crypto at all.
+  //
+  // It matters because this file was the slowest in the UI suite by an order of
+  // magnitude. At 64s it held its vitest worker long enough to starve the
+  // reporter's `onTaskUpdate` RPC on a 4-vCPU runner: every test passed and the
+  // run still exited 1.
   const CONFIG = {
     variant: 'A' as const,
     mode: 'exact' as const,
-    budget: 100,
+    budget: 10,
     numCandidates: 3
   };
   const PROPOSAL_ID = `0x${'22'.repeat(32)}`;
@@ -311,7 +322,10 @@ describe('buildTeWeightedBallotEnvelope — envelope shape (real crypto)', () =>
       ...base,
       choice: { '1': 60, '2': 40 }
     });
-    single = await buildTeWeightedBallotEnvelope({ ...base, choice: { '1': 1 } });
+    single = await buildTeWeightedBallotEnvelope({
+      ...base,
+      choice: { '1': 1 }
+    });
   }, CRYPTO_TIMEOUT);
 
   it('returns a valid envelope with all required fields', () => {
@@ -337,8 +351,17 @@ describe('buildTeWeightedBallotEnvelope — envelope shape (real crypto)', () =>
     expect(single.ciphertexts).toHaveLength(CONFIG.numCandidates);
   });
 
-  it('two votes with different splits produce different ciphertexts', () => {
-    // Ciphertexts are randomised but different splits → different plaintexts.
+  it('each build draws fresh randomness', () => {
+    // Deliberately NOT "different splits produce different ciphertexts" — that
+    // cannot be asserted here. `encrypt` sets c1 = r·P2 and c2 = r·mpk + m·P2,
+    // so both components move with the random scalar, and two encryptions of
+    // the *same* plaintext already differ. That indistinguishability is the
+    // point of the scheme, not an accident.
+    //
+    // What is worth guarding is the opposite failure: reusing `r` across
+    // ballots, which would leak the relationship between their plaintexts.
+    // These envelopes were built separately, so identical bytes here would mean
+    // the randomness was not redrawn.
     expect(split.ciphertexts[0].c1).not.toBe(single.ciphertexts[0].c1);
   });
 });
