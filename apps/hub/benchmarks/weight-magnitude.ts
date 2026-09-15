@@ -220,7 +220,7 @@ async function main(): Promise<void> {
 
   for (const regime of REGIMES) {
     const weights = Array.from({ length: CHUNK }, regime.sample);
-    const { c, windows } = windowsFor(weights, CHUNK);
+    const { windows } = windowsFor(weights, CHUNK);
     const bits = bitsOf(weights);
 
     const msmTimes: number[] = [];
