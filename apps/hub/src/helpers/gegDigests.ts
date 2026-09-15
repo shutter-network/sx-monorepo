@@ -31,11 +31,11 @@ import { getAddress } from '@ethersproject/address';
 import { keccak256 } from '@ethersproject/keccak256';
 import { verifyMessage } from '@ethersproject/wallet';
 
-export const DKG_RESULT_DST = Buffer.from('GEG-DKG-RESULT-v1', 'utf8');
-export const AGGREGATE_DST = Buffer.from('GEG-AGGREGATE-v1', 'utf8');
-export const DECRYPT_SHARE_DST = Buffer.from('GEG-DECRYPT-SHARE-v1', 'utf8');
-export const RESULT_DST = Buffer.from('GEG-RESULT-v1', 'utf8');
-export const REQUEST_DST = Buffer.from('GEG-REQUEST-v1', 'utf8');
+const DKG_RESULT_DST = Buffer.from('GEG-DKG-RESULT-v1', 'utf8');
+const AGGREGATE_DST = Buffer.from('GEG-AGGREGATE-v1', 'utf8');
+const DECRYPT_SHARE_DST = Buffer.from('GEG-DECRYPT-SHARE-v1', 'utf8');
+const RESULT_DST = Buffer.from('GEG-RESULT-v1', 'utf8');
+const REQUEST_DST = Buffer.from('GEG-REQUEST-v1', 'utf8');
 
 /**
  * Exclusion reasons as the digest encodes them: the protocol's **declaration
@@ -59,11 +59,7 @@ export const EXCLUSION_CODES: Record<string, number> = {
 export class GegDigestError extends Error {}
 
 /** Strict fixed-size hex decode. A wrong length here would silently shift the digest. */
-export function decodeSized(
-  value: unknown,
-  label: string,
-  size: number
-): Buffer {
+function decodeSized(value: unknown, label: string, size: number): Buffer {
   if (typeof value !== 'string') {
     throw new GegDigestError(`${label}: not a string`);
   }
@@ -265,7 +261,9 @@ export function aggregateDigestPreScale(args: {
   const encoded = Buffer.from(
     defaultAbiCoder
       .encode(
-        ['tuple(tuple(bytes,bytes)[],uint256[],tuple(uint256,uint8)[],uint256)'],
+        [
+          'tuple(tuple(bytes,bytes)[],uint256[],tuple(uint256,uint8)[],uint256)'
+        ],
         [
           [
             pairs,

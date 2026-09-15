@@ -3,19 +3,19 @@ import { getProposal, getSpace } from '../helpers/actions';
 import log from '../helpers/log';
 import { containsFlaggedLinks } from '../helpers/moderation';
 import db from '../helpers/mysql';
+import { effectivePrivacy } from '../helpers/privacy';
 import {
-  TeConfigError,
   ballotParamsColumn,
   buildCommitteeSnapshot,
   committeeColumns,
   frozenWeightedBudget,
   parseCommitteeSnapshotLoose,
+  TeConfigError,
   votingPowerFallback,
   weightedBudgetFromEnv
 } from '../helpers/teCommittee';
-import { resolveVotingPowerBound } from '../helpers/teVotingPowerBound';
-import { effectivePrivacy } from '../helpers/privacy';
 import { getEligibilityKey } from '../helpers/teEligibility';
+import { resolveVotingPowerBound } from '../helpers/teVotingPowerBound';
 import { jsonParse, validateChoices } from '../helpers/utils';
 
 const MIN_DKG_LEAD_TIME_S = parseInt(

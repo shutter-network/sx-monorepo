@@ -13,16 +13,23 @@ import { effectivePrivacy } from '../helpers/privacy';
 import { getProvider } from '../helpers/provider';
 import { validateSpaceSettings } from '../helpers/spaceValidation';
 import {
-  TeConfigError,
   assertBallotShape,
   ballotParamsColumn,
   buildCommitteeSnapshot,
   committeeColumns,
   readTeEnv,
+  TeConfigError,
   votingPowerFallback,
   weightedBudgetFromEnv
 } from '../helpers/teCommittee';
+import { getEligibilityKey } from '../helpers/teEligibility';
 import { resolveVotingPowerBound } from '../helpers/teVotingPowerBound';
+import {
+  captureError,
+  getQuorum,
+  jsonParse,
+  validateChoices
+} from '../helpers/utils';
 
 /**
  * Resolve `V` for a space's strategies at a proposal's snapshot block.
@@ -45,13 +52,6 @@ async function resolveVotingPowerBoundFor(
     fallbackValue: votingPowerFallback(payload?.budget ?? 1)
   });
 }
-import { getEligibilityKey } from '../helpers/teEligibility';
-import {
-  captureError,
-  getQuorum,
-  jsonParse,
-  validateChoices
-} from '../helpers/utils';
 
 const scoreAPIUrl = process.env.SCORE_API_URL || 'https://score.snapshot.org';
 const MIN_DKG_LEAD_TIME_S = parseInt(
@@ -456,8 +456,9 @@ export async function action(body, ipfs, receipt, id): Promise<void> {
       budget: msg.payload.type === 'weighted' ? weightedBudgetFromEnv() : 1
     });
     log.info(
-      `[te-vpbound] ${proposal.id}: V=${bound.value} via ${bound.source}` +
-        (bound.unrecognised ? ` (unrecognised: ${bound.unrecognised})` : '')
+      `[te-vpbound] ${proposal.id}: V=${bound.value} via ${bound.source}${
+        bound.unrecognised ? ` (unrecognised: ${bound.unrecognised})` : ''
+      }`
     );
     const snapshot = await buildCommitteeSnapshot({
       eligibilityKey: await getEligibilityKey(),

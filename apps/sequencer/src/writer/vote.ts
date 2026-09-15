@@ -6,7 +6,6 @@ import {
   verifyAttestation
 } from '../helpers/gegAttestation';
 import { verifyBallotSignature } from '../helpers/gegBinding';
-import { getEligibilityKey } from '../helpers/teEligibility';
 import log from '../helpers/log';
 import db from '../helpers/mysql';
 import {
@@ -14,6 +13,7 @@ import {
   isWithinGegVotingWindow,
   verifyTeBallot
 } from '../helpers/te';
+import { getEligibilityKey } from '../helpers/teEligibility';
 import { captureError, hasStrategyOverride, jsonParse } from '../helpers/utils';
 import { updateProposalAndVotes } from '../scores';
 

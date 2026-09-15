@@ -23,8 +23,8 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import fetch from 'node-fetch';
 import { eligibilityPublicKey } from '../../src/helpers/eligibilityKey';
-import { seedEligibilityKey } from '../fixtures/eligibilityKey';
 import db from '../../src/helpers/mysql';
+import { seedEligibilityKey } from '../fixtures/eligibilityKey';
 
 const HOST = `http://localhost:${process.env.PORT || 3030}`;
 const ID = '0xaaab000000000000000000000000000000000000000000000000000000000001';

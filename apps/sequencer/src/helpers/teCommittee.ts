@@ -150,9 +150,7 @@ export function assertBallotShape(numCandidates: number, budget: number): void {
  */
 export const DEFAULT_TE_SOLVER_CEILING = 1e12;
 
-export function teSolverCeiling(
-  env: NodeJS.ProcessEnv = process.env
-): number {
+export function teSolverCeiling(env: NodeJS.ProcessEnv = process.env): number {
   const raw = env.TE_SOLVER_CEILING;
   if (raw === undefined || raw.trim() === '') return DEFAULT_TE_SOLVER_CEILING;
   const value = Number(raw);

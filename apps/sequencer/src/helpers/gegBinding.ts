@@ -5,7 +5,7 @@ import {
   G1Point,
   schnorrVerify
 } from '@shutter-network/urban-verified-crypto';
-import { attestationMessage, GegAttestationError } from './gegAttestation';
+import { GegAttestationError } from './gegAttestation';
 import { ensureCurvesInit } from './te';
 
 export function hexToBytes(
@@ -75,22 +75,28 @@ export async function verifyBallotSignature(
     ]) as [Uint8Array, Uint8Array][];
     if (!ciphertexts.length) return false;
 
-    const message = arrayify(keccak256(
-      canonicalBallotMessage({
-        electionId: hexToBytes(envelope.electionId, 'electionId', 32),
-        pseudonym: hexToBytes(envelope.pseudonym, 'pseudonym', 32),
-        ciphertexts,
-        zkProof: hexToBytes(envelope.zkProof, 'zkProof'),
-        attestation: {
-          electionId: hexToBytes(attestation.electionId, 'att.electionId', 32),
-          pseudonym: hexToBytes(attestation.pseudonym, 'att.pseudonym', 32),
-          vk: hexToBytes(attestation.vk, 'att.vk', 48),
-          weight: BigInt(attestation.weight),
-          nonce: BigInt(attestation.nonce),
-          signature: hexToBytes(attestation.signature, 'att.signature', 80)
-        }
-      })
-    ));
+    const message = arrayify(
+      keccak256(
+        canonicalBallotMessage({
+          electionId: hexToBytes(envelope.electionId, 'electionId', 32),
+          pseudonym: hexToBytes(envelope.pseudonym, 'pseudonym', 32),
+          ciphertexts,
+          zkProof: hexToBytes(envelope.zkProof, 'zkProof'),
+          attestation: {
+            electionId: hexToBytes(
+              attestation.electionId,
+              'att.electionId',
+              32
+            ),
+            pseudonym: hexToBytes(attestation.pseudonym, 'att.pseudonym', 32),
+            vk: hexToBytes(attestation.vk, 'att.vk', 48),
+            weight: BigInt(attestation.weight),
+            nonce: BigInt(attestation.nonce),
+            signature: hexToBytes(attestation.signature, 'att.signature', 80)
+          }
+        })
+      )
+    );
 
     const sig = hexToBytes(envelope.voterSignature, 'voterSignature', 80);
     // The SDK exports `encodeSchnorr` but no decoder, so the 80-byte wire form is

@@ -1,6 +1,5 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue';
-import { runVerify, VerifyCancelled } from '@/helpers/teVerifyClient';
 import {
   AuditPayload,
   BallotAggregateResult,
@@ -15,6 +14,7 @@ import {
   VerifyProgress,
   VerifyResult
 } from '@/helpers/teVerify';
+import { runVerify, VerifyCancelled } from '@/helpers/teVerifyClient';
 import { Proposal } from '@/types';
 
 const props = defineProps<{
@@ -101,7 +101,8 @@ async function run() {
     const run = runVerify(
       { proposalId, payload, ballotsPayload, budget: budget.value },
       progress => {
-        if (status.value.kind === 'verifying') status.value = { kind: 'verifying', progress };
+        if (status.value.kind === 'verifying')
+          status.value = { kind: 'verifying', progress };
       }
     );
     cancelRun.value = run.cancel;
@@ -288,7 +289,9 @@ function downloadBundle() {
         @click="run"
       >
         <span v-if="status.kind === 'fetching'">Fetching ballots...</span>
-        <span v-else-if="status.kind === 'verifying'">{{ verifyingLabel }}</span>
+        <span v-else-if="status.kind === 'verifying'">{{
+          verifyingLabel
+        }}</span>
         <span v-else>Verify tally</span>
       </button>
       <button

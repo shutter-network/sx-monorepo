@@ -59,7 +59,7 @@ export function deriveScale(
   return scale;
 }
 
-export const PROTOCOL_VERSION = 'SHUTTER-VOTE-v1';
+const PROTOCOL_VERSION = 'SHUTTER-VOTE-v1';
 
 /** Committee snapshot as the sequencer froze it. */
 export interface TeCommitteeSnapshot {
@@ -112,7 +112,7 @@ export class GegConfigError extends Error {}
  * split degenerates to a unit vector. `mode: 'exact'` and `variant: 'A'` are the
  * only combination this deployment supports.
  */
-export function deriveBallotParams(
+function deriveBallotParams(
   choices: string[],
   type: string | null | undefined,
   weightedBudget: number

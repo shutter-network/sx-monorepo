@@ -106,7 +106,6 @@ function envelope(i: number) {
   };
 }
 
-
 async function seed(): Promise<void> {
   // The route refuses to serve a proposal whose frozen eligibility key no longer
   // matches the one in use, so the key the sequencer publishes has to exist and

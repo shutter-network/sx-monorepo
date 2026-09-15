@@ -434,7 +434,7 @@ a complete read into a quietly truncated one.
 
 The plan wanted these captured *before* the legacy tally was deleted. It was not, but
 the file is still reachable at `master:apps/sequencer/src/helpers/te.ts`, so
-`scripts/geg/gen-legacy-equivalence.ts` recovers it from history and runs it.
+`packages/geg-parity/scripts/gen-legacy-equivalence.ts` recovers it from history and runs it.
 
 The corpus is deliberately **not** three equivalence claims, because equivalence is
 not what we want in all three places:

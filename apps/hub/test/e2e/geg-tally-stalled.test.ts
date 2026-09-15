@@ -21,12 +21,12 @@
 import { Wallet } from '@ethersproject/wallet';
 import fetch from 'node-fetch';
 import { eligibilityPublicKey } from '../../src/helpers/eligibilityKey';
-import { seedEligibilityKey } from '../fixtures/eligibilityKey';
 import {
   requestDigest,
   requestNoncePayload
 } from '../../src/helpers/gegDigests';
 import db from '../../src/helpers/mysql';
+import { seedEligibilityKey } from '../fixtures/eligibilityKey';
 
 const HOST = `http://localhost:${process.env.PORT || 3030}`;
 

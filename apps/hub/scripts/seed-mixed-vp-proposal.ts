@@ -130,13 +130,13 @@ async function main() {
       votes,
       params: PARAMS,
       attestation: {
-          electionId: new Uint8Array(32).fill(1),
-          pseudonym: new Uint8Array(32).fill(2),
-          vk: new Uint8Array(48).fill(3),
-          weight: 1n,
-          nonce: 1n,
-          signature: new Uint8Array(80)
-        }
+        electionId: new Uint8Array(32).fill(1),
+        pseudonym: new Uint8Array(32).fill(2),
+        vk: new Uint8Array(48).fill(3),
+        weight: 1n,
+        nonce: 1n,
+        signature: new Uint8Array(80)
+      }
     });
 
     // Never emit a ballot the ingest path would reject; a bad ballot here would

@@ -7,9 +7,9 @@ import {
   verifyAttestation
 } from './gegAttestation';
 import log from './log';
-import { parseCommitteeSnapshotLoose } from './teCommittee';
 import db from './mysql';
 import { isDustVotingPower, isWithinGegVotingWindow } from './te';
+import { parseCommitteeSnapshotLoose } from './teCommittee';
 import { jsonParse } from './utils';
 
 const scoreAPIUrl = process.env.SCORE_API_URL || 'https://score.snapshot.org';
@@ -183,8 +183,9 @@ export async function issueBallotCredential(args: {
   // knows before the tally runs. Refusing the vote instead would disenfranchise a
   // voter for an operator's estimate being wrong, so this reports and lets them vote.
   try {
-    const bound = parseCommitteeSnapshotLoose(proposal.te_geg_config)
-      ?.maxTotalWeight;
+    const bound = parseCommitteeSnapshotLoose(
+      proposal.te_geg_config
+    )?.maxTotalWeight;
     if (bound) {
       const [row] = await db.queryAsync(
         'SELECT COALESCE(SUM(vp), 0) AS total FROM votes WHERE proposal = ?',
@@ -202,7 +203,9 @@ export async function issueBallotCredential(args: {
     }
   } catch (err: any) {
     // Diagnostics must never block issuance.
-    log.warn(`[te-vpbound] ${proposalId}: bound check skipped: ${err?.message || err}`);
+    log.warn(
+      `[te-vpbound] ${proposalId}: bound check skipped: ${err?.message || err}`
+    );
   }
 
   const pseudonym = pseudonymFor(voter, proposalId);
@@ -233,9 +236,7 @@ export async function issueBallotCredential(args: {
     throw err;
   }
 
-  log.info(
-    `[te-issue] proposal=${proposalId} weight=${weight} nonce=${nonce}`
-  );
+  log.info(`[te-issue] proposal=${proposalId} weight=${weight} nonce=${nonce}`);
 
   return {
     attestation: {
@@ -247,6 +248,6 @@ export async function issueBallotCredential(args: {
       nonce: Number(nonce),
       signature: credentialSig
     },
-    votingPower: vp.vp,
+    votingPower: vp.vp
   };
 }

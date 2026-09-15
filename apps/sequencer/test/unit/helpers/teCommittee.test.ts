@@ -1,21 +1,19 @@
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import fetch from 'node-fetch';
 import {
-  deriveScale,
   ballotParamsColumn,
-  DEFAULT_TE_SOLVER_CEILING,
-  teSolverCeiling,
-  votingPowerFallback,
-  weightedBudgetFromEnv,
   buildCommitteeSnapshot,
   clearCommitteeCache,
   committeeColumns,
+  DEFAULT_TE_SOLVER_CEILING,
+  deriveScale,
   frozenWeightedBudget,
   parseKeypers,
   resolveCommittee,
   TeConfigError,
-  TeEnv
+  TeEnv,
+  teSolverCeiling,
+  votingPowerFallback,
+  weightedBudgetFromEnv
 } from '../../../src/helpers/teCommittee';
 
 jest.mock('node-fetch', () => jest.fn());
@@ -59,7 +57,7 @@ const window = { votingStart: 1_770_000_000, votingEnd: 1_770_086_400 };
 
 function build(overrides: Partial<TeEnv> = {}) {
   return buildCommitteeSnapshot({
-      maxTotalWeight: 1e6,
+    maxTotalWeight: 1e6,
     env: env(overrides),
     eligibilityKey: ELIGIBILITY_KEY,
     // Recorded into the config; the live authority is the space's admins, checked
@@ -256,7 +254,7 @@ describe('buildCommitteeSnapshot', () => {
   it('rejects a malformed eligibility key', async () => {
     await expect(
       buildCommitteeSnapshot({
-      maxTotalWeight: 1e6,
+        maxTotalWeight: 1e6,
         env: env(),
         adminAddress: ADMIN,
         eligibilityKey: '0xdeadbeef',
@@ -268,7 +266,7 @@ describe('buildCommitteeSnapshot', () => {
   it('rejects a window that ends before it starts', async () => {
     await expect(
       buildCommitteeSnapshot({
-      maxTotalWeight: 1e6,
+        maxTotalWeight: 1e6,
         env: env(),
         adminAddress: ADMIN,
         eligibilityKey: ELIGIBILITY_KEY,
@@ -278,7 +276,7 @@ describe('buildCommitteeSnapshot', () => {
     ).rejects.toThrow(/must be after/);
     await expect(
       buildCommitteeSnapshot({
-      maxTotalWeight: 1e6,
+        maxTotalWeight: 1e6,
         env: env(),
         adminAddress: ADMIN,
         eligibilityKey: ELIGIBILITY_KEY,
@@ -469,7 +467,9 @@ describe('teSolverCeiling', () => {
   });
 
   it('reads an explicit value, including exponent notation', () => {
-    expect(teSolverCeiling({ TE_SOLVER_CEILING: '2.5e13' } as any)).toBe(2.5e13);
+    expect(teSolverCeiling({ TE_SOLVER_CEILING: '2.5e13' } as any)).toBe(
+      2.5e13
+    );
     expect(teSolverCeiling({ TE_SOLVER_CEILING: '1000' } as any)).toBe(1000);
   });
 
@@ -504,7 +504,9 @@ describe('ballotParamsColumn carries the scale', () => {
     // weighted spends 100x more of the bound than basic, so the same space needs a
     // larger scale on a weighted proposal.
     const snapshot = { maxTotalWeight: 5.9e14, solverCeiling: 1e12 };
-    const weighted = parse(ballotParamsColumn(['a'], 'weighted', 100, snapshot));
+    const weighted = parse(
+      ballotParamsColumn(['a'], 'weighted', 100, snapshot)
+    );
     const basic = parse(ballotParamsColumn(['a'], 'basic', 100, snapshot));
     expect(weighted.scale).toBeGreaterThan(basic.scale);
     expect(basic.budget).toBe(1);
@@ -532,7 +534,9 @@ describe('ballotParamsColumn carries the scale', () => {
           solverCeiling: ceiling
         })
       ).scale;
-      expect(viaColumn).toBe(deriveScale(budget === 1 ? 1 : budget, v, ceiling));
+      expect(viaColumn).toBe(
+        deriveScale(budget === 1 ? 1 : budget, v, ceiling)
+      );
     }
   });
 });

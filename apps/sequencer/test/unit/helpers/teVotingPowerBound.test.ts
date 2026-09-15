@@ -28,7 +28,8 @@ jest.mock('@ethersproject/contracts', () => ({
         throw new Error('rpc down');
       }
       const v = supplies[this.address.toLowerCase()];
-      if (v === undefined) throw new Error(`no supply stubbed for ${this.address}`);
+      if (v === undefined)
+        throw new Error(`no supply stubbed for ${this.address}`);
       return { toString: () => v };
     }
   }
@@ -65,7 +66,10 @@ describe('resolveVotingPowerBound', () => {
     const r = await resolveVotingPowerBound({
       ...base,
       strategies: [
-        { name: 'erc20-balance-of', params: { address: TOKEN_A, decimals: 18 } },
+        {
+          name: 'erc20-balance-of',
+          params: { address: TOKEN_A, decimals: 18 }
+        },
         { name: 'erc20-votes', params: { address: TOKEN_B, decimals: 18 } }
       ]
     });
@@ -77,7 +81,10 @@ describe('resolveVotingPowerBound', () => {
     await resolveVotingPowerBound({
       ...base,
       strategies: [
-        { name: 'erc20-balance-of', params: { address: TOKEN_A, decimals: 18 } },
+        {
+          name: 'erc20-balance-of',
+          params: { address: TOKEN_A, decimals: 18 }
+        },
         { name: 'erc20-votes', params: { address: TOKEN_A, decimals: 18 } }
       ]
     });
@@ -99,7 +106,10 @@ describe('resolveVotingPowerBound', () => {
     const r = await resolveVotingPowerBound({
       ...base,
       strategies: [
-        { name: 'erc20-balance-of', params: { address: TOKEN_A, decimals: 18 } },
+        {
+          name: 'erc20-balance-of',
+          params: { address: TOKEN_A, decimals: 18 }
+        },
         { name: 'whitelist', params: {} }
       ]
     });
@@ -146,7 +156,10 @@ describe('resolveVotingPowerBound', () => {
         ...base,
         attempts: 3,
         strategies: [
-          { name: 'erc20-balance-of', params: { address: TOKEN_A, decimals: 18 } }
+          {
+            name: 'erc20-balance-of',
+            params: { address: TOKEN_A, decimals: 18 }
+          }
         ]
       })
     ).rejects.toBeInstanceOf(VotingPowerBoundError);
@@ -159,7 +172,10 @@ describe('resolveVotingPowerBound', () => {
         ...base,
         attempts: 1,
         strategies: [
-          { name: 'erc20-balance-of', params: { address: TOKEN_A, decimals: 18 } }
+          {
+            name: 'erc20-balance-of',
+            params: { address: TOKEN_A, decimals: 18 }
+          }
         ]
       })
     ).rejects.toThrow(/refused rather than sized from a guess/);

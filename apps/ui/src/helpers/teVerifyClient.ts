@@ -12,8 +12,8 @@
  * does, so it is a correctness fallback rather than a supported mode.
  */
 
-import { verifyAll, type VerifyAllResult, type VerifyProgress } from './teVerify';
-import type { VerifyWorkerMessage, VerifyWorkerRequest } from './teVerifyWorker';
+import { verifyAll, VerifyAllResult, VerifyProgress } from './teVerify';
+import { VerifyWorkerMessage, VerifyWorkerRequest } from './teVerifyWorker';
 
 /**
  * Thrown into `result` when `cancel()` is called.

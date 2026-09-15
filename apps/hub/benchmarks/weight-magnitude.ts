@@ -92,11 +92,23 @@ const REPEATS = 5;
  */
 const REGIMES: { label: string; sample: () => bigint }[] = [
   { label: 'w = 1 (ticket / whitelist)', sample: () => 1n },
-  { label: 'w ~ 1e4 (the OLD clamp ceiling)', sample: () => randIn(9_000n, 10_000n) },
-  { label: 'w ~ 1e6 (live: 995,500 holder)', sample: () => randIn(900_000n, 1_000_000n) },
+  {
+    label: 'w ~ 1e4 (the OLD clamp ceiling)',
+    sample: () => randIn(9_000n, 10_000n)
+  },
+  {
+    label: 'w ~ 1e6 (live: 995,500 holder)',
+    sample: () => randIn(900_000n, 1_000_000n)
+  },
   { label: 'w ~ 1e9', sample: () => randIn(9n * 10n ** 8n, 10n ** 9n) },
-  { label: 'w ~ 1e12 (fallback-bound scale)', sample: () => randIn(9n * 10n ** 11n, 10n ** 12n) },
-  { label: 'w ~ 1e15 (large-supply token)', sample: () => randIn(9n * 10n ** 14n, 10n ** 15n) }
+  {
+    label: 'w ~ 1e12 (fallback-bound scale)',
+    sample: () => randIn(9n * 10n ** 11n, 10n ** 12n)
+  },
+  {
+    label: 'w ~ 1e15 (large-supply token)',
+    sample: () => randIn(9n * 10n ** 14n, 10n ** 15n)
+  }
 ];
 
 function randIn(lo: bigint, hi: bigint): bigint {
@@ -111,7 +123,10 @@ function bitsOf(scalars: bigint[]): number {
 }
 
 /** The window count `msmG2` will derive for this chunk — reported, not assumed. */
-function windowsFor(scalars: bigint[], n: number): { c: number; windows: number } {
+function windowsFor(
+  scalars: bigint[],
+  n: number
+): { c: number; windows: number } {
   const c = n <= 1 ? 1 : Math.max(2, Math.min(8, Math.floor(Math.log2(n))));
   return { c, windows: Math.ceil(bitsOf(scalars) / c) };
 }
@@ -192,13 +207,13 @@ async function main(): Promise<void> {
     votes: [34n, 33n, 33n],
     params: PARAMS,
     attestation: {
-        electionId: new Uint8Array(32).fill(1),
-        pseudonym: new Uint8Array(32).fill(2),
-        vk: new Uint8Array(48).fill(3),
-        weight: 1n,
-        nonce: 1n,
-        signature: new Uint8Array(80)
-      }
+      electionId: new Uint8Array(32).fill(1),
+      pseudonym: new Uint8Array(32).fill(2),
+      vk: new Uint8Array(48).fill(3),
+      weight: 1n,
+      nonce: 1n,
+      signature: new Uint8Array(80)
+    }
   });
   const template = ballot.ciphertexts as [Uint8Array, Uint8Array][];
   pass(`ballot built (ℓ=${PARAMS.numCandidates}, B=${PARAMS.budget})`);
@@ -226,11 +241,15 @@ async function main(): Promise<void> {
     const msmTimes: number[] = [];
     const naiveTimes: number[] = [];
     for (let r = 0; r < REPEATS; r++) {
-      const col = freshCts(Array.from({ length: CHUNK }, (_, i) => template[i % template.length]!));
+      const col = freshCts(
+        Array.from({ length: CHUNK }, (_, i) => template[i % template.length]!)
+      );
       msmTimes.push(timeMsm(weights, col));
       freeCts(col);
 
-      const col2 = freshCts(Array.from({ length: CHUNK }, (_, i) => template[i % template.length]!));
+      const col2 = freshCts(
+        Array.from({ length: CHUNK }, (_, i) => template[i % template.length]!)
+      );
       naiveTimes.push(timeNaive(weights, col2));
       freeCts(col2);
     }
@@ -256,7 +275,9 @@ async function main(): Promise<void> {
   const { windows: mw } = windowsFor(mixed, CHUNK);
   const mixedTimes: number[] = [];
   for (let r = 0; r < REPEATS; r++) {
-    const col = freshCts(Array.from({ length: CHUNK }, (_, i) => template[i % template.length]!));
+    const col = freshCts(
+      Array.from({ length: CHUNK }, (_, i) => template[i % template.length]!)
+    );
     mixedTimes.push(timeMsm(mixed, col));
     freeCts(col);
   }

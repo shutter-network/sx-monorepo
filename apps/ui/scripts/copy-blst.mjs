@@ -7,8 +7,8 @@
 // than checked-in binaries that can silently drift from the pinned version.
 //
 // This mirrors what the generalised-el-gamal frontends do with the same package.
-import { createRequire } from 'node:module';
 import { copyFileSync, mkdirSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 

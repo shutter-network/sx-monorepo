@@ -1,6 +1,6 @@
 import { GegDigestError } from './gegDigests';
 
-export function canonicalWeight(value: unknown): number {
+function canonicalWeight(value: unknown): number {
   let weight: bigint;
   try {
     weight = BigInt(value as any);

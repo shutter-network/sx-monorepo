@@ -7,15 +7,11 @@
  * stop is refused.
  */
 
-import { keccak256 } from '@ethersproject/keccak256';
 import {
   buildBallot,
-  canonicalBallotMessage,
-  encodeSchnorr,
   G2Point,
   initCurves,
-  schnorrKeygen,
-  schnorrSign
+  schnorrKeygen
 } from '@shutter-network/urban-verified-crypto';
 import {
   eligibilityPublicKey,
@@ -37,7 +33,6 @@ async function castBallot(opts: {
 }) {
   const { sk, vk } = schnorrKeygen();
   const vkHex = toHex(vk.toBytes());
-  const mpkKey = schnorrKeygen();
   const mpk = G2Point.generator();
 
   const weight = BigInt(opts.weight ?? 1);

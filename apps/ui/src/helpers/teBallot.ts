@@ -16,12 +16,12 @@
 import { arrayify, hexlify } from '@ethersproject/bytes';
 import { keccak256 } from '@ethersproject/keccak256';
 import {
+  Attestation,
   BallotVerifyParams,
   buildBallot,
   G1Point,
   initCurves,
-  schnorrKeygen,
-  type Attestation
+  schnorrKeygen
 } from '@shutter-network/urban-verified-crypto';
 import { BallotCredential, requestBallotCredential } from './teCredential';
 

@@ -1,9 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import {
-  scaleWeight,
-  teVoteWeight,
-  totalVotingPower
-} from './teVoteWeight';
+import { scaleWeight, teVoteWeight, totalVotingPower } from './teVoteWeight';
 
 /**
  * The per-voter cap this file used to pin is gone (W1): voting power is counted as
@@ -33,7 +29,11 @@ describe('teVoteWeight', () => {
   it('counts voting power in full — no cap', () => {
     // The whole point of the change: a holder of 25,000 used to be counted as
     // 10,000 on a weighted proposal.
-    expect(teVoteWeight(25_000)).toEqual({ kind: 'ok', counted: 25_000, scale: 1 });
+    expect(teVoteWeight(25_000)).toEqual({
+      kind: 'ok',
+      counted: 25_000,
+      scale: 1
+    });
     expect(teVoteWeight(2_000_000)).toEqual({
       kind: 'ok',
       counted: 2_000_000,

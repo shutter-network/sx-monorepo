@@ -1,11 +1,7 @@
-import { keccak256 } from '@ethersproject/keccak256';
 import {
   buildBallot,
-  canonicalBallotMessage,
-  encodeSchnorr,
   G2Point,
-  schnorrKeygen,
-  schnorrSign
+  schnorrKeygen
 } from '@shutter-network/urban-verified-crypto';
 import { mintAttestation } from '../../src/helpers/gegAttestation';
 

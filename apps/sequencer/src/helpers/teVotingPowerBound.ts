@@ -1,11 +1,9 @@
 import { Contract } from '@ethersproject/contracts';
-import { getProvider } from './provider';
 import log from './log';
+import { getProvider } from './provider';
 
 /** Minimal ERC-20/721 fragment — `totalSupply()` is all this needs. */
-const TOTAL_SUPPLY_ABI = [
-  'function totalSupply() view returns (uint256)'
-];
+const TOTAL_SUPPLY_ABI = ['function totalSupply() view returns (uint256)'];
 
 /**
  * How each known strategy yields a supply.
@@ -23,7 +21,7 @@ const SUPPLY_STRATEGIES: Record<string, { decimals: boolean }> = {
   'erc20-balance-of': { decimals: true },
   'erc20-votes': { decimals: true },
   'erc20-balance-of-delegation': { decimals: true },
-  'erc721': { decimals: false },
+  erc721: { decimals: false },
   'erc721-enumerable': { decimals: false }
 };
 
@@ -45,7 +43,11 @@ export interface VotingPowerBound {
 
 const READ_TIMEOUT_MS = 5000;
 
-function withTimeout<T>(work: Promise<T>, ms: number, what: string): Promise<T> {
+function withTimeout<T>(
+  work: Promise<T>,
+  ms: number,
+  what: string
+): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     const timer = setTimeout(
       () => reject(new Error(`${what} timed out after ${ms}ms`)),
@@ -70,7 +72,11 @@ async function readSupply(
   block: number,
   decimals: number
 ): Promise<number> {
-  const contract = new Contract(address, TOTAL_SUPPLY_ABI, getProvider(network));
+  const contract = new Contract(
+    address,
+    TOTAL_SUPPLY_ABI,
+    getProvider(network)
+  );
   const raw = await withTimeout<{ toString(): string }>(
     contract.totalSupply({ blockTag: block }),
     READ_TIMEOUT_MS,

@@ -6,10 +6,10 @@ import {
   AuditBallot,
   AuditPayload,
   BallotsPayload,
+  diagnoseTally,
   fingerprintHex,
   shortHex,
-  verifyTally,
-  diagnoseTally
+  verifyTally
 } from './teVerify';
 
 const PROPOSAL_ID = `0x${'11'.repeat(32)}`;
@@ -536,7 +536,6 @@ describe('aggregateBallots: the committee admitted set', () => {
     expect(result.aggregateMatches).toBe(true);
   });
 });
-
 
 // ---------------------------------------------------------------------------
 // diagnoseTally: why there is no verified tally, derived rather than trusted

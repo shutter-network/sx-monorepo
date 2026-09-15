@@ -19,8 +19,13 @@
  * and re-parsed — which matters, because a tally can exceed 2^53.
  */
 
-import { verifyAll, type VerifyAllResult, type VerifyProgress } from './teVerify';
-import type { AuditPayload, BallotsPayload } from './teVerify';
+import {
+  AuditPayload,
+  BallotsPayload,
+  verifyAll,
+  VerifyAllResult,
+  VerifyProgress
+} from './teVerify';
 
 export interface VerifyWorkerRequest {
   proposalId: string;

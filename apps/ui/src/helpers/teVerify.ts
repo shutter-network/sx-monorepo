@@ -44,8 +44,8 @@ import {
   Ciphertext,
   decodeDLEQ,
   G2Point,
-  PartialDecryption,
   msmCt,
+  PartialDecryption,
   Transcript,
   verifyTallyAgainstTotals
 } from '@shutter-network/urban-verified-crypto';

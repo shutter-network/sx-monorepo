@@ -41,7 +41,7 @@ const config: KnipConfig = {
       ignore: ['benchmarks/**', 'scripts/seed-mixed-vp-proposal.ts']
     },
     'apps/mana': {
-      entry: ['src/index.ts', 'knexfile.ts', 'migrations/*.ts'],
+      entry: ['src/index.ts', 'src/db.ts', 'knexfile.ts', 'migrations/*.ts'],
       knex: false,
       ignoreDependencies: ['pg']
     },
@@ -49,6 +49,9 @@ const config: KnipConfig = {
     'apps/sequencer': {
       entry: ['src/**/*.ts', 'scripts/**/*.ts'],
       ignoreDependencies: ['ajv']
+    },
+    'apps/te-data-layer': {
+      ignoreDependencies: ['ts-node']
     },
     'apps/ui': {
       entry: [
@@ -82,7 +85,7 @@ const config: KnipConfig = {
     'packages/geg-parity': {
       // Tests and the vector-sync script are the whole package; it ships no
       // source, so there is no entry point to walk from.
-      entry: ['tests/**/*.ts', 'scripts/*.mjs']
+      entry: ['tests/**/*.ts', 'scripts/*.{ts,mjs}']
     },
     'packages/sx.js': {
       ignoreBinaries: ['anvil', 'starknet-devnet']

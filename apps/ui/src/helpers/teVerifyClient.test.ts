@@ -26,7 +26,11 @@ const request = {
 
 describe('runVerify — main-thread fallback', () => {
   it('passes the result through when the run completes', async () => {
-    verifyAll.mockResolvedValueOnce({ ballots: 'B', tally: 'T', derivedBound: 7n });
+    verifyAll.mockResolvedValueOnce({
+      ballots: 'B',
+      tally: 'T',
+      derivedBound: 7n
+    });
     await expect(runVerify(request).result).resolves.toEqual({
       ballots: 'B',
       tally: 'T',
@@ -57,7 +61,10 @@ describe('runVerify — main-thread fallback', () => {
     run.cancel();
     finish({ ballots: 'B', tally: 'T', derivedBound: 1n });
     const settled = await Promise.race([
-      run.result.then(() => 'resolved', () => 'rejected'),
+      run.result.then(
+        () => 'resolved',
+        () => 'rejected'
+      ),
       new Promise(r => setTimeout(() => r('pending'), 1000))
     ]);
     expect(settled).toBe('rejected');

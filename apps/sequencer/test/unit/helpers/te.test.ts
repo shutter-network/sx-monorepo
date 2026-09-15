@@ -91,7 +91,10 @@ describe('helpers/te', () => {
           JSON.stringify({ pseudonym: `0x${'00'.repeat(32)}`, attestation }),
           ELIG_KEY
         );
-        expect(r).toEqual({ ok: false, reason: 'ballot_carries_no_credential' });
+        expect(r).toEqual({
+          ok: false,
+          reason: 'ballot_carries_no_credential'
+        });
       }
     );
 

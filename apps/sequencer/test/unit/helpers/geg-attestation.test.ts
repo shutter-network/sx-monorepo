@@ -138,7 +138,6 @@ describe('ATTESTATION_V1 parity with the protocol corpus', () => {
     expect(verified).toBe(false);
   });
 
-
   // The other direction. Verifying our own credential with our own verifier
   // would pass under any self-consistent framing, so what closes the loop is
   // geg's *Python* verifier accepting credentials minted here: this emits the
@@ -260,9 +259,7 @@ describe('verifyAttestation — the ingest self-check', () => {
   it('accepts a credential it just minted', async () => {
     const args = base();
     const signature = await mintAttestation(args);
-    await expect(
-      verifyAttestation({ ...args, signature })
-    ).resolves.toBe(true);
+    await expect(verifyAttestation({ ...args, signature })).resolves.toBe(true);
   });
 
   // Every field is bound into the signed message, so changing any one of them
@@ -322,9 +319,9 @@ describe('verifyAttestation — the ingest self-check', () => {
     ['wrong length', '0xdeadbeef'],
     ['empty', '0x']
   ])('returns false for a %s signature', async (_label, signature) => {
-    await expect(
-      verifyAttestation({ ...base(), signature })
-    ).resolves.toBe(false);
+    await expect(verifyAttestation({ ...base(), signature })).resolves.toBe(
+      false
+    );
   });
 
   it('rejects a signature from a different issuer', async () => {
@@ -334,9 +331,9 @@ describe('verifyAttestation — the ingest self-check', () => {
       '0x0000000000000000000000000000000000000000000000000000000000009999';
     resetIssuer();
     try {
-      await expect(
-        verifyAttestation({ ...args, signature })
-      ).resolves.toBe(false);
+      await expect(verifyAttestation({ ...args, signature })).resolves.toBe(
+        false
+      );
     } finally {
       process.env.TE_ELIGIBILITY_PRIVATE_KEY = ISSUER_SK;
       resetIssuer();

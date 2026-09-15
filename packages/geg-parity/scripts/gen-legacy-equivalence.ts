@@ -8,7 +8,7 @@
  * from git history instead, which is possible because the file is still reachable
  * at `master:apps/sequencer/src/helpers/te.ts`.
  *
- *   bunx ts-node ./scripts/geg/gen-legacy-equivalence.ts
+ *   bunx ts-node ./packages/geg-parity/scripts/gen-legacy-equivalence.ts
  *
  * **Equivalence is asserted only where behaviour was not deliberately changed.**
  * Legacy rounded voting power to an integer and dropped anything rounding to zero,
@@ -38,10 +38,7 @@ import {
   scalarMulCt
 } from '@shutter-network/urban-verified-crypto';
 
-const OUT = join(
-  __dirname,
-  '../../packages/geg-parity/vectors/legacy-equivalence.json'
-);
+const OUT = join(__dirname, '../vectors/legacy-equivalence.json');
 
 const PROPOSAL_ID = `0x${'7e'.repeat(32)}`;
 const NUM_CANDIDATES = 3;
@@ -139,7 +136,7 @@ async function main() {
   const corpus = {
     _comment:
       'Legacy (pre-geg) tally outputs, recovered from master:apps/sequencer/src/helpers/te.ts. ' +
-      'Regenerate with scripts/geg/gen-legacy-equivalence.ts; never hand-edit. ' +
+      'Regenerate with packages/geg-parity/scripts/gen-legacy-equivalence.ts; never hand-edit. ' +
       'Only `equivalent` is an equivalence claim — see the script header.',
     proposalId: PROPOSAL_ID,
     numCandidates: NUM_CANDIDATES,

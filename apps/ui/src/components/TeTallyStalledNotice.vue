@@ -57,9 +57,7 @@ const authorities = computed(() => {
 const isAdmin = computed(
   () =>
     !!account.value &&
-    authorities.value.some(
-      a => a.toLowerCase() === account.value.toLowerCase()
-    )
+    authorities.value.some(a => a.toLowerCase() === account.value.toLowerCase())
 );
 
 async function refresh() {
