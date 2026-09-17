@@ -19,9 +19,7 @@ const config: KnipConfig = {
       ignoreDependencies: ['@logtail/pino', 'pino-pretty', 'ts-node']
     },
     'apps/hub': {
-      entry: ['src/index.ts'],
-      // Run by hand against a live stack, not imported by the service.
-      ignore: ['benchmarks/**', 'scripts/seed-mixed-vp-proposal.ts']
+      entry: ['src/index.ts']
     },
     'apps/mana': {
       entry: ['src/index.ts', 'src/db.ts', 'knexfile.ts', 'migrations/*.ts'],
